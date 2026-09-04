@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+venv/
+
+# Node/browser tests
+node_modules/
+coverage/
+playwright-report/
+test-results/
+
+# Reticom runtime state and Reticulum identities
+runtime/
+configs/*/storage/
+.device-test/
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.keystore
+*.jks
+android/local.properties
+android/transport.properties
+
+# Android and Gradle
+.android-toolchain/
+android/.gradle/
+android/.idea/
+android/app/build/
+android/build/
+*.apk
+*.apk.sha256
+*.aab
+
+# Local QA captures and device dumps
+tmp-*
+*.log
+*.pid
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local design-agent context
+.impeccable.md

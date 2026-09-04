@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retium"
+version = "0.1.0"
+description = "Map-first field coordination over Reticulum"
+requires-python = ">=3.11"
+dependencies = [
+  "rns==1.5.2",
+  "lxmf==1.1.1",
+  "fastapi==0.141.1",
+  "uvicorn[standard]==0.52.4",
+  "qrcode==8.2",
+  "Pillow==12.3.0",
+  "zxing-cpp==3.1.1",
+  "faster-whisper==1.2.1",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

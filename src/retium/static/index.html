@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101712">
+  <title>Reticom</title>
+  <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css?v=6.6.0">
+  <link rel="stylesheet" href="/styles.css?v=20260904-2">
+</head>
+<body>
+  <div class="noise"></div>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">R</span><span>RETICOM</span></div>
+    <div class="network-pill"><i id="networkDot"></i><span id="networkLabel">Starting Reticulum…</span></div>
+    <button id="incomingAlertsToggle" class="incoming-alerts-toggle hidden" aria-pressed="false" aria-label="Arm incoming text to speech and voice autoplay" title="Arm incoming text to speech and voice autoplay">
+      <svg class="alerts-sound-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4h3l4 3V7L8 10H5Zm10-1.5a5 5 0 0 1 0 7M17.5 6a9 9 0 0 1 0 12"/></svg>
+      <svg class="alerts-muted-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4h3l4 3V7L8 10H5"/><path d="m16 9 5 5m0-5-5 5"/></svg>
+      <span id="incomingAlertsLabel">ARM ALERTS</span>
+    </button>
+    <button id="userSettingsToggle" class="user-settings-toggle hidden" aria-expanded="false" aria-label="Open user settings for FIELD-1" title="User settings">
+      <svg class="user-settings-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="8.5" cy="7" r="3.25"/>
+        <path d="M2.75 19.5v-.7a5.75 5.75 0 0 1 8.75-4.9"/>
+        <circle cx="17.25" cy="16.75" r="2.5"/>
+        <path d="M17.25 12.25v1.1m0 6.8v1.1m4.5-4.5h-1.1m-6.8 0h-1.1m7.68-3.18-.78.78m-4.8 4.8-.78.78m6.36 0-.78-.78m-4.8-4.8-.78-.78"/>
+      </svg>
+      <span id="topbarCallsign">FIELD-1</span>
+    </button>
+    <button id="adminSettingsToggle" class="admin-settings-toggle hidden" aria-expanded="false" aria-label="Open team admin settings" title="Team admin settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 6v5c0 5-3.2 8.3-8 10-4.8-1.7-8-5-8-10V6l8-3Z"/><path d="M9 12h6m-3-3v6"/></svg>
+      <span>ADMIN</span>
+    </button>
+    <div class="role" id="roleLabel">NODE</div>
+  </header>
+
+  <aside id="userSettingsPanel" class="settings-panel hidden" aria-label="User settings">
+    <div class="settings-head"><div><span class="eyebrow">USER SETTINGS</span><h2>Field identity</h2></div><button id="closeUserSettings" class="text-button">CLOSE</button></div>
+    <label>CALLSIGN<input id="settingsCallsign" maxlength="24" autocomplete="nickname"></label>
+    <fieldset class="icon-picker">
+      <legend>CALLSIGN ICON</legend>
+      <button type="button" data-icon="dot" aria-label="Dot icon"><span>●</span><small>DOT</small></button>
+      <button type="button" data-icon="diamond" aria-label="Diamond icon"><span>◆</span><small>DIAMOND</small></button>
+      <button type="button" data-icon="triangle" aria-label="Triangle icon"><span>▲</span><small>TRIANGLE</small></button>
+      <button type="button" data-icon="square" aria-label="Square icon"><span>■</span><small>SQUARE</small></button>
+      <button type="button" data-icon="cross" aria-label="Cross icon"><span>✚</span><small>CROSS</small></button>
+      <button type="button" data-icon="hex" aria-label="Hexagon icon"><span>⬢</span><small>HEX</small></button>
+      <button type="button" data-icon="star" aria-label="Star icon"><span>★</span><small>STAR</small></button>
+      <button type="button" data-icon="target" aria-label="Target icon"><span>◎</span><small>TARGET</small></button>
+      <button type="button" data-icon="arrow" aria-label="Arrow icon"><span>➤</span><small>ARROW</small></button>
+      <button type="button" data-icon="chevron" aria-label="Chevron icon"><span>⟫</span><small>CHEVRON</small></button>
+      <button type="button" data-icon="bolt" aria-label="Bolt icon"><span>ϟ</span><small>BOLT</small></button>
+      <button type="button" data-icon="beacon" aria-label="Beacon icon"><span>◉</span><small>BEACON</small></button>
+    </fieldset>
+    <fieldset class="color-picker">
+      <legend>MARKER COLOR</legend>
+      <button type="button" data-color="moss" aria-label="Moss color" style="--swatch:#82936f"><span></span><small>MOSS</small></button>
+      <button type="button" data-color="amber" aria-label="Amber color" style="--swatch:#a48d61"><span></span><small>AMBER</small></button>
+      <button type="button" data-color="rust" aria-label="Rust color" style="--swatch:#9a6552"><span></span><small>RUST</small></button>
+      <button type="button" data-color="steel" aria-label="Steel color" style="--swatch:#66818c"><span></span><small>STEEL</small></button>
+      <button type="button" data-color="teal" aria-label="Teal color" style="--swatch:#5f887e"><span></span><small>TEAL</small></button>
+      <button type="button" data-color="plum" aria-label="Plum color" style="--swatch:#806d84"><span></span><small>PLUM</small></button>
+    </fieldset>
+    <section id="ttsVoiceSettings" class="tts-settings hidden" aria-labelledby="ttsVoiceLabel">
+      <label id="ttsVoiceLabel" for="ttsVoiceSelect">TTS VOICE</label>
+      <div class="tts-voice-control">
+        <select id="ttsVoiceSelect" disabled><option>Loading phone voices…</option></select>
+        <button id="previewTtsVoice" type="button" class="secondary compact" disabled>PREVIEW</button>
+      </div>
+      <small id="ttsVoiceStatus">Used for incoming text and assignment announcements on this phone.</small>
+    </section>
+    <section id="offlineMapSettings" class="offline-map-settings" aria-labelledby="offlineMapLabel">
+      <div class="offline-map-head">
+        <div><span class="data-label">MAP STORAGE</span><strong id="offlineMapLabel">Offline maps</strong></div>
+        <span id="offlineMapStorage">0 B</span>
+      </div>
+      <p>Save the area currently visible on the map. Reticom uses it automatically when Internet access drops.</p>
+      <label for="offlineMapDetail">MAP DETAIL</label>
+      <select id="offlineMapDetail">
+        <option value="12" selected>AREA · ROADS</option>
+        <option value="14">LOCAL · STREETS + BUILDINGS</option>
+      </select>
+      <div id="offlineMapEstimate" class="offline-map-estimate" aria-live="polite">Open the map to select an area.</div>
+      <button id="downloadOfflineMap" type="button" disabled>DOWNLOAD CURRENT VIEW <span>↓</span></button>
+      <div id="offlineMapList" class="offline-map-list empty-copy">No offline areas saved.</div>
+      <small>Offline downloads use OpenFreeMap vector data. Satellite imagery still needs Internet access.</small>
+    </section>
+    <details id="advancedMapSettings" class="advanced-network-settings advanced-map-settings">
+      <summary>
+        <span><small>ADVANCED SETTINGS</small><strong>Map display</strong></span>
+        <b id="mapGridSettingsState">GRID ON</b>
+      </summary>
+      <div class="advanced-network-body">
+        <div class="settings-toggle-row">
+          <span><strong>MGRS communication grid</strong><small>Show the worldwide grid and map-centre reference.</small></span>
+          <button id="mapGridSettingsToggle" type="button" class="secondary compact" aria-pressed="true">TURN OFF</button>
+        </div>
+      </div>
+    </details>
+    <details id="advancedNetworkSettings" class="advanced-network-settings">
+      <summary>
+        <span><small>ADVANCED NETWORK</small><strong>Reticulum node</strong></span>
+        <b id="networkRoutingMode">AUTO</b>
+      </summary>
+      <div class="advanced-network-body">
+        <div class="network-route-strip">
+          <span>NEARBY</span><i></i><span>BOOTSTRAP</span><i></i><span>DISCOVERED</span>
+        </div>
+        <p id="networkRoutingSummary">Automatic routing uses nearby Wi-Fi and the built-in community bootstrap pool.</p>
+        <label for="customNodeHost">CHOSEN NODE · OPTIONAL</label>
+        <div class="custom-node-control">
+          <input id="customNodeHost" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="node.example.org">
+          <input id="customNodePort" type="number" inputmode="numeric" min="1" max="65535" value="4242" aria-label="Chosen node port">
+        </div>
+        <button id="saveNetworkSettings" type="button" class="secondary">SAVE NETWORK SETTING</button>
+        <small id="networkSettingsStatus">Leave blank for automatic routing. A chosen node stays connected while the community pool remains available as fallback.</small>
+      </div>
+    </details>
+    <p class="safety-copy">This callsign, icon, and color are signed into your Reticulum events. Your cryptographic identity remains unchanged.</p>
+    <button id="saveUserSettings">SAVE SETTINGS <span>→</span></button>
+    <div id="teamSessionSettings" class="team-session-settings hidden">
+      <span class="data-label">TEAM SESSION</span>
+      <strong id="settingsTeamName">—</strong>
+      <small id="fieldAdminMode" class="hidden">TEAM ADMIN MODE · You can remove shared team content.</small>
+      <p>Leaving removes this team from Field. Your identity and user settings stay on this device.</p>
+      <button id="leaveTeam" class="danger-button">LEAVE TEAM</button>
+    </div>
+  </aside>
+
+  <aside id="adminSettingsPanel" class="settings-panel admin-settings-panel hidden" aria-label="Team admin settings">
+    <div class="settings-head"><div><span class="eyebrow">TEAM ADMIN</span><h2 id="adminTeamName">Team controls</h2></div><button id="closeAdminSettings" class="text-button">CLOSE</button></div>
+    <section class="admin-team-summary">
+      <div><span class="data-label">JOIN CODE</span><code id="adminJoinCode">—</code></div>
+      <button id="adminCopyJoinCode" type="button" class="secondary compact">COPY</button>
+      <small id="adminHostState">Authenticated team administration over Reticulum.</small>
+    </section>
+    <section class="admin-control-list">
+      <div class="settings-toggle-row">
+        <span><strong>Tasks module</strong><small>Shared assignments and team task status.</small></span>
+        <button id="fieldToggleTasksModule" type="button" class="secondary compact" aria-pressed="false">OFF</button>
+      </div>
+      <div class="settings-toggle-row">
+        <span><strong>Everyone is admin</strong><small>All verified members can remove shared content and use these controls.</small></span>
+        <button id="fieldToggleEveryoneAdmin" type="button" class="secondary compact" aria-pressed="false">OFF</button>
+      </div>
+    </section>
+    <section class="admin-danger-zone">
+      <span class="data-label">COMMUNICATION HISTORY</span>
+      <p>Remove team chat and recorded voice from the host. Map intel, tasks and operators stay intact.</p>
+      <button id="fieldClearMessageHistory" type="button" class="danger-button" data-confirm="false">CLEAR COMMS HISTORY</button>
+    </section>
+    <small id="adminSettingsStatus">Changes are applied by the team host and announced over Reticulum.</small>
+  </aside>
+
+  <main id="commandSetup" class="onboarding hidden">
+    <section class="setup-sheet">
+      <span class="eyebrow">COMMAND</span>
+      <h1>Create a team</h1>
+      <p>Name the team, then share its join code with your operators.</p>
+      <label>TEAM NAME<input id="teamNameInput" maxlength="40" placeholder="e.g. North Team" autofocus></label>
+      <label class="module-choice"><input id="createTasksModule" type="checkbox"><span><b>Tasks</b><small>Assignments and a shared to-do list</small></span></label>
+      <button id="createTeam">CREATE TEAM <span>→</span></button>
+      <p class="safety-copy">A join code pairs directly with this Reticulum destination. Member approval and revocation come next.</p>
+    </section>
+  </main>
+
+  <main id="commandView" class="command hidden">
+    <aside class="rail panel">
+      <div class="team-block">
+        <div class="eyebrow">TEAM</div>
+        <div id="commandTeamReady">
+          <h2 id="commandTeamName">—</h2>
+          <span class="data-label">JOIN CODE</span>
+          <code id="commandJoinCode" class="join-code">—</code>
+          <div class="join-actions">
+            <button id="copyJoinCode" class="secondary compact">COPY CODE</button>
+            <button id="toggleQr" class="secondary compact">SHOW QR</button>
+          </div>
+          <div id="qrPanel" class="qr-panel hidden">
+            <img id="teamQr" alt="QR code containing this team's Reticom join code">
+            <span>Scan from a Field node</span>
+          </div>
+        </div>
+        <p class="safety-copy">Pair a Field node directly with this team.</p>
+      </div>
+      <div class="section-rule"></div>
+      <div class="module-control">
+        <div><span class="eyebrow">MODULE</span><strong>Tasks</strong></div>
+        <button id="toggleTasksModule" class="secondary compact">ENABLE</button>
+      </div>
+      <div class="section-rule"></div>
+      <div class="module-control team-permission-control">
+        <div><span class="eyebrow">TEAM PERMISSION</span><strong>Everyone is admin</strong><small>Members can remove any team message, marker or drawing.</small></div>
+        <button id="toggleEveryoneAdmin" class="secondary compact" aria-pressed="false">OFF</button>
+      </div>
+      <div class="section-rule"></div>
+      <div class="eyebrow">VERIFIED OPERATORS</div>
+      <h2>Operators</h2>
+      <div id="operatorList" class="operator-list empty-copy">Waiting for signed position events.</div>
+      <div class="rail-footer">
+        <span>DESTINATION</span>
+        <code id="destinationHash">—</code>
+      </div>
+    </aside>
+
+    <section class="map-panel panel" aria-label="Operational map">
+      <div id="map" class="map">
+        <div id="mapCanvas" class="map-canvas"></div>
+        <div class="command-map-toggles">
+          <button id="commandMapStyleToggle" class="secondary compact map-style-toggle" type="button" aria-pressed="false">SATELLITE</button>
+        </div>
+        <button id="commandGridReference" class="map-grid-reference" type="button" title="Copy MGRS reference at map centre">MGRS LOADING</button>
+        <div id="mapEmpty" class="map-empty"><b>NO TEAM POSITIONS</b><span>The real basemap is ready. Verified operators and markers appear after a Field node shares them.</span></div>
+        <div class="map-edit-hint">RIGHT-CLICK / HOLD TO EDIT</div>
+        <div id="commandLatestMessages" class="latest-messages command-latest-messages hidden" aria-live="polite"></div>
+        <div id="commandMapRadialMenu" class="map-radial hidden" role="menu" aria-label="Command map quick actions">
+          <button type="button" class="radial-action radial-warning" data-quick-marker="warning" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2.5 20h19L12 3Z"/><path d="M12 9v4M12 16h.01"/></svg><span>WARNING</span></button>
+          <button type="button" class="radial-action radial-waypoint" data-quick-marker="waypoint" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 9-9 9-9-9 9-9Z"/><circle cx="12" cy="12" r="2"/></svg><span>WAYPOINT</span></button>
+          <button type="button" class="radial-action radial-observation" data-quick-marker="observation" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 6 12 6s9.5 6 9.5 6S18 18 12 18s-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg><span>OBSERVE</span></button>
+          <button type="button" class="radial-action radial-tactical" data-map-marker-palette role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 4 4-4 4-4-4 4-4ZM5 13l4 4-4 4-4-4 4-4Zm14 0 4 4-4 4-4-4 4-4Z"/></svg><span>TACTICAL</span></button>
+          <button type="button" class="radial-action radial-obstacle" data-quick-marker="obstacle" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m6.5 6.5 11 11"/></svg><span>OBSTACLE</span></button>
+          <button type="button" class="radial-action radial-draw" data-map-radial-page="draw" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1L19.3 8.2l-3.5-3.5L5 15.5 4 20Z"/><path d="m13.8 6.8 3.5 3.5"/></svg><span>DRAW</span></button>
+          <button type="button" class="radial-action radial-tool radial-slot-1 hidden" data-map-text role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M12 5v14M8 19h8"/></svg><span>TEXT</span></button>
+          <button type="button" class="radial-action radial-tool radial-slot-2 hidden" data-map-draw="arrow" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18 19 5M11 5h8v8"/></svg><span>ARROW</span></button>
+          <button type="button" class="radial-action radial-tool radial-slot-3 hidden" data-map-draw="trace" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16-.8 4.8L8 20l10.8-10.8-4-4L4 16Z"/><path d="m12.8 7.2 4 4"/></svg><span>TRACE</span></button>
+          <button type="button" class="radial-close" data-close-map-radial aria-label="Close map actions"><span aria-hidden="true">×</span><small>CLOSE</small></button>
+        </div>
+        <div id="commandMapContextMenu" class="map-context-menu hidden" role="menu" aria-label="Command map actions">
+          <button type="button" data-quick-marker="warning" role="menuitem"><span class="context-menu-icon warning">!</span><span>Add warning</span></button>
+          <button type="button" data-quick-marker="waypoint" role="menuitem"><span class="context-menu-icon">◇</span><span>Add waypoint</span></button>
+          <button type="button" data-quick-marker="observation" role="menuitem"><span class="context-menu-icon">◉</span><span>Add observation</span></button>
+          <button type="button" data-quick-marker="obstacle" role="menuitem"><span class="context-menu-icon">×</span><span>Add obstacle</span></button>
+          <button type="button" data-map-marker-palette role="menuitem"><span class="context-menu-icon">◆</span><span>TACTICAL MARKERS…</span></button>
+          <div class="context-menu-separator" role="separator"></div>
+          <button type="button" data-map-text role="menuitem"><span class="context-menu-icon">T</span><span>Add text</span></button>
+          <button type="button" data-map-draw="arrow" role="menuitem"><span class="context-menu-icon">↗</span><span>Draw arrow</span></button>
+          <button type="button" data-map-draw="trace" role="menuitem"><span class="context-menu-icon">∿</span><span>Draw trace</span></button>
+        </div>
+        <div id="commandMapMarkerPalette" class="map-marker-palette hidden" role="menu" aria-label="Command tactical markers">
+          <header><div><span>TACTICAL MARKERS</span><small>PERSISTENT · REMOVE MANUALLY</small></div><button type="button" data-close-map-radial aria-label="Close tactical markers">×</button></header>
+          <div class="map-marker-palette-body"></div>
+        </div>
+        <form id="commandMapTextComposer" class="map-text-composer hidden">
+          <label>MAP TEXT<input type="text" maxlength="80" autocomplete="off" placeholder="Type a short label"></label>
+          <div><button type="button" class="text-button" data-cancel-map-text>CANCEL</button><button type="submit" class="compact">ADD</button></div>
+        </form>
+        <div id="commandMapDrawControls" class="map-draw-controls command-map-draw-controls hidden">
+          <span>DRAW TRACE</span>
+          <button type="button" class="text-button" data-clear-map-drawing>CLEAR</button>
+          <button type="button" class="text-button" data-cancel-map-drawing>CANCEL</button>
+          <button type="button" class="compact" data-send-map-drawing disabled>SEND</button>
+        </div>
+        <div class="map-corners"><span id="commandMapCredit"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OPENSTREETMAP</a></span><span id="mapBounds">WORLD</span></div>
+      </div>
+    </section>
+
+    <div class="right-stack">
+      <section class="command-comms panel">
+        <div class="module-head">
+          <div><span class="eyebrow">TEAM COMMS</span><h2>Transmit</h2></div>
+          <span id="commandSenderBadge" class="command-sender">◉ COMMAND</span>
+        </div>
+        <div class="command-comms-body">
+          <div class="command-text-composer">
+            <textarea id="commandMessage" maxlength="160" rows="2" placeholder="Message the team"></textarea>
+            <button id="sendCommandMessage" class="compact">SEND <span>→</span></button>
+          </div>
+          <button id="commandPttButton" class="ptt-button command-ptt"><span class="ptt-dot"></span><b>HOLD TO BROADCAST</b><small>CONNECTING LIVE · CLIP FALLBACK</small></button>
+        </div>
+        <div id="commandDeliveryState" class="delivery-state command-delivery">SIGNED · NEXT RETICULUM SYNC</div>
+      </section>
+      <section id="commandTasksModule" class="tasks-panel panel hidden">
+        <div class="module-head"><div><span class="eyebrow">TASKS MODULE</span><h2>Assignments</h2></div><span class="module-state">ACTIVE</span></div>
+        <div class="task-create"><input id="taskTitle" maxlength="100" placeholder="What needs doing?"><input id="taskAssignee" maxlength="24" placeholder="Callsign (optional)"><button id="createTask" class="compact">ADD TASK</button></div>
+        <div id="commandTaskList" class="task-list empty-copy">No tasks yet.</div>
+      </section>
+      <aside class="timeline panel">
+        <div class="module-head timeline-head">
+          <div><span class="eyebrow">NETWORK TIMELINE</span><h2>Received intel</h2></div>
+          <button id="clearMessageHistory" class="text-button danger-action" data-confirm="false" aria-label="Clear team chat and voice history">CLEAR COMMS</button>
+        </div>
+        <p class="cleanup-scope">CHAT + VOICE ONLY · KEEPS MAP, TASKS, OPERATORS</p>
+        <div id="timeline" class="timeline-list empty-copy">No packets received yet. This view does not seed demo data.</div>
+      </aside>
+    </div>
+  </main>
+
+  <main id="fieldSetup" class="onboarding hidden">
+    <section class="setup-sheet">
+      <span class="eyebrow">FIELD</span>
+      <h1>Join or create a team</h1>
+      <p>Join an existing Reticulum team, or host a new one directly on this device.</p>
+      <label>CALLSIGN<input id="joinCallsign" maxlength="24" value="FIELD-1"></label>
+      <label>JOIN CODE<input id="joinCodeInput" maxlength="48" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="RTM1-…"></label>
+      <div class="join-actions">
+        <button id="joinTeam">JOIN CODE <span>→</span></button>
+        <button id="scanQr" class="secondary">SCAN QR</button>
+      </div>
+      <div id="qrScanner" class="qr-scanner hidden">
+        <video id="qrVideo" autoplay muted playsinline></video>
+        <div><span id="qrScanStatus">Point the camera at the team QR code.</span><button id="stopQr" class="text-button">CANCEL</button></div>
+      </div>
+      <div class="setup-divider"><span>OR CREATE</span></div>
+      <label>TEAM NAME<input id="fieldTeamNameInput" maxlength="40" placeholder="e.g. North Team"></label>
+      <label class="module-choice"><input id="fieldCreateTasksModule" type="checkbox"><span><b>Tasks</b><small>Start with shared assignments enabled</small></span></label>
+      <button id="fieldCreateTeam">CREATE + HOST TEAM <span>→</span></button>
+      <p class="safety-copy">This device becomes the team host and keeps its Reticulum destination available while Reticom is running.</p>
+      <div class="nearby-head"><span class="data-label">NEARBY ON RETICULUM</span><button id="refreshNearby" class="text-button">SCAN</button></div>
+      <div id="nearbyTeams" class="nearby-list empty-copy">Listening for team announces on this network.</div>
+      <p class="safety-copy">QR camera frames are decoded on this local node. Same-Wi-Fi teams use Reticulum announces. Bluetooth requires a native mobile transport.</p>
+      <div class="setup-identity"><span class="data-label">FIELD IDENTITY</span><code id="setupFieldIdentity">—</code></div>
+    </section>
+  </main>
+
+  <main id="fieldView" class="field-shell hidden">
+    <section id="fieldMapPage" class="field-page field-map-page">
+      <div id="fieldMapCanvas" class="field-map-canvas"></div>
+      <div id="fieldMapFallback" class="field-map-fallback"><b>LOADING MAP</b><span>The map loads independently from the Reticulum team link.</span></div>
+      <div id="fieldMapCredit" class="field-map-credit"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OSM</a></div>
+      <div class="field-map-status">
+        <div class="field-map-team"><span class="eyebrow">CURRENT TEAM</span><strong id="fieldTeamName">Joined team</strong></div>
+        <button id="fieldGridReference" class="map-grid-reference field-grid-reference" type="button" title="Copy MGRS reference at map centre">MGRS LOADING</button>
+        <span id="fieldFeedSync" class="module-state">SYNCING</span>
+        <code id="fieldTeamDestination">—</code>
+      </div>
+      <div id="fieldCompass" class="field-compass waiting" aria-live="off" aria-label="Compass acquiring heading">
+        <div id="fieldCompassTape" class="field-compass-tape" aria-hidden="true"></div>
+        <div id="fieldCompassTargets" class="field-compass-targets" aria-hidden="true"></div>
+        <div class="field-compass-readout"><b id="fieldCompassCardinal">—</b><span id="fieldCompassHeading">---</span></div>
+        <i class="field-compass-index" aria-hidden="true"></i>
+      </div>
+      <div id="waypointNavigation" class="waypoint-navigation hidden" aria-live="polite">
+        <div><span id="waypointNavigationMode" class="eyebrow">STRAIGHT LINE</span><strong id="waypointNavigationLabel">Waypoint</strong></div>
+        <div class="waypoint-navigation-data"><b id="waypointNavigationDistance">—</b><span id="waypointNavigationBearing">—</span></div>
+        <small id="waypointNavigationState">ACQUIRING POSITION</small>
+        <button id="stopWaypointNavigation" type="button">END</button>
+      </div>
+      <div id="latestMessages" class="latest-messages hidden" aria-live="polite"></div>
+      <div id="mapRadialMenu" class="map-radial hidden" role="menu" aria-label="Map quick actions">
+        <button type="button" class="radial-action radial-warning" data-quick-marker="warning" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2.5 20h19L12 3Z"/><path d="M12 9v4M12 16h.01"/></svg><span>WARNING</span></button>
+        <button type="button" class="radial-action radial-waypoint" data-quick-marker="waypoint" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 9-9 9-9-9 9-9Z"/><circle cx="12" cy="12" r="2"/></svg><span>WAYPOINT</span></button>
+        <button type="button" class="radial-action radial-observation" data-quick-marker="observation" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 6 12 6s9.5 6 9.5 6S18 18 12 18s-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg><span>OBSERVE</span></button>
+        <button type="button" class="radial-action radial-tactical" data-map-marker-palette role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 4 4-4 4-4-4 4-4ZM5 13l4 4-4 4-4-4 4-4Zm14 0 4 4-4 4-4-4 4-4Z"/></svg><span>TACTICAL</span></button>
+        <button type="button" class="radial-action radial-obstacle" data-quick-marker="obstacle" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m6.5 6.5 11 11"/></svg><span>OBSTACLE</span></button>
+        <button type="button" class="radial-action radial-draw" data-map-radial-page="draw" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1L19.3 8.2l-3.5-3.5L5 15.5 4 20Z"/><path d="m13.8 6.8 3.5 3.5"/></svg><span>DRAW</span></button>
+        <button type="button" class="radial-action radial-tool radial-slot-1 hidden" data-map-text role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M12 5v14M8 19h8"/></svg><span>TEXT</span></button>
+        <button type="button" class="radial-action radial-tool radial-slot-2 hidden" data-map-draw="arrow" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18 19 5M11 5h8v8"/></svg><span>ARROW</span></button>
+        <button type="button" class="radial-action radial-tool radial-slot-3 hidden" data-map-draw="trace" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16-.8 4.8L8 20l10.8-10.8-4-4L4 16Z"/><path d="m12.8 7.2 4 4"/></svg><span>TRACE</span></button>
+        <button type="button" id="closeMapRadial" class="radial-close" data-close-map-radial aria-label="Close map actions"><span aria-hidden="true">×</span><small>CLOSE</small></button>
+      </div>
+      <div id="mapContextMenu" class="map-context-menu hidden" role="menu" aria-label="Map actions">
+        <button type="button" data-quick-marker="warning" role="menuitem"><span class="context-menu-icon warning">!</span><span>Add warning</span></button>
+        <button type="button" data-quick-marker="waypoint" role="menuitem"><span class="context-menu-icon">◇</span><span>Add waypoint</span></button>
+        <button type="button" data-quick-marker="observation" role="menuitem"><span class="context-menu-icon">◉</span><span>Add observation</span></button>
+        <button type="button" data-quick-marker="obstacle" role="menuitem"><span class="context-menu-icon">×</span><span>Add obstacle</span></button>
+        <button type="button" data-map-marker-palette role="menuitem"><span class="context-menu-icon">◆</span><span>TACTICAL MARKERS…</span></button>
+        <div class="context-menu-separator" role="separator"></div>
+        <button type="button" data-map-text role="menuitem"><span class="context-menu-icon">T</span><span>Add text</span></button>
+        <button type="button" data-map-draw="arrow" role="menuitem"><span class="context-menu-icon">↗</span><span>Draw arrow</span></button>
+        <button type="button" data-map-draw="trace" role="menuitem"><span class="context-menu-icon">∿</span><span>Draw trace</span></button>
+      </div>
+      <div id="mapMarkerPalette" class="map-marker-palette hidden" role="menu" aria-label="Tactical markers">
+        <header><div><span>TACTICAL MARKERS</span><small>PERSISTENT · REMOVE MANUALLY</small></div><button type="button" data-close-map-radial aria-label="Close tactical markers">×</button></header>
+        <div class="map-marker-palette-body"></div>
+      </div>
+      <form id="mapTextComposer" class="map-text-composer hidden">
+        <label>MAP TEXT<input type="text" maxlength="80" autocomplete="off" placeholder="Type a short label"></label>
+        <div><button type="button" class="text-button" data-cancel-map-text>CANCEL</button><button type="submit" class="compact">ADD</button></div>
+      </form>
+      <div id="mapDrawControls" class="map-draw-controls hidden">
+        <span>DRAW TRACE</span>
+        <button type="button" id="clearMapDrawing" class="text-button" data-clear-map-drawing>CLEAR</button>
+        <button type="button" id="cancelMapDrawing" class="text-button" data-cancel-map-drawing>CANCEL</button>
+        <button type="button" id="sendMapDrawing" class="compact" data-send-map-drawing disabled>SEND</button>
+      </div>
+      <div class="map-actions">
+        <div class="map-tool-stack">
+          <button id="fieldMapStyleToggle" class="map-tool map-style-toggle" type="button" aria-pressed="false" aria-label="Switch to satellite map">SAT</button>
+          <button id="mapMovementToggle" class="map-tool movement-toggle" type="button" aria-pressed="false" aria-label="Resume automatic location updates"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18c3-8 6 1 9-7s5-3 7-6"/><circle cx="4" cy="18" r="1.5"/><path d="m17 5 3 0 0 3"/></svg><span>LOC</span></button>
+          <button id="mapSharePosition" class="map-tool" aria-label="Share current position">⌖</button>
+        </div>
+        <button id="mapPttButton" class="ptt-button"><span class="ptt-dot"></span><b>HOLD TO BROADCAST</b><small>CONNECTING LIVE · CLIP FALLBACK</small></button>
+      </div>
+    </section>
+
+    <section id="fieldFeedPage" class="field-page field-feed-page hidden">
+      <header class="page-head"><div><span class="eyebrow">TEAM RECORD</span><h1>Intel feed</h1></div><span id="feedCount" class="module-state">0 EVENTS</span></header>
+      <div class="feed-layout">
+        <section><div id="fieldFeedList" class="field-feed-list empty-copy">Fetching verified events over Reticulum…</div></section>
+        <section id="fieldTasksModule" class="feed-tasks hidden">
+          <div class="module-head"><div><span class="eyebrow">TASKS MODULE</span><h2>Assignments</h2></div><span id="taskSyncState" class="module-state">SYNCING</span></div>
+          <div id="fieldTaskList" class="task-list empty-copy">Fetching over Reticulum…</div>
+        </section>
+      </div>
+      <section class="feed-comms panel">
+        <button id="feedPttButton" class="ptt-button"><span class="ptt-dot"></span><b>HOLD TO BROADCAST</b><small>CONNECTING LIVE · CLIP FALLBACK</small></button>
+        <div class="feed-message-row">
+          <textarea id="message" rows="1" maxlength="160" placeholder="Message the team" aria-label="Message the team"></textarea>
+          <button id="sendMessage">SEND <span>→</span></button>
+        </div>
+        <div id="deliveryState" class="delivery-state idle">No packet sent in this session.</div>
+      </section>
+    </section>
+
+    <section id="fieldOpsPage" class="field-page field-ops-page hidden">
+      <header class="page-head"><div><span class="eyebrow">TEAM OPERATIONS</span><h1>Operators</h1></div><div class="identity-inline"><span>FIELD IDENTITY</span><code id="fieldIdentity">—</code></div></header>
+      <div class="ops-layout">
+        <section class="ops-operators panel">
+          <span class="eyebrow">VERIFIED OPERATORS</span><h2>Team</h2>
+          <div id="opsOperatorList" class="operator-list empty-copy">Waiting for verified operator events.</div>
+        </section>
+        <section id="privateChatPanel" class="private-chat panel hidden" aria-labelledby="privateChatCallsign">
+          <header class="private-chat-head">
+            <div>
+              <span class="eyebrow">PRIVATE · RETICULUM</span>
+              <h2 id="privateChatCallsign">Operator</h2>
+              <code id="privateChatIdentity">—</code>
+            </div>
+            <button id="closePrivateChat" type="button" class="text-button" aria-label="Close private chat">CLOSE</button>
+          </header>
+          <div id="privateChatMessages" class="private-chat-messages empty-copy" aria-live="polite">Select an operator to open a private chat.</div>
+          <form id="privateChatComposer" class="private-chat-composer">
+            <label for="privateChatMessage">PRIVATE MESSAGE</label>
+            <textarea id="privateChatMessage" maxlength="160" rows="2" placeholder="Message operator" required></textarea>
+            <button id="privatePttButton" type="button" class="ptt-button private-ptt-button" data-idle-label="HOLD FOR PRIVATE PTT" data-idle-hint="PRIVATE MAILBOX · RECORDED · MAX 8 SEC">
+              <b>HOLD FOR PRIVATE PTT</b><small>PRIVATE MAILBOX · RECORDED · MAX 8 SEC</small>
+            </button>
+            <div>
+              <small id="privateChatStatus">Encrypted Reticulum Link · stored by Command</small>
+              <button type="submit">SEND <span>→</span></button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <nav id="fieldBottomNav" class="field-bottom-nav hidden" aria-label="Field navigation">
+    <button data-field-page="map" class="selected" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Zm6-3v15m6-12v15"/></svg><span>MAP</span></button>
+    <button data-field-page="feed" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M5 12h14M5 19h9"/></svg><span>FEED</span></button>
+    <button data-field-page="ops" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-7 4a8 8 0 0 1 14 0M4 8a10 10 0 0 0 0 8m16-8a10 10 0 0 1 0 8"/></svg><span>OPS</span></button>
+  </nav>
+
+  <div id="toast" class="toast"></div>
+  <script type="module" src="/app.js?v=20260904-2"></script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+[reticulum]
+  enable_transport = No
+  share_instance = No
+  discover_interfaces = Yes
+  autoconnect_discovered_interfaces = 3
+  required_discovery_value = 16
+
+[logging]
+  loglevel = 4
+
+[interfaces]
+  [[Reticom Local TCP Client]]
+    type = TCPClientInterface
+    enabled = Yes
+    target_host = 127.0.0.1
+    target_port = 4242
+
+# BEGIN RETICOM COMMUNITY BOOTSTRAPS
+  [[Reticom Bootstrap 01]]
+    type = TCPClientInterface
+    enabled = Yes
+    target_host = 193.26.158.230
+    target_port = 4965
+    connect_timeout = 4
+    bootstrap_only = Yes
+
+  [[Reticom Bootstrap 02]]
+    type = TCPClientInterface
+    enabled = Yes
+    target_host = 45.77.109.86
+    target_port = 4965
+    connect_timeout = 4
+    bootstrap_only = Yes
+
+  [[Reticom Bootstrap 03]]
+    type = TCPClientInterface
+    enabled = Yes
+    target_host = sydney.reticulum.au
+    target_port = 4242
+    connect_timeout = 4
+    bootstrap_only = Yes
+
+  [[Reticom Bootstrap 04]]
+    type = TCPClientInterface
+    enabled = Yes
+    target_host = 103.195.4.226
+    target_port = 4242
+    connect_timeout = 4
+    bootstrap_only = Yes
+# END RETICOM COMMUNITY BOOTSTRAPS

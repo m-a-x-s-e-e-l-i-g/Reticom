@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+# Keep executable scripts portable across platforms.
+*.sh text eol=lf
+gradlew text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets.
+*.jar binary
+*.png binary
+*.ogg binary
+*.apk binary
+*.aab binary

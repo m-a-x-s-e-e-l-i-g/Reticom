@@ -61,10 +61,10 @@ jobs:
 
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -72,15 +72,29 @@ jobs:
 
       - name: Set up Python 3.11 for Chaquopy
         id: python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Install Android SDK components
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          set -euo pipefail
+          android_sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [[ -z "$android_sdk_root" ]]; then
+            echo "The Android SDK root is not configured on this runner." >&2
+            exit 127
+          fi
+          sdkmanager="$android_sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$sdkmanager" ]]; then
+            sdkmanager="$(find "$android_sdk_root/cmdline-tools" -path '*/bin/sdkmanager' -type f | sort -V | tail -n 1)"
+          fi
+          if [[ -z "$sdkmanager" || ! -x "$sdkmanager" ]]; then
+            echo "Android sdkmanager was not found under $android_sdk_root." >&2
+            exit 127
+          fi
+          yes | "$sdkmanager" --licenses >/dev/null || true
+          "$sdkmanager" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Run browser logic tests
         run: node --test tests/*.test.mjs
@@ -121,10 +135,10 @@ jobs:
 
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -134,7 +148,7 @@ jobs:
             requirements-windows.txt
 
       - name: Install build and test dependencies
-        run: python -m pip install -r requirements-dev.txt -r requirements-windows.txt
+        run: python -m pip install -e . -r requirements-dev.txt -r requirements-windows.txt
 
       - name: Run Python tests
         run: python -m pytest -q

@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RETICOM_TRANSPORT_HOST="${1:-${RETICOM_TRANSPORT_HOST:-}}"
 RETICOM_TRANSPORT_PORT="${2:-${RETICOM_TRANSPORT_PORT:-4242}}"
+RETICOM_VERSION_NAME="${3:-${RETICOM_VERSION_NAME:-0.1.0}}"
+RETICOM_VERSION_CODE="${4:-${RETICOM_VERSION_CODE:-1}}"
 TOOLCHAIN_DIR="${RETIUM_ANDROID_TOOLCHAIN:-/var/tmp/retium-android-toolchain}"
 DOWNLOAD_DIR="$TOOLCHAIN_DIR/downloads"
 JDK_ROOT="$TOOLCHAIN_DIR/jdk"
@@ -13,6 +15,15 @@ GRADLE_ROOT="$TOOLCHAIN_DIR/gradle"
 UV_ROOT="$TOOLCHAIN_DIR/uv"
 
 mkdir -p "$DOWNLOAD_DIR" "$JDK_ROOT" "$SDK_ROOT" "$GRADLE_ROOT" "$UV_ROOT"
+
+if [[ ! "$RETICOM_VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+    echo "Version name must be a semantic version without a leading v." >&2
+    exit 2
+fi
+if [[ ! "$RETICOM_VERSION_CODE" =~ ^[0-9]+$ ]] || (( RETICOM_VERSION_CODE < 1 || RETICOM_VERSION_CODE > 2100000000 )); then
+    echo "Version code must be between 1 and 2100000000." >&2
+    exit 2
+fi
 
 if ! find "$JDK_ROOT" -type f -path '*/bin/java' -print -quit | grep -q .; then
     JDK_ARCHIVE="$DOWNLOAD_DIR/temurin-jdk17.tar.gz"
@@ -81,14 +92,20 @@ cd "$SCRIPT_DIR"
 if [ ! -x "$SCRIPT_DIR/gradlew" ]; then
     "$GRADLE_BIN" wrapper --gradle-version 8.9
 fi
-GRADLE_ARGS=(--no-daemon :app:assembleDebug "-PreticomTransportPort=$RETICOM_TRANSPORT_PORT")
+GRADLE_ARGS=(
+    --no-daemon
+    :app:assembleDebug
+    "-PreticomTransportPort=$RETICOM_TRANSPORT_PORT"
+    "-PreticomVersionName=$RETICOM_VERSION_NAME"
+    "-PreticomVersionCode=$RETICOM_VERSION_CODE"
+)
 if [ -n "$RETICOM_TRANSPORT_HOST" ]; then
     GRADLE_ARGS+=("-PreticomTransportHost=$RETICOM_TRANSPORT_HOST")
 fi
 ./gradlew "${GRADLE_ARGS[@]}"
 
 APK_SOURCE="$SCRIPT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-APK_TARGET="$PROJECT_ROOT/Reticom-Field-0.1.0-debug.apk"
+APK_TARGET="$PROJECT_ROOT/Reticom-Field-${RETICOM_VERSION_NAME}-debug.apk"
 cp "$APK_SOURCE" "$APK_TARGET"
 sha256sum "$APK_TARGET" > "$APK_TARGET.sha256"
 echo "APK: $APK_TARGET"

@@ -5,6 +5,15 @@ plugins {
 
 val reticomTransportHost = providers.gradleProperty("reticomTransportHost").orNull?.trim().orEmpty()
 val reticomTransportPort = providers.gradleProperty("reticomTransportPort").orNull?.toIntOrNull() ?: 4242
+val reticomVersionName = providers.gradleProperty("reticomVersionName").orNull?.trim().orEmpty().ifBlank { "0.1.0" }
+val reticomVersionCode = providers.gradleProperty("reticomVersionCode").orNull?.toIntOrNull() ?: 1
+
+require(reticomVersionName.matches(Regex("^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"))) {
+    "reticomVersionName must be a semantic version without a leading v"
+}
+require(reticomVersionCode in 1..2_100_000_000) {
+    "reticomVersionCode must be between 1 and 2100000000"
+}
 
 android {
     namespace = "com.retium.field"
@@ -14,8 +23,8 @@ android {
         applicationId = "com.retium.field"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = reticomVersionCode
+        versionName = reticomVersionName
         buildConfigField("String", "RETICOM_TRANSPORT_HOST", "\"${reticomTransportHost.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
         buildConfigField("int", "RETICOM_TRANSPORT_PORT", reticomTransportPort.toString())
 

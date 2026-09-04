@@ -291,6 +291,12 @@ Een expliciete eigen transportnode kan tijdens de build worden meegegeven:
 .\build-android.ps1 -TransportHost rns.example.org -TransportPort 4242
 ```
 
+Een lokale versiebuild gebruikt expliciete Android-versiemetadata:
+
+```powershell
+.\build-android.ps1 -VersionName 0.2.0 -VersionCode 2000
+```
+
 Normaal is dit niet nodig: Field Settings → Advanced Network accepteert ook na installatie een gekozen hostname/IP en poort, terwijl de community bootstrap-pool als fallback beschikbaar blijft. Herstart Reticom volledig na een netwerkwijziging.
 
 De interne Python-package, Android application ID, browser storage keys en destination aspect heten om compatibiliteitsredenen nog `retium`. Hierdoor kan een bestaande installatie in-place upgraden zonder identity, teamroute en gebruikersinstellingen te verliezen.
@@ -348,6 +354,17 @@ De tests dekken onder andere:
 - alle 22 handmatige tactische markertypen.
 
 Een Android-wijziging is pas klaar na een echte build, installatie met `adb install -r` en controle op een fysiek toestel. Browser-only succes bewijst geen permissies, foreground service, native TTS, microfoon of achtergrondalerts.
+
+### Een Android-release publiceren
+
+Push een SemVer-tag die met `v` begint. GitHub Actions bouwt automatisch een versiegebonden debug-APK, maakt indien nodig de GitHub Release aan en voegt de APK plus SHA-256 toe:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Gebruik iedere versietag maar één keer. `vMAJOR.MINOR.PATCH` wordt Android `versionName`; de workflow berekent een oplopende `versionCode` uit dezelfde drie getallen.
 
 ### Een nieuw eventtype toevoegen
 

@@ -12,6 +12,7 @@ coverage.xml
 htmlcov/
 .venv/
 venv/
+.windows-build-venv/
 
 # Node/browser tests
 node_modules/
@@ -41,9 +42,13 @@ android/.gradle/
 android/.idea/
 android/app/build/
 android/build/
+build/
+dist/
 *.apk
 *.apk.sha256
 *.aab
+*.exe
+*.exe.sha256
 
 # Local QA captures and device dumps
 tmp-*

@@ -1,4 +1,4 @@
-name: Android APK release
+name: Tagged application release
 
 on:
   push:
@@ -6,36 +6,24 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: android-release-${{ github.ref }}
+  group: application-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build-and-release:
-    name: Build and publish APK
+  metadata:
+    name: Resolve release version
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.name }}
+      version_code: ${{ steps.version.outputs.code }}
+      apk_name: ${{ steps.version.outputs.apk }}
+      exe_name: ${{ steps.version.outputs.exe }}
 
     steps:
-      - name: Check out tagged source
-        uses: actions/checkout@v4
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-
-      - name: Set up Python 3.11 for Chaquopy
-        id: python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Resolve Android version from tag
+      - name: Resolve version from tag
         id: version
         shell: bash
         run: |
@@ -63,6 +51,30 @@ jobs:
           echo "name=$version" >> "$GITHUB_OUTPUT"
           echo "code=$version_code" >> "$GITHUB_OUTPUT"
           echo "apk=Reticom-Field-${version}-debug.apk" >> "$GITHUB_OUTPUT"
+          echo "exe=Reticom-Command-${version}-windows-x64.exe" >> "$GITHUB_OUTPUT"
+
+  android:
+    name: Build Android APK
+    needs: metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Python 3.11 for Chaquopy
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Install Android SDK components
         shell: bash
@@ -80,36 +92,126 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace :app:assembleDebug \
-            -PreticomVersionName="${{ steps.version.outputs.name }}" \
-            -PreticomVersionCode="${{ steps.version.outputs.code }}"
+            -PreticomVersionName="${{ needs.metadata.outputs.version }}" \
+            -PreticomVersionCode="${{ needs.metadata.outputs.version_code }}"
 
       - name: Package APK and checksum
         shell: bash
         env:
-          APK_NAME: ${{ steps.version.outputs.apk }}
+          APK_NAME: ${{ needs.metadata.outputs.apk_name }}
         run: |
           set -euo pipefail
           mkdir -p dist
           cp android/app/build/outputs/apk/debug/app-debug.apk "dist/$APK_NAME"
           (cd dist && sha256sum "$APK_NAME" > "$APK_NAME.sha256")
 
-      - name: Upload workflow artifact
+      - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
-          name: reticom-field-${{ steps.version.outputs.name }}
+          name: reticom-android-${{ needs.metadata.outputs.version }}
           path: dist/
           if-no-files-found: error
           retention-days: 30
+
+  windows:
+    name: Build Windows Command
+    needs: metadata
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-windows.txt
+
+      - name: Install build and test dependencies
+        run: python -m pip install -r requirements-dev.txt -r requirements-windows.txt
+
+      - name: Run Python tests
+        run: python -m pytest -q
+
+      - name: Generate Windows resources
+        run: python scripts/generate_windows_assets.py "${{ needs.metadata.outputs.version }}"
+
+      - name: Build standalone executable
+        run: python -m PyInstaller --noconfirm --clean windows/Reticom-Command.spec
+
+      - name: Smoke-test frozen backend
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath .\dist\Reticom-Command.exe `
+            -ArgumentList '--smoke-test' `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Frozen Reticom Command smoke test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Package executable and checksum
+        shell: pwsh
+        env:
+          EXE_NAME: ${{ needs.metadata.outputs.exe_name }}
+        run: |
+          Move-Item -LiteralPath .\dist\Reticom-Command.exe -Destination ".\dist\$env:EXE_NAME"
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath ".\dist\$env:EXE_NAME").Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText(
+            ".\dist\$env:EXE_NAME.sha256",
+            "$hash  $env:EXE_NAME`n",
+            [Text.Encoding]::ASCII
+          )
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reticom-windows-${{ needs.metadata.outputs.version }}
+          path: |
+            dist/${{ needs.metadata.outputs.exe_name }}
+            dist/${{ needs.metadata.outputs.exe_name }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - metadata
+      - android
+      - windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download built applications
+        uses: actions/download-artifact@v4
+        with:
+          pattern: reticom-*
+          path: release
+          merge-multiple: true
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          VERSION: ${{ steps.version.outputs.name }}
+          VERSION: ${{ needs.metadata.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --title "Reticom $VERSION" --generate-notes
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "Reticom $VERSION" \
+              --generate-notes
           fi
-          gh release upload "$TAG" dist/* --clobber
+          gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber

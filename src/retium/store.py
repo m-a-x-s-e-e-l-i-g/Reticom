@@ -260,6 +260,10 @@ class EventStore:
                 }
         return list(summaries.values())
 
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
 
 class PrivateMessageStore:
     def __init__(self, path: Path):
@@ -368,3 +372,7 @@ class PrivateMessageStore:
                 continue
             return identity_hash in {row["sender_hash"], row["recipient_hash"]}
         return None
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()

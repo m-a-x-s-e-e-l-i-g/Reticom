@@ -343,6 +343,12 @@ def create_app(
             hosted_service.stop()
         if transcriber is not None:
             transcriber.close()
+        if task_store is not None:
+            task_store.close()
+        if private_store is not None:
+            private_store.close()
+        if store is not None:
+            store.close()
 
     app = FastAPI(title="Reticom", version="0.1.0", lifespan=lifespan)
 

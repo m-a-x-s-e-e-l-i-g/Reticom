@@ -301,6 +301,25 @@ Normaal is dit niet nodig: Field Settings → Advanced Network accepteert ook na
 
 De interne Python-package, Android application ID, browser storage keys en destination aspect heten om compatibiliteitsredenen nog `retium`. Hierdoor kan een bestaande installatie in-place upgraden zonder identity, teamroute en gebruikersinstellingen te verliezen.
 
+## Windows Command-app bouwen
+
+`Reticom-Command.exe` is een zelfstandige lichte Windows-app voor Command. De executable bevat Python, FastAPI, Reticulum en de volledige Command-interface, maar gebruikt de bestaande Microsoft Edge WebView2-runtime van Windows in plaats van een complete browser mee te bundelen.
+
+Vereisten voor de build: Windows en Python 3.11. Gebruikers van de gebouwde executable hoeven Python niet te installeren.
+
+```powershell
+.\build-windows.ps1 -Version 0.2.0
+```
+
+De uitvoer staat in `dist/`:
+
+```text
+Reticom-Command-0.2.0-windows-x64.exe
+Reticom-Command-0.2.0-windows-x64.exe.sha256
+```
+
+De applicatie opent in een eigen venster zonder console. Persistente Reticulum-identiteiten, teamdata, offline kaarten en logs staan onder `%LOCALAPPDATA%\Reticom`; ze worden niet naast de executable geschreven.
+
 ## Ontwikkelaarsgids
 
 ### Projectstructuur
@@ -318,6 +337,7 @@ retium/
 │  ├─ ptt.py                 Audioclips en metadata
 │  ├─ transcription.py       Lokale Whisper-transcriptie
 │  ├─ offline_maps.py        Tilepacks en lokale mapserver
+│  ├─ desktop.py             Lichte Windows Command-launcher
 │  └─ static/
 │     ├─ app.js              Field + Command clientlogica
 │     ├─ automatic-reports.js Spraak/tekst → tactische geometrie
@@ -329,11 +349,14 @@ retium/
 ├─ android/app/src/main/
 │  ├─ java/com/retium/field/ Native WebView, service, locatie en TTS
 │  └─ python/mobile_main.py   On-device Reticom-server
+├─ windows/                   PyInstaller-configuratie
+├─ scripts/                   Gegenereerde Windows icon/version resources
 ├─ configs/                   Losse Command- en Field-RNS-configs
 ├─ tests/                     Python- en browserlogica-tests
 ├─ start-local.ps1
 ├─ smoke-test.ps1
-└─ build-android.ps1
+├─ build-android.ps1
+└─ build-windows.ps1
 ```
 
 ### Testen
@@ -355,9 +378,9 @@ De tests dekken onder andere:
 
 Een Android-wijziging is pas klaar na een echte build, installatie met `adb install -r` en controle op een fysiek toestel. Browser-only succes bewijst geen permissies, foreground service, native TTS, microfoon of achtergrondalerts.
 
-### Een Android-release publiceren
+### Een applicatierelease publiceren
 
-Push een SemVer-tag die met `v` begint. GitHub Actions bouwt automatisch een versiegebonden debug-APK, maakt indien nodig de GitHub Release aan en voegt de APK plus SHA-256 toe:
+Push een SemVer-tag die met `v` begint. GitHub Actions bouwt parallel een versiegebonden Android debug-APK en een standalone Windows Command-executable. De release wordt pas gepubliceerd wanneer beide builds en hun smoke-tests slagen. APK, EXE en beide SHA-256-bestanden komen bij dezelfde GitHub Release:
 
 ```powershell
 git tag v0.2.0

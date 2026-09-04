@@ -120,7 +120,7 @@ jobs:
           (cd dist && sha256sum "$APK_NAME" > "$APK_NAME.sha256")
 
       - name: Upload Android artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reticom-android-${{ needs.metadata.outputs.version }}
           path: dist/
@@ -186,7 +186,7 @@ jobs:
           )
 
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reticom-windows-${{ needs.metadata.outputs.version }}
           path: |
@@ -207,7 +207,7 @@ jobs:
 
     steps:
       - name: Download built applications
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: reticom-*
           path: release

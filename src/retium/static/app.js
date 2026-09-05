@@ -104,6 +104,10 @@ let pttPrivateRecipient = null;
 let leaveArmed = false;
 let localIdentityHash = "";
 let teamOperational = false;
+let fieldQueuedEvents = 0;
+let localMapWatchId = null;
+let localMapPosition = null;
+let localMapPositionHasCentered = false;
 let liveVoiceSocket = null;
 let liveVoiceReady = false;
 let liveVoiceReconnectTimer = null;
@@ -1677,6 +1681,63 @@ function currentLocations(events) {
   return [...current, ...markers];
 }
 
+function fieldMapEvents(events) {
+  if (!localMapPosition || !localIdentityHash) return events;
+  return [
+    ...events.filter((event) => !(
+      event.type === "position.updated"
+      && event.network?.sender_hash === localIdentityHash
+    )),
+    localMapPosition,
+  ];
+}
+
+function updateLocalMapPosition(position) {
+  const lat = Number(position?.coords?.latitude);
+  const lon = Number(position?.coords?.longitude);
+  const accuracy = Number(position?.coords?.accuracy);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  const now = Math.floor(Date.now() / 1000);
+  localMapPosition = {
+    id: "local-device-position",
+    type: "position.updated",
+    callsign: currentUser?.callsign || "THIS DEVICE",
+    icon: currentUser?.icon || "dot",
+    color: currentUser?.color || "moss",
+    created_at: now,
+    lat,
+    lon,
+    ...(Number.isFinite(accuracy) ? {accuracy} : {}),
+    network: {
+      verified: false,
+      local: true,
+      sender_hash: localIdentityHash,
+      received_at: now,
+      interface: "Local device GPS",
+    },
+  };
+  if (fieldMap) {
+    void renderFieldMap(fieldEvents, {preserveView: localMapPositionHasCentered});
+    localMapPositionHasCentered = true;
+  }
+}
+
+function syncLocalMapPosition(joined) {
+  if (!joined || !navigator.geolocation) {
+    if (localMapWatchId !== null) navigator.geolocation?.clearWatch(localMapWatchId);
+    localMapWatchId = null;
+    localMapPosition = null;
+    localMapPositionHasCentered = false;
+    return;
+  }
+  if (localMapWatchId !== null) return;
+  localMapWatchId = navigator.geolocation.watchPosition(
+    updateLocalMapPosition,
+    () => {},
+    {enableHighAccuracy: true, maximumAge: 10_000, timeout: 20_000},
+  );
+}
+
 function movementTracks(events) {
   const byOperator = new Map();
   events.forEach((event) => {
@@ -2572,7 +2633,8 @@ async function renderFieldMap(events, {preserveView = false} = {}) {
     const map = await ensureFieldMap();
     fieldMapOnline = true;
     $("fieldMapFallback").classList.add("hidden");
-    const locations = currentLocations(events);
+    const mapEvents = fieldMapEvents(events);
+    const locations = currentLocations(mapEvents);
     const ownLocation = locations.find((event) => (
       event.type === "position.updated"
       && event.network?.sender_hash === localIdentityHash
@@ -2616,6 +2678,7 @@ async function renderFieldMap(events, {preserveView = false} = {}) {
             senderHash: event.network?.sender_hash || "",
             callsign: event.callsign || "",
             removable: event.type === "marker.created" && (currentTeamAdmin || event.network?.sender_hash === localIdentityHash),
+            queued: event.network?.queued === true,
             },
           };
         }),
@@ -2674,7 +2737,10 @@ async function renderFieldMap(events, {preserveView = false} = {}) {
     }
     fieldMapMarkerIds = nextMarkerIds;
     fieldMapHasRendered = true;
-    if (!fieldFeedOnline) $("fieldFeedSync").textContent = "MAP ONLINE · RNS WAITING";
+    if (localMapPosition) localMapPositionHasCentered = true;
+    if (!fieldFeedOnline) $("fieldFeedSync").textContent = fieldQueuedEvents
+      ? `LOCAL READY · ${fieldQueuedEvents} QUEUED`
+      : "LOCAL READY · TEAM OFFLINE";
     return true;
   } catch {
     fieldMapOnline = false;
@@ -3340,6 +3406,8 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
   const kind = properties.mapKind || properties.kind || "map item";
   meta.textContent = properties.automatic
     ? `${String(properties.markerType || kind).toUpperCase()} · AUTO · SIGNED SOURCE`
+    : propertyFlag(properties.queued)
+      ? `${String(properties.markerType || kind).toUpperCase()} · LOCAL · QUEUED`
     : `${String(properties.markerType || kind).toUpperCase()} · VERIFIED`;
   content.append(title, meta);
   if (properties.reportMessage) {
@@ -3704,7 +3772,7 @@ function renderFieldFeed(events) {
       <div class="feed-event-head"><span><b class="operator-glyph" style="color:${operatorColor(event.color)}">${operatorGlyph(event.icon)}</b> ${escapeHtml(event.callsign)}</span><time>${timeLabel(event.network.received_at)}</time>${ownMessageRemoveButton(event)}</div>
       <strong>${escapeHtml(intelEventType(event).replace(".", " ").toUpperCase())}</strong>
       <div class="feed-event-body">${eventDescription(event)}</div>
-      <small>✓ ${event.type.startsWith("private.") ? "PRIVATE · IDENTIFIED RNS LINK · " : ""}${shortHash(event.network.sender_hash)}</small>
+      <small>${event.network?.queued ? "◷ LOCAL · QUEUED FOR RNS" : `✓ ${event.type.startsWith("private.") ? "PRIVATE · IDENTIFIED RNS LINK · " : ""}${shortHash(event.network.sender_hash)}`}</small>
     </article>`).join("");
 }
 
@@ -3826,7 +3894,8 @@ async function refreshFeed() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Feed sync failed");
     if (data.team) renderTeam(data.team);
-    fieldFeedOnline = true;
+    fieldFeedOnline = data.network?.online !== false;
+    fieldQueuedEvents = Number(data.network?.queued || 0);
     fieldEvents = withDisplayWaypointLabels(data.events || []);
     privateMessages = Array.isArray(data.private_events) ? data.private_events : [];
     saveFieldEventCache(fieldTeamDestination, fieldEvents);
@@ -3838,8 +3907,12 @@ async function refreshFeed() {
     renderFieldFeed(incomingEvents);
     if (activePrivatePeer) renderPrivateChatMessages();
     renderFieldMap(fieldEvents);
-    $("fieldFeedSync").textContent = `RNS · ${Math.round(data.network?.response_ms || 0)} MS`;
-    $("fieldFeedSync").classList.add("synced");
+    $("fieldFeedSync").textContent = fieldFeedOnline
+      ? `RNS · ${Math.round(data.network?.response_ms || 0)} MS${fieldQueuedEvents ? ` · ${fieldQueuedEvents} QUEUED` : ""}`
+      : fieldQueuedEvents
+        ? `LOCAL READY · ${fieldQueuedEvents} QUEUED`
+        : "LOCAL READY · TEAM OFFLINE";
+    $("fieldFeedSync").classList.toggle("synced", fieldFeedOnline);
   } catch (error) {
     fieldFeedOnline = false;
     $("fieldFeedSync").textContent = fieldMapOnline ? "MAP ONLINE · RNS OFFLINE" : "RNS OFFLINE";
@@ -3879,7 +3952,10 @@ async function refresh() {
     if (role === "field") renderUser(state.user);
     else renderCommandUser(state.user);
     renderTeam(state.team);
-    if (role === "field") syncAutomaticLocationSharing(Boolean(state.team.joined));
+    if (role === "field") {
+      syncLocalMapPosition(Boolean(state.team.joined));
+      syncAutomaticLocationSharing(Boolean(state.team.joined));
+    }
     if (role === "gateway") {
       commandEvents = withDisplayWaypointLabels(state.events || []);
       primeRecentVoiceTranscripts(commandEvents);
@@ -3893,6 +3969,7 @@ async function refresh() {
       $("setupFieldIdentity").textContent = state.network.identity;
       renderNearby(state.nearby_teams || []);
       if (state.network.last_delivery) showDelivery(state.network.last_delivery);
+      fieldQueuedEvents = Number(state.network.queued_events ?? fieldQueuedEvents ?? 0);
       const destination = state.team.destination || "";
       if (destination !== fieldTeamDestination) {
         if (activePrivatePeer) closePrivateChat();
@@ -4047,7 +4124,9 @@ async function joinWithCode(joinCode, button) {
     $("joinCodeInput").value = data.team.join_code;
     renderTeam(data.team);
     showDelivery(data.delivery);
-    toast("Team joined · Reticulum proof received");
+    toast(data.delivery?.status === "queued"
+      ? "Team saved locally · waiting for Reticulum sync"
+      : "Team joined · Reticulum proof received");
     await refresh();
   } catch (error) {
     toast(error.message, true);
@@ -4150,14 +4229,42 @@ function toast(message, error = false) {
 
 function showDelivery(delivery) {
   const target = role === "gateway" ? $("commandDeliveryState") : $("deliveryState");
+  const queued = delivery.status === "queued";
   const published = delivery.status === "published";
   const success = delivery.delivered || published;
-  target.className = `delivery-state${role === "gateway" ? " command-delivery" : ""} ${success ? "success" : "error"}`;
-  target.textContent = published
+  target.className = `delivery-state${role === "gateway" ? " command-delivery" : ""} ${queued ? "queued" : success ? "success" : "error"}`;
+  target.textContent = queued
+    ? `SAVED LOCALLY · ${delivery.queued || 1} QUEUED FOR RETICULUM`
+    : published
     ? `PUBLISHED · SIGNED · ${delivery.packet_bytes} BYTES · ${shortHash(delivery.event_id)}`
     : delivery.delivered
       ? `PROVEN · ${delivery.rtt_ms} ms · ${delivery.packet_bytes} bytes · ${shortHash(delivery.event_id)}`
       : "DELIVERY FAILED";
+}
+
+function applyQueuedFieldEvent(data) {
+  if (role !== "field" || data?.delivery?.status !== "queued" || !data.event) return;
+  const receivedAt = Math.floor(Date.now() / 1000);
+  const event = {
+    ...data.event,
+    network: {
+      verified: false,
+      queued: true,
+      sender_hash: localIdentityHash,
+      received_at: receivedAt,
+      interface: "Local device · Reticulum outbox",
+    },
+  };
+  fieldQueuedEvents = Number(data.delivery.queued || fieldQueuedEvents || 1);
+  fieldEvents = withDisplayWaypointLabels([
+    event,
+    ...fieldEvents.filter((existing) => existing.id !== event.id),
+  ]);
+  saveFieldEventCache(fieldTeamDestination, fieldEvents);
+  renderLatestMessages(fieldEvents);
+  renderFieldOperators(fieldEvents);
+  renderFieldFeed(combinedFieldFeedEvents());
+  void renderFieldMap(fieldEvents, {preserveView: true});
 }
 
 async function send(payload, button) {
@@ -4166,8 +4273,13 @@ async function send(payload, button) {
     const response = await fetch("/api/send", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(payload)});
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Send failed");
+    applyQueuedFieldEvent(data);
     showDelivery(data.delivery);
-    toast(data.delivery.status === "published" ? "Published to the Reticulum team feed" : "Reticulum delivery proven");
+    toast(data.delivery.status === "queued"
+      ? "Saved locally · queued for Reticulum"
+      : data.delivery.status === "published"
+        ? "Published to the Reticulum team feed"
+        : "Reticulum delivery proven");
     return data;
   } catch (error) {
     toast(error.message, true);
@@ -4206,6 +4318,7 @@ function transmitPosition(button) {
   const original = button.textContent;
   button.disabled = true; button.textContent = "ACQUIRING FIX…";
   navigator.geolocation.getCurrentPosition(async (position) => {
+    updateLocalMapPosition(position);
     const lat = Number(position.coords.latitude.toFixed(6));
     const lon = Number(position.coords.longitude.toFixed(6));
     const accuracy = Number(position.coords.accuracy.toFixed(1));
@@ -4239,6 +4352,7 @@ function stopMovementSharing({announce = true, persist = true} = {}) {
 }
 
 async function sendMovementFix(position) {
+  updateLocalMapPosition(position);
   if (movementWatchId === null || movementSendPending) return;
   const point = [Number(position.coords.longitude.toFixed(6)), Number(position.coords.latitude.toFixed(6))];
   const accuracy = Number(position.coords.accuracy.toFixed(1));
@@ -4272,6 +4386,7 @@ async function sendMovementFix(position) {
       lon: point[0],
       accuracy,
     });
+    applyQueuedFieldEvent(data);
     movementLastSent = {point, accuracy, sentAt: now};
     showDelivery(data.delivery);
     await refreshFeed();
@@ -4326,6 +4441,8 @@ $("mapMovementToggle").addEventListener("click", () => {
 });
 $("stopWaypointNavigation").addEventListener("click", () => stopWaypointNavigation());
 window.addEventListener("pagehide", () => {
+  if (localMapWatchId !== null) navigator.geolocation?.clearWatch(localMapWatchId);
+  localMapWatchId = null;
   stopMovementSharing({announce: false, persist: false});
   stopWaypointNavigation(false);
 });
@@ -4490,11 +4607,18 @@ async function finishPtt() {
     const response = await fetch(endpoint, {method: "POST", headers: {"content-type": mimeType}, body: blob});
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || (privateRecipient ? "Private voice failed" : "Voice broadcast failed"));
-    if (!privateRecipient) showDelivery(data.delivery);
+    if (!privateRecipient) {
+      applyQueuedFieldEvent(data);
+      showDelivery(data.delivery);
+    }
     toast(privateRecipient
       ? "Private voice accepted by Command mailbox"
-      : data.delivery.status === "published" ? "Voice published to the Reticulum team feed" : "Voice broadcast proven over Reticulum");
-    requestVoiceTranscript(data.event?.clip_id, false);
+      : data.delivery.status === "queued"
+        ? "Voice saved locally · queued for Reticulum"
+        : data.delivery.status === "published"
+          ? "Voice published to the Reticulum team feed"
+          : "Voice broadcast proven over Reticulum");
+    if (data.delivery.status !== "queued") requestVoiceTranscript(data.event?.clip_id, false);
     if (privateRecipient) await refreshPrivateChat();
     else await refreshFeed();
   } catch (error) {
@@ -5100,7 +5224,13 @@ $("saveUserSettings").addEventListener("click", async (event) => {
     $("userSettingsPanel").classList.add("hidden");
     $("userSettingsToggle").setAttribute("aria-expanded", "false");
     if (data.delivery) showDelivery(data.delivery);
-    toast(data.delivery ? "Profile updated · Reticulum proof received" : data.warning ? "Saved locally · Command not reached" : "User settings saved");
+    toast(data.delivery?.status === "queued"
+      ? "Profile saved locally · queued for Reticulum"
+      : data.delivery
+        ? "Profile updated · Reticulum proof received"
+        : data.warning
+          ? "Saved locally · team destination not reached"
+          : "User settings saved");
     await refreshTasks();
   } catch (error) {
     toast(error.message, true);

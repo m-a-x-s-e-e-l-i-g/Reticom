@@ -32,6 +32,33 @@ def test_store_is_idempotent_and_preserves_network_evidence(tmp_path):
     assert store.recent(since=int(time.time()) + 1) == []
 
 
+def test_local_event_is_visible_while_queued_and_can_be_marked_verified(tmp_path):
+    store = EventStore(tmp_path / "events.sqlite3")
+    event = new_event(
+        "marker.created",
+        "ALPHA",
+        lat=51.5,
+        lon=4.3,
+        marker_type="warning",
+        label="Local warning",
+    )
+    assert store.insert(
+        event,
+        "alpha",
+        interface_name="Local device · Reticulum outbox",
+        delivery_status="queued",
+    )
+
+    queued = store.recent()[0]
+    assert queued["network"]["verified"] is False
+    assert queued["network"]["queued"] is True
+
+    store.mark_verified(event["id"])
+    delivered = store.recent()[0]
+    assert delivered["network"]["verified"] is True
+    assert delivered["network"]["queued"] is False
+
+
 def test_operator_summary_includes_latest_position(tmp_path):
     store = EventStore(tmp_path / "events.sqlite3")
     position = new_event(

@@ -1479,6 +1479,7 @@ a:focus-visible { outline: 2px solid var(--caution); outline-offset: 2px; }
 }
 
 .delivery-state.success { border-color: var(--signal); color: var(--signal-strong); }
+.delivery-state.queued { border-color: var(--caution); color: var(--caution); }
 .delivery-state.error { border-color: var(--danger); color: var(--danger); }
 .hint { color: var(--text-faint); font-size: 0.75rem; }
 .hint a { color: var(--text); }

@@ -28,10 +28,19 @@ class EventStore:
                     packet_hash TEXT,
                     interface_name TEXT,
                     rssi REAL,
-                    snr REAL
+                    snr REAL,
+                    delivery_status TEXT NOT NULL DEFAULT 'verified'
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(events)").fetchall()
+            }
+            if "delivery_status" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE events ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'verified'"
+                )
 
     def insert(
         self,
@@ -42,14 +51,16 @@ class EventStore:
         interface_name: str | None = None,
         rssi: float | None = None,
         snr: float | None = None,
+        delivery_status: str = "verified",
     ) -> bool:
         with self._lock, self._connection:
             cursor = self._connection.execute(
                 """
                 INSERT OR IGNORE INTO events (
                     event_id, event_type, callsign, sender_hash, created_at,
-                    received_at, payload_json, packet_hash, interface_name, rssi, snr
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    received_at, payload_json, packet_hash, interface_name, rssi, snr,
+                    delivery_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["id"],
@@ -63,9 +74,28 @@ class EventStore:
                     interface_name,
                     rssi,
                     snr,
+                    delivery_status,
                 ),
             )
             return cursor.rowcount == 1
+
+    def mark_verified(
+        self,
+        event_id: str,
+        *,
+        packet_hash: str | None = None,
+        interface_name: str = "Authenticated Reticulum delivery",
+    ) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE events
+                SET delivery_status = 'verified', packet_hash = COALESCE(?, packet_hash),
+                    interface_name = ?
+                WHERE event_id = ?
+                """,
+                (packet_hash, interface_name, event_id),
+            )
 
     def message_owned_by(self, message_id: str, sender_hash: str) -> bool:
         with self._lock:
@@ -143,7 +173,8 @@ class EventStore:
         for row in rows:
             item = json.loads(row["payload_json"])
             item["network"] = {
-                "verified": True,
+                "verified": row["delivery_status"] == "verified",
+                "queued": row["delivery_status"] == "queued",
                 "sender_hash": row["sender_hash"],
                 "packet_hash": row["packet_hash"],
                 "interface": row["interface_name"],

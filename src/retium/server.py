@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from .bootstrap import network_settings, write_custom_node
 from .live_voice import LIVE_VOICE_MAX_CHUNK, LiveVoiceError
 from .offline_maps import OfflineMapError, OfflineMapStore
+from .outbox import FieldOutbox
 from .protocol import ProtocolError, new_event
 from .ptt import PTT_MAX_BYTES, PTTError, PTTStore
 from .qr import decode_join_code_image, join_code_svg
@@ -43,7 +44,11 @@ def create_app(
     task_store: TaskStore | None = None
     user_profile: UserProfile | None = None
     ptt_store: PTTStore | None = None
+    field_ptt_store: PTTStore | None = None
     transcriber: LocalTranscriber | None = None
+    field_event_stores: dict[str, EventStore] = {}
+    field_outbox: FieldOutbox | None = None
+    field_flush_task: asyncio.Task[None] | None = None
     subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
     voice_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
     event_loop: asyncio.AbstractEventLoop | None = None
@@ -76,6 +81,63 @@ def create_app(
         state["hosted"] = field_hosts_team()
         state["admin"] = field_hosts_team() or state["everyone_admin"]
         return state
+
+    def field_event_store(destination: str | None = None) -> EventStore | None:
+        if role != "field" or team_membership is None:
+            return None
+        team_destination = destination or team_membership.destination
+        if not team_destination:
+            return None
+        if team_destination not in field_event_stores:
+            field_event_stores[team_destination] = EventStore(
+                data_dir / "field-cache" / team_destination / "events.sqlite3"
+            )
+        return field_event_stores[team_destination]
+
+    def cache_field_feed(events: Any) -> None:
+        cache = field_event_store()
+        if cache is None or not isinstance(events, list):
+            return
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            network = event.get("network")
+            network = network if isinstance(network, dict) else {}
+            sender_hash = str(network.get("sender_hash", "")).strip()
+            if not sender_hash:
+                continue
+            clean_event = {key: value for key, value in event.items() if key != "network"}
+            try:
+                inserted = cache.insert(
+                    clean_event,
+                    sender_hash,
+                    packet_hash=network.get("packet_hash"),
+                    interface_name=network.get("interface") or "Authenticated Reticulum feed",
+                )
+                if not inserted:
+                    cache.mark_verified(
+                        clean_event["id"],
+                        packet_hash=network.get("packet_hash"),
+                        interface_name=network.get("interface")
+                        or "Authenticated Reticulum feed",
+                    )
+                if field_outbox is not None:
+                    field_outbox.remove(clean_event["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    def queued_delivery(event: dict[str, Any], destination: str) -> dict[str, Any]:
+        assert field_outbox is not None
+        return {
+            "event_id": event["id"],
+            "delivered": False,
+            "status": "queued",
+            "rtt_ms": None,
+            "packet_bytes": None,
+            "gateway": destination,
+            "queued": field_outbox.count(destination),
+            "transport": "local outbox · encrypted Reticulum when reachable",
+        }
 
     def publish_from_reticulum(event: dict[str, Any]) -> None:
         if event.get("type") == "task.completed" and task_store is not None:
@@ -275,7 +337,74 @@ def create_app(
             return hosted_service.publish_local_field_event(
                 event, service.identity, admin=True
             )
-        return service.send_link_event(event) if linked else service.send_event(event)
+        if team_membership is None or not team_membership.destination or field_outbox is None:
+            raise RuntimeError("Join a team first")
+        destination = team_membership.destination
+        cache = field_event_store(destination)
+        assert cache is not None
+        cache.insert(
+            event,
+            service.identity.hash.hex(),
+            interface_name="Local device · Reticulum outbox",
+            delivery_status="queued",
+        )
+        field_outbox.add(destination, event, linked=linked)
+        return queued_delivery(event, destination)
+
+    def flush_field_outbox_sync(destination: str) -> None:
+        if (
+            not isinstance(service, FieldSender)
+            or field_outbox is None
+            or service.gateway_hash is None
+            or service.gateway_hash.hex() != destination
+        ):
+            return
+        cache = field_event_store(destination)
+        for item in field_outbox.pending(destination):
+            event = item["event"]
+            try:
+                if item["transport"] == "ptt":
+                    if field_ptt_store is None:
+                        raise RuntimeError("local voice storage is unavailable")
+                    audio, _ = field_ptt_store.read(event["clip_id"])
+                    delivery = service.send_ptt(event, audio, timeout=8.0)
+                elif item["linked"]:
+                    delivery = service.send_link_event(event, timeout=6.0)
+                else:
+                    delivery = service.send_event(event, timeout=6.0)
+                if not delivery.get("delivered"):
+                    raise TimeoutError("Reticulum delivery was not accepted")
+            except (PermissionError, ProtocolError, RuntimeError, TimeoutError, ValueError) as exc:
+                field_outbox.failed(event["id"], str(exc))
+                break
+            field_outbox.remove(event["id"])
+            if cache is not None:
+                cache.mark_verified(
+                    event["id"],
+                    packet_hash=delivery.get("packet_hash"),
+                )
+
+    def schedule_field_outbox_flush() -> None:
+        nonlocal field_flush_task
+        if (
+            role != "field"
+            or field_flush_task is not None
+            or team_membership is None
+            or not team_membership.destination
+            or field_outbox is None
+            or field_outbox.count(team_membership.destination) == 0
+        ):
+            return
+        destination = team_membership.destination
+
+        async def flush() -> None:
+            nonlocal field_flush_task
+            try:
+                await asyncio.to_thread(flush_field_outbox_sync, destination)
+            finally:
+                field_flush_task = None
+
+        field_flush_task = asyncio.create_task(flush())
 
     def publish_field_ptt_sync(
         event: dict[str, Any], audio: bytes
@@ -285,7 +414,30 @@ def create_app(
         if field_hosts_team():
             assert hosted_service is not None
             return hosted_service.publish_local_field_ptt(event, audio, service.identity)
-        return service.send_ptt(event, audio)
+        if (
+            team_membership is None
+            or not team_membership.destination
+            or field_outbox is None
+            or field_ptt_store is None
+        ):
+            raise RuntimeError("Join a team first")
+        destination = team_membership.destination
+        cache = field_event_store(destination)
+        assert cache is not None
+        field_ptt_store.save(event["clip_id"], audio, event["mime_type"])
+        cache.insert(
+            event,
+            service.identity.hash.hex(),
+            interface_name="Local device · Reticulum voice outbox",
+            delivery_status="queued",
+        )
+        field_outbox.add(
+            destination,
+            event,
+            linked=True,
+            transport="ptt",
+        )
+        return queued_delivery(event, destination)
 
     def publish_field_private_sync(
         event: dict[str, Any], audio: bytes | None = None
@@ -302,6 +454,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         nonlocal service, hosted_service, team_membership, user_profile, event_loop
+        nonlocal field_outbox, field_flush_task, field_ptt_store
         event_loop = asyncio.get_running_loop()
         if role == "gateway":
             user_path = data_dir / "user.json"
@@ -313,6 +466,8 @@ def create_app(
         else:
             team_membership = TeamMembership(data_dir / "team.json")
             user_profile = UserProfile(data_dir / "user.json")
+            field_outbox = FieldOutbox(data_dir / "field-outbox.sqlite3")
+            field_ptt_store = PTTStore(data_dir / "field-ptt")
             hosted_dir = data_dir / "hosted"
             hosted_meta_path = hosted_dir / "gateway.json"
             if team_membership.joined and hosted_meta_path.exists():
@@ -337,6 +492,12 @@ def create_app(
                 live_callback=publish_live_from_reticulum,
             )
         yield
+        if field_flush_task is not None:
+            field_flush_task.cancel()
+            try:
+                await field_flush_task
+            except asyncio.CancelledError:
+                pass
         if isinstance(service, (GatewayReceiver, FieldSender)):
             service.stop()
         if hosted_service is not None:
@@ -349,6 +510,10 @@ def create_app(
             private_store.close()
         if store is not None:
             store.close()
+        for cached_store in field_event_stores.values():
+            cached_store.close()
+        if field_outbox is not None:
+            field_outbox.close()
 
     app = FastAPI(title="Reticom", version="0.1.0", lifespan=lifespan)
 
@@ -393,10 +558,17 @@ def create_app(
                     "hosted": True,
                 }
             )
+        destination = team_membership.destination
+        cache = field_event_store(destination)
+        network_state["queued_events"] = (
+            field_outbox.count(destination)
+            if field_outbox is not None and destination is not None
+            else 0
+        )
         return {
             "role": role,
             "network": network_state,
-            "events": [],
+            "events": cache.recent(60) if cache is not None else [],
             "team": field_team_state(),
             "user": user_profile.state() if user_profile is not None else None,
             "nearby_teams": service.nearby_teams(team_membership.destination),
@@ -509,7 +681,34 @@ def create_app(
                     },
                 }
             else:
-                payload = await asyncio.to_thread(service.request_feed)
+                destination = team_membership.destination
+                cache = field_event_store(destination)
+                if not service.state().get("path_known"):
+                    return JSONResponse(
+                        {
+                            "events": cache.recent(60) if cache is not None else [],
+                            "private_events": [],
+                            "team": field_team_state(),
+                            "network": {
+                                "online": False,
+                                "via": "local field cache",
+                                "queued": field_outbox.count(destination)
+                                if field_outbox is not None and destination is not None
+                                else 0,
+                            },
+                        }
+                    )
+                payload = await asyncio.to_thread(service.request_feed, 3.0)
+                cache_field_feed(payload.get("events"))
+                payload["events"] = cache.recent(60) if cache is not None else []
+                network = payload.setdefault("network", {})
+                network["online"] = True
+                network["queued"] = (
+                    field_outbox.count(destination)
+                    if field_outbox is not None and destination is not None
+                    else 0
+                )
+                schedule_field_outbox_flush()
             metadata = payload.get("team")
             if isinstance(metadata, dict):
                 team_membership.update_metadata(
@@ -520,7 +719,23 @@ def create_app(
                 payload["team"] = field_team_state()
             return JSONResponse(payload)
         except (TimeoutError, PermissionError, ValueError) as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            destination = team_membership.destination
+            cache = field_event_store(destination)
+            return JSONResponse(
+                {
+                    "events": cache.recent(60) if cache is not None else [],
+                    "private_events": [],
+                    "team": field_team_state(),
+                    "network": {
+                        "online": False,
+                        "via": "local field cache",
+                        "queued": field_outbox.count(destination)
+                        if field_outbox is not None and destination is not None
+                        else 0,
+                        "reason": str(exc),
+                    },
+                }
+            )
 
     @app.post("/api/ptt")
     async def send_ptt(
@@ -658,9 +873,16 @@ def create_app(
                         raise FileNotFoundError("voice storage unavailable")
                     content, mime_type = await asyncio.to_thread(ptt_store.read, clip_id)
                 else:
-                    content, mime_type = await asyncio.to_thread(
-                        service.request_audio, clip_id
-                    )
+                    try:
+                        if field_ptt_store is None:
+                            raise FileNotFoundError
+                        content, mime_type = await asyncio.to_thread(
+                            field_ptt_store.read, clip_id
+                        )
+                    except (FileNotFoundError, PTTError):
+                        content, mime_type = await asyncio.to_thread(
+                            service.request_audio, clip_id
+                        )
             return Response(
                 content=content,
                 media_type=mime_type,
@@ -917,12 +1139,13 @@ def create_app(
                 icon=user_profile.icon,
                 color=user_profile.color,
             )
-            delivery = await asyncio.to_thread(service.send_event, event)
             metadata = service.team_metadata(destination)
             name = str(metadata["name"]) if metadata else None
             modules = metadata.get("modules", []) if metadata else []
             everyone_admin = metadata.get("everyone_admin", False) if metadata else False
             team_membership.join(destination, name, modules, everyone_admin)
+            delivery = await asyncio.to_thread(publish_field_event_sync, event)
+            schedule_field_outbox_flush()
             return JSONResponse(
                 {
                     "team": field_team_state(name, modules, everyone_admin),

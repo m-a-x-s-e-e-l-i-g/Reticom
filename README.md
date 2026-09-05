@@ -17,7 +17,7 @@
 
 Reticom is een tactisch teamplatform voor Android en laptop. Een Field-operator draagt de kaart, PTT en teaminformatie op de telefoon. Command ziet het complete operationele beeld, beheert het team en kan berichten, audio, opdrachten en kaartobjecten versturen.
 
-Dit is geen UI-demo met gesimuleerde peers. De huidige build gebruikt echte Reticulum-identiteiten, destinations, announces, Links, Channels, signatures en delivery proofs. Er wordt bewust geen voorbeelddata toegevoegd: wat op het scherm staat, is werkelijk ontvangen of lokaal ondertekend.
+Dit is geen UI-demo met gesimuleerde peers. De huidige build gebruikt echte Reticulum-identiteiten, destinations, announces, Links, Channels, signatures en delivery proofs. Er wordt bewust geen voorbeelddata toegevoegd: wat op het scherm staat, is werkelijk ontvangen of lokaal op dit apparaat gemaakt.
 
 > **Productrichting:** eenvoudig, tactisch en praktisch. Donker genoeg voor nachtgebruik en OLED, snel genoeg om onder druk met één hand te bedienen.
 
@@ -173,12 +173,13 @@ Op afzonderlijke apparaten gebruikt Reticom `AutoInterface` voor bereikbare Ethe
 
 1. Field maakt bijvoorbeeld een `chat.message`, `position.updated` of `marker.created` event.
 2. Coördinaten en compacte velden worden genormaliseerd.
-3. Het event wordt met de persistente Field-identiteit ondertekend.
-4. Een identified Reticulum Link of Channel transporteert het event.
-5. Command controleert identiteit, signature en eventvorm.
-6. Alleen geaccepteerde events worden in SQLite opgeslagen.
-7. De live WebSocket pusht het geverifieerde resultaat onmiddellijk naar de Command-UI.
-8. Field haalt feed, taken, privéberichten en audio via een identified encrypted Link op.
+3. Field slaat het event direct per team op en toont het als `LOCAL · QUEUED`; daarvoor is geen Command-pad nodig.
+4. Zodra de teamdestination bereikbaar is, wordt het event met de persistente Field-identiteit ondertekend.
+5. Een identified Reticulum Link of Channel transporteert het event.
+6. De ontvangende teamhost controleert identiteit, signature en eventvorm.
+7. Alleen geldige ontvangen events komen in de geverifieerde SQLite-feed.
+8. De lokale outbox markeert het event na bevestiging als geleverd.
+9. Field haalt de gedeelde feed, taken, privéberichten en audio via een identified encrypted Link op.
 
 Iedere weergegeven netwerkgebeurtenis kan een sender identity, packet hash, delivery proof en ontvangende interface tonen.
 
@@ -209,6 +210,9 @@ $env:RETIUM_TRANSCRIPTION_MODEL = "base"      # standaardmodel
 ## Locatie, kaarten en navigatie
 
 - Tijdens beweging wordt maximaal iedere 15 seconden een fix verstuurd; stilstaand volgt een heartbeat na 60 seconden.
+- De eigen GPS-positie verschijnt lokaal op de kaart, ook wanneer de teamdestination offline is en zonder de positie automatisch te delen.
+- Berichten, markers, tekeningen, positie-updates en opgenomen team-PTT worden direct lokaal opgeslagen. Ze blijven bruikbaar en gaan in een persistente Reticulum-outbox totdat de teamhost weer bereikbaar is.
+- De outbox bewaart bij langdurige offline beweging alleen de nieuwste nog niet verstuurde positiefix; lokale historie blijft wel op de kaart beschikbaar.
 - Fixes slechter dan 100 meter worden niet verzonden.
 - De zichtbare trail weegt accuracy mee, filtert fixes slechter dan 150 meter en isoleert onwaarschijnlijke GPS-sprongen.
 - Een plotselinge verplaatsing wordt pas gebruikt na een tweede consistente fix.
@@ -224,7 +228,8 @@ Offline map packs bevatten de zichtbare vector tiles plus veelgebruikte labelgly
 Wat Reticom wél doet:
 
 - persistente cryptografische identiteit per Command- en Field-node;
-- ondertekende events en verificatie vóór opslag/weergave;
+- ontvangen Reticulum-events worden vóór opslag en weergave cryptografisch geverifieerd;
+- eigen nog niet verzonden events zijn expliciet gemarkeerd als lokaal en queued en worden bij transport ondertekend;
 - identified encrypted Reticulum Links voor feed, audio, taken en privéverkeer;
 - geauthenticeerde live Channels voor PTT;
 - signed tombstones voor verwijderde berichten en kaartobjecten;
@@ -332,6 +337,7 @@ retium/
 │  ├─ transport.py           Reticulum destinations, Links en delivery
 │  ├─ live_voice.py          Reticulum Channel voor live PTT
 │  ├─ store.py               SQLite-eventopslag
+│  ├─ outbox.py              Persistente lokale Field-wachtrij
 │  ├─ team.py                Teams, announces, join en modules
 │  ├─ tasks.py               Opdrachten
 │  ├─ ptt.py                 Audioclips en metadata

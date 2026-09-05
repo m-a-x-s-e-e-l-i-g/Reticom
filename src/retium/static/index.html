@@ -99,21 +99,23 @@
     </details>
     <details id="advancedNetworkSettings" class="advanced-network-settings">
       <summary>
-        <span><small>ADVANCED NETWORK</small><strong>Reticulum node</strong></span>
+        <span><small>ADVANCED NETWORK</small><strong>Internet connection</strong></span>
         <b id="networkRoutingMode">AUTO</b>
       </summary>
       <div class="advanced-network-body">
         <div class="network-route-strip">
-          <span>NEARBY</span><i></i><span>BOOTSTRAP</span><i></i><span>DISCOVERED</span>
+          <span>4G/5G OR WI-FI</span><i></i><span>INTERNET NODE</span><i></i><span>RETICULUM</span>
         </div>
-        <p id="networkRoutingSummary">Automatic routing uses nearby Wi-Fi and the built-in community bootstrap pool.</p>
-        <label for="customNodeHost">CHOSEN NODE · OPTIONAL</label>
+        <p>Use your existing Internet connection to reach the Reticulum network through an Internet TCP node.</p>
+        <p id="networkRoutingSummary">Auto connects through built-in community Internet nodes and discovers additional TCP nodes.</p>
+        <label for="customNodeHost">CUSTOM INTERNET TCP NODE · OPTIONAL</label>
         <div class="custom-node-control">
           <input id="customNodeHost" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="node.example.org">
-          <input id="customNodePort" type="number" inputmode="numeric" min="1" max="65535" value="4242" aria-label="Chosen node port">
+          <input id="customNodePort" type="number" inputmode="numeric" min="1" max="65535" value="4242" aria-label="Internet node TCP port">
         </div>
-        <button id="saveNetworkSettings" type="button" class="secondary">SAVE NETWORK SETTING</button>
-        <small id="networkSettingsStatus">Leave blank for automatic routing. A chosen node stays connected while the community pool remains available as fallback.</small>
+        <button id="saveNetworkSettings" type="button" class="secondary">SAVE INTERNET CONNECTION</button>
+        <small id="networkSettingsStatus">Leave blank for Auto. Enter a hostname or IP address and TCP port to use your own Internet node.</small>
+        <small>Nearby Wi-Fi peers connect separately. No VPN is required.</small>
       </div>
     </details>
     <p class="safety-copy">This callsign, icon, and color are signed into your Reticulum events. Your cryptographic identity remains unchanged.</p>

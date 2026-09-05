@@ -4023,11 +4023,11 @@ async function loadNetworkSettings() {
     $("customNodePort").value = custom?.port || 4242;
     $("networkRoutingMode").textContent = custom ? "CUSTOM + AUTO" : "AUTO";
     $("networkRoutingSummary").textContent = custom
-      ? `${custom.host}:${custom.port} stays connected · ${data.community_bootstraps.length} community bootstraps remain available.`
-      : `Nearby Wi-Fi first · ${data.community_bootstraps.length} community bootstraps · up to ${data.autoconnect_count} discovered interfaces.`;
+      ? `Internet TCP node: ${custom.host}:${custom.port}. Auto community connections remain available as fallback.`
+      : `Auto uses ${data.community_bootstraps.length} built-in community Internet TCP nodes and can connect to up to ${data.autoconnect_count} discovered TCP nodes over 4G/5G or Internet Wi-Fi.`;
     status.textContent = custom
-      ? "Chosen node is saved. Changes apply after Reticom is fully restarted."
-      : "Leave blank for automatic routing. Add a trusted node only when you deliberately want to keep it connected.";
+      ? "Custom Internet node saved. Fully restart Reticom to apply connection changes."
+      : "Leave blank for Auto. To use your own Internet node, enter its hostname or IP address and TCP port. Fully restart Reticom after saving changes.";
   } catch (error) {
     status.textContent = error.message;
   }
@@ -5253,7 +5253,7 @@ $("saveNetworkSettings").addEventListener("click", async (event) => {
     });
     const custom = data.custom_node;
     await loadNetworkSettings();
-    toast(custom ? `Chosen node saved · ${custom.host}:${custom.port}` : "Automatic community routing restored");
+    toast(custom ? `Internet node saved · ${custom.host}:${custom.port}` : "Auto Internet connections restored · restart Reticom to apply");
   } catch (error) {
     $("networkSettingsStatus").textContent = error.message;
     toast(error.message, true);

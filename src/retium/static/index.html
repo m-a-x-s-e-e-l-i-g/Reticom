@@ -6,13 +6,15 @@
   <meta name="theme-color" content="#101712">
   <title>Reticom</title>
   <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css?v=6.6.0">
-  <link rel="stylesheet" href="/styles.css?v=20260904-2">
+  <link rel="stylesheet" href="/styles.css?v=20260905-1">
 </head>
 <body>
   <div class="noise"></div>
   <header class="topbar">
     <div class="brand"><span class="brand-mark">R</span><span>RETICOM</span></div>
-    <div class="network-pill"><i id="networkDot"></i><span id="networkLabel">Starting Reticulum…</span></div>
+    <button id="networkToggle" class="connectivity-toggle" type="button" aria-label="Connection details" aria-expanded="false" aria-controls="connectivityPanel" title="Connection details">
+      <span class="connectivity-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    </button>
     <button id="incomingAlertsToggle" class="incoming-alerts-toggle hidden" aria-pressed="false" aria-label="Arm incoming text to speech and voice autoplay" title="Arm incoming text to speech and voice autoplay">
       <svg class="alerts-sound-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4h3l4 3V7L8 10H5Zm10-1.5a5 5 0 0 1 0 7M17.5 6a9 9 0 0 1 0 12"/></svg>
       <svg class="alerts-muted-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4h3l4 3V7L8 10H5"/><path d="m16 9 5 5m0-5-5 5"/></svg>
@@ -34,6 +36,13 @@
     <div class="role" id="roleLabel">NODE</div>
   </header>
 
+  <section id="connectivityPanel" class="connectivity-panel hidden" aria-label="Connection details">
+    <div class="settings-head"><h2>Connection</h2><button id="closeConnectivity" class="text-button" type="button">CLOSE</button></div>
+    <strong id="connectivitySummary">Checking connection…</strong>
+    <dl id="connectivityMetrics"></dl>
+    <ul id="connectivityLinks"></ul>
+    <small>Bars show Reticulum connectivity, not cellular reception. One bar means connected but unmeasured. Measured team responses: four bars ≤300 ms, three ≤1 s, two slower. Measurements expire after 45 seconds.</small>
+  </section>
   <aside id="userSettingsPanel" class="settings-panel hidden" aria-label="User settings">
     <div class="settings-head"><div><span class="eyebrow">USER SETTINGS</span><h2>Field identity</h2></div><button id="closeUserSettings" class="text-button">CLOSE</button></div>
     <label>CALLSIGN<input id="settingsCallsign" maxlength="24" autocomplete="nickname"></label>
@@ -444,6 +453,6 @@
   </nav>
 
   <div id="toast" class="toast"></div>
-  <script type="module" src="/app.js?v=20260904-2"></script>
+  <script type="module" src="/app.js?v=20260905-1"></script>
 </body>
 </html>

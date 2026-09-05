@@ -1,3 +1,4 @@
+import {connectivityState} from "./connectivity.js?v=20260905-1";
 import {displayPositionSeries, distanceMeters, MAX_AUTOMATIC_ACCURACY_METERS} from "./location-filter.js?v=20260903-1";
 import {nextWaypointLabel, withDisplayWaypointLabels} from "./map-labels.js?v=20260903-2";
 import {formatMapBytes, packProgress, tileCountForBounds} from "./map-offline.js?v=20260903-1";
@@ -1153,16 +1154,55 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"})[char]);
 }
 
-function interfacesUp(network) {
-  const interfaces = network?.interfaces?.interfaces || [];
-  return interfaces.filter((item) => item.status === true || item.online === true || item.status === "Up").length || interfaces.length;
-}
+let connectivitySnapshot = null;
+let connectivityProbe = null;
 
 function setNetwork(state) {
-  const live = interfacesUp(state.network) > 0;
-  $("networkDot").parentElement.classList.toggle("live", live);
-  $("networkLabel").textContent = live ? `RETICULUM LIVE · ${interfacesUp(state.network)} LINK` : "RETICULUM STARTING";
+  if (state?.team?.destination !== connectivitySnapshot?.team?.destination) connectivityProbe = null;
+  connectivitySnapshot = state;
+  renderConnectivity();
 }
+
+function renderConnectivity() {
+  const info = connectivityState(connectivitySnapshot, connectivityProbe);
+  const toggle = $("networkToggle");
+  toggle.dataset.level = info.bars;
+  toggle.title = `${info.label} · connection details`;
+  toggle.setAttribute("aria-label", `${info.label}. Open connection details`);
+  toggle.querySelectorAll("i").forEach((bar, index) => bar.classList.toggle("active", index < info.bars));
+  $("connectivitySummary").textContent = info.label;
+  const metrics = [
+    ["Active links", `${info.active.length} / ${info.interfaces.length}`],
+    ["Team", info.team],
+    ["Response", info.latency === null ? "Not measured" : `${Math.round(info.latency)} ms`],
+    ["Queued", connectivitySnapshot ? String(fieldQueuedEvents || connectivitySnapshot.network?.queued_events || 0) : "Unknown"],
+  ];
+  $("connectivityMetrics").innerHTML = metrics.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+  $("connectivityLinks").innerHTML = info.interfaces.map((item) => `<li><span>${escapeHtml(item.short_name || item.name || item.type || "Interface")}</span><small>${info.active.includes(item) ? "UP" : "IDLE / DOWN"}</small></li>`).join("");
+}
+
+function closeConnectivity() {
+  $("connectivityPanel").classList.add("hidden");
+  $("networkToggle").setAttribute("aria-expanded", "false");
+}
+$("networkToggle").addEventListener("click", (event) => {
+  event.stopPropagation();
+  const opening = $("connectivityPanel").classList.contains("hidden");
+  renderConnectivity();
+  $("connectivityPanel").classList.toggle("hidden", !opening);
+  $("networkToggle").setAttribute("aria-expanded", String(opening));
+  if (opening) $("closeConnectivity").focus();
+});
+$("closeConnectivity").addEventListener("click", () => { closeConnectivity(); $("networkToggle").focus(); });
+document.addEventListener("click", (event) => {
+  if (!$("connectivityPanel").contains(event.target) && !$("networkToggle").contains(event.target)) closeConnectivity();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("connectivityPanel").classList.contains("hidden")) {
+    closeConnectivity(); $("networkToggle").focus();
+  }
+});
+setInterval(renderConnectivity, 5000);
 
 function voiceTime(seconds, compact = false) {
   const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
@@ -3896,6 +3936,8 @@ async function refreshFeed() {
     if (data.team) renderTeam(data.team);
     fieldFeedOnline = data.network?.online !== false;
     fieldQueuedEvents = Number(data.network?.queued || 0);
+    connectivityProbe = {at: Date.now(), online: fieldFeedOnline, ms: data.network?.response_ms};
+    renderConnectivity();
     fieldEvents = withDisplayWaypointLabels(data.events || []);
     privateMessages = Array.isArray(data.private_events) ? data.private_events : [];
     saveFieldEventCache(fieldTeamDestination, fieldEvents);
@@ -3915,6 +3957,8 @@ async function refreshFeed() {
     $("fieldFeedSync").classList.toggle("synced", fieldFeedOnline);
   } catch (error) {
     fieldFeedOnline = false;
+    connectivityProbe = {at: Date.now(), online: false};
+    renderConnectivity();
     $("fieldFeedSync").textContent = fieldMapOnline ? "MAP ONLINE · RNS OFFLINE" : "RNS OFFLINE";
     $("fieldFeedSync").classList.remove("synced");
   } finally {
@@ -3993,8 +4037,7 @@ async function refresh() {
     if (role === "field" && state.team.joined) refreshFeed();
     if (role === "field" && state.team.joined && activePrivatePeer) refreshPrivateChat();
   } catch (error) {
-    $("networkLabel").textContent = "NODE UNREACHABLE";
-    $("networkDot").parentElement.classList.remove("live");
+    setNetwork(null);
   }
 }
 

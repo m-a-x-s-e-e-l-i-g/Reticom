@@ -1,0 +1,12 @@
+# Allow only reproducible application source into the build context.
+**
+!Dockerfile
+!requirements.txt
+!LICENSE
+!src/
+!src/retium/
+!src/retium/**
+!docker/
+!docker/entrypoint.py
+**/__pycache__/
+**/*.pyc

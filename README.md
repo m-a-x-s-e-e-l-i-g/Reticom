@@ -274,6 +274,20 @@ Stop beide processen met:
 
 Runtimebestanden en logs komen in `runtime/`. De scripts weigeren te starten wanneer de gekozen poorten of de lokale Reticulum-carrier al bezet zijn.
 
+## Lokaal draaien met Docker
+
+Met Docker Desktop (Linux containers) of Docker Engine met Compose:
+
+```sh
+docker compose up -d --build --wait
+```
+
+Open **Command op http://localhost:8780** en **Field op http://localhost:8781**. Maak in Command een team en gebruik de join code in Field. Beide containers draaien een eigen echte Reticulum-node, verbonden via TCP; de community Internet-nodes blijven beschikbaar.
+
+Identiteiten, teamdata, audio en offline kaarten blijven bewaard in afzonderlijke Docker-volumes. `docker compose stop` stopt de applicatie; opnieuw starten of bouwen behoudt je gegevens. De bestaande Windows- en Android-data worden niet automatisch overgenomen.
+
+Zie [Docker-handleiding](docker/README.md) voor andere poorten, verbinding vanaf de telefoon, transcriptie en lokaal ontwikkelen.
+
 ## Android APK bouwen
 
 De APK is een zelfstandige Field-node. De telefoon bedient dus niet simpelweg de Windows-webserver: Python, Reticulum, de persistente identity, lokale opslag, background alerts en de Field-UI zitten in de app.

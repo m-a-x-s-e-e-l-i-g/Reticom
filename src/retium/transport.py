@@ -18,9 +18,11 @@ from .live_voice import (
     validate_live_metadata,
 )
 from .protocol import ProtocolError, new_event, sign_event, verify_envelope
+from .live_heading import HeadingHub, HeadingClient
 from .ptt import PTTError
 from .store import EventStore, PrivateMessageStore
 from .team import AVAILABLE_MODULES, TEAM_NAME_MAX_LENGTH, encode_join_code
+from .membership import Membership
 
 APP_NAME = "retium"
 ASPECTS = ("event", "ingress")
@@ -28,12 +30,18 @@ TEAM_ANNOUNCE_KIND = "team"
 TEAM_ANNOUNCE_VERSION = 1
 TEAM_ANNOUNCE_MAX_AGE = 180
 LINK_EVENT_TYPES = {
+    "team.joined",
+    "profile.updated",
+    "navigation.updated",
+    "navigation.stopped",
     "chat.message",
     "drawing.created",
     "drawing.deleted",
     "marker.created",
+    "marker.status",
     "marker.deleted",
     "message.deleted",
+    "report.dismissed",
     "position.updated",
     "task.completed",
 }
@@ -86,6 +94,7 @@ class GatewayReceiver:
         team_modules: list[str] | None = None,
         task_response: Callable[[], bytes] | None = None,
         feed_response: Callable[[], bytes] | None = None,
+        mission_response: Callable[[], bytes] | None = None,
         save_ptt: Callable[[str, bytes, str], None] | None = None,
         audio_response: Callable[[str], tuple[bytes, str]] | None = None,
         transcription_response: Callable[[str, bool], dict[str, Any]] | None = None,
@@ -107,14 +116,19 @@ class GatewayReceiver:
         self.everyone_admin = everyone_admin
         self.task_response = task_response
         self.feed_response = feed_response
+        self.mission_response = mission_response
+        from .mission import MissionPublisher
+        self.missions = MissionPublisher()
         self.save_ptt = save_ptt
         self.audio_response = audio_response
         self.transcription_response = transcription_response
         self.admin_response = admin_response
+        self.continuity = None
         self.reticulum = RNS.Reticulum.get_instance() or RNS.Reticulum(
             str(config_dir)
         )
         self.identity = _load_or_create_identity(data_dir / "gateway.identity")
+        self.membership = Membership(data_dir, self.identity)
         self.destination = RNS.Destination(
             self.identity,
             RNS.Destination.IN,
@@ -125,6 +139,12 @@ class GatewayReceiver:
         self.destination.set_proof_strategy(RNS.Destination.PROVE_ALL)
         self.destination.set_packet_callback(self._packet_received)
         self.destination.set_link_established_callback(self._link_established)
+        self.destination.register_request_handler("/membership", response_generator=self._membership_request, allow=RNS.Destination.ALLOW_ALL)
+        self.destination.register_request_handler(
+            "/membership/admin",
+            response_generator=self._membership_admin_request,
+            allow=RNS.Destination.ALLOW_ALL,
+        )
         self.destination.register_request_handler(
             "/tasks",
             response_generator=self._tasks_request,
@@ -173,6 +193,7 @@ class GatewayReceiver:
         self._live_links: set[Any] = set()
         self._live_streams: dict[str, dict[str, Any]] = {}
         self._live_assembler = LiveVoiceAssembler()
+        self.headings = HeadingHub(self._emit_live, lambda: getattr(self, "continuity", None) is None or self.continuity.ready(), self.member_allowed)
         self._stop = threading.Event()
         self._announce_thread = threading.Thread(target=self._announce_loop, daemon=True)
 
@@ -201,12 +222,14 @@ class GatewayReceiver:
         self._emit_live({"type": "live.transport", "ready": peers > 0, "peers": peers})
 
     def _link_established(self, link: Any) -> None:
+        self.headings.attach(link)
         channel = link.get_channel()
         channel.register_message_type(LiveVoiceMessage)
         channel.add_message_handler(lambda message: self._receive_live(link, message))
         link.set_link_closed_callback(self._live_link_closed)
 
     def _live_link_closed(self, link: Any) -> None:
+        self.headings.disconnected(link)
         ended: list[dict[str, Any]] = []
         with self._live_lock:
             self._live_links.discard(link)
@@ -224,6 +247,7 @@ class GatewayReceiver:
                 link
                 for link in self._live_links
                 if link is not excluded and link.status == RNS.Link.ACTIVE
+                and self.member_allowed(link.get_remote_identity())
             ]
 
     def _drop_live_link(self, link: Any) -> None:
@@ -268,10 +292,15 @@ class GatewayReceiver:
         return delivered
 
     def _receive_live(self, link: Any, message: Any) -> bool:
+        if getattr(self, "continuity", None) is not None and not self.continuity.ready():
+            return False
         if not isinstance(message, LiveVoiceMessage):
             return False
         try:
             remote_identity = link.get_remote_identity()
+            if not self.member_allowed(remote_identity):
+                self._drop_live_link(link)
+                return True
             if message.kind == LiveVoiceMessage.HELLO:
                 if remote_identity is None:
                     return True
@@ -444,6 +473,8 @@ class GatewayReceiver:
         return peers
 
     def _announce_data(self) -> bytes:
+        if self.continuity is not None and not self.continuity.owner:
+            return json.dumps({"v": 1, "kind": "replica", "team": self.continuity.root}).encode()
         return json.dumps(
             {
                 "v": TEAM_ANNOUNCE_VERSION,
@@ -483,11 +514,9 @@ class GatewayReceiver:
         requested_at: float,
     ) -> bytes:
         del path, data, request_id, link_id, requested_at
-        if remote_identity is None:
-            return json.dumps(
-                {"module": "tasks", "error": "field identity required"},
-                separators=(",", ":"),
-            ).encode("utf-8")
+        error = self._identity_error(remote_identity)
+        if error is not None:
+            return error
         if "tasks" not in self.team_modules or self.task_response is None:
             return json.dumps(
                 {"module": "tasks", "enabled": False, "tasks": []},
@@ -495,25 +524,86 @@ class GatewayReceiver:
             ).encode("utf-8")
         return self.task_response()
 
-    @staticmethod
-    def _identity_error(remote_identity: RNS.Identity | None) -> bytes | None:
+    def member_allowed(self, identity) -> bool:
+        if identity is None or not hasattr(self, "membership"):
+            return False
+        continuity = getattr(self, "continuity", None)
+        if continuity is not None and not continuity.ready():
+            return False
+        if self.membership.approved(identity.hash.hex()):
+            return True
+        # Explicitly approved replica hosts already hold the complete team data.
+        return bool(continuity and continuity.directory.envelope and any(
+            h["public_key"] == identity.get_public_key().hex() for h in continuity.directory.envelope["policy"]["hosts"]))
+
+    def _membership_request(self, path, data, request_id, link_id, remote_identity, requested_at):
+        if remote_identity is None:
+            return b'{"error":"Identified link required"}'
+        try:
+            if not isinstance(data, dict) or set(data) != {"callsign"}:
+                raise ValueError("Invalid membership request")
+            result = self.membership.request(remote_identity.hash.hex(), data["callsign"])
+            return json.dumps(result, separators=(",", ":")).encode()
+        except (ValueError, TypeError):
+            return b'{"error":"Unable to request membership; check callsign or contact team owner"}'
+
+    def _membership_admin_request(self, path, data, request_id, link_id, remote_identity, requested_at):
+        """Let a verified all-admin member manage the owner-signed roster.
+
+        The team host remains the only signer of the membership policy.  This
+        identified request merely delegates a decision to it after checking
+        that the requester is already an approved team member and that the
+        owner enabled the explicit everyone-admin policy.
+        """
+        del path, request_id, link_id, requested_at
+        if remote_identity is None:
+            return b'{"error":"Identified link required"}'
+        if not self.member_allowed(remote_identity) or not self.everyone_admin:
+            return b'{"error":"Team admin rights are required"}'
+        try:
+            if not isinstance(data, dict) or data.get("action") not in {"list", "decide"}:
+                raise ValueError("Invalid membership admin request")
+            if data["action"] == "list":
+                if set(data) != {"action"}:
+                    raise ValueError("Invalid membership admin request")
+                return json.dumps(self.membership.listing(), separators=(",", ":")).encode()
+            if set(data) - {"action", "identity", "status", "callsign"}:
+                raise ValueError("Invalid membership decision")
+            self.membership.decide(data.get("identity"), data.get("status"), data.get("callsign"))
+            self.enforce_membership()
+            return json.dumps(self.membership.listing(), separators=(",", ":")).encode()
+        except (PermissionError, TypeError, ValueError) as exc:
+            return json.dumps({"error": str(exc)}, separators=(",", ":")).encode()
+
+    def _identity_error(self, remote_identity: RNS.Identity | None) -> bytes | None:
         if remote_identity is None:
             return json.dumps(
                 {"error": "field identity required"}, separators=(",", ":")
             ).encode("utf-8")
+        if not self.member_allowed(remote_identity):
+            status = self.membership.status(remote_identity.hash.hex()) if hasattr(self, "membership") else "pending"
+            return json.dumps({"error": "Team membership approval required" if status == "pending" else "Team membership " + status,
+                "membership_status": status}, separators=(",", ":")).encode()
         return None
 
     def _feed_request(
         self, path: str, data: Any, request_id: bytes, link_id: bytes,
         remote_identity: RNS.Identity | None, requested_at: float,
     ) -> bytes:
-        del path, data, request_id, link_id, requested_at
+        del path, request_id, link_id, requested_at
         error = self._identity_error(remote_identity)
         if error is not None:
             return error
         if self.feed_response is None:
             return b'{"events":[]}'
         try:
+            if isinstance(data, dict) and "mission" in data and getattr(self, "mission_response", None):
+                def build_mission():
+                    payload = json.loads(self.mission_response().decode("utf-8"))
+                    payload["private_events"] = self.private_store.recent(remote_identity.hash.hex(), since=self.team_created_at) if self.private_store is not None else []
+                    return payload
+                payload = self.missions.page(remote_identity.hash.hex(), data["mission"], build_mission)
+                return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             payload = json.loads(self.feed_response().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("invalid feed response")
@@ -603,6 +693,14 @@ class GatewayReceiver:
             if event["type"] not in LINK_EVENT_TYPES:
                 raise ProtocolError("unsupported linked event")
             admin_moderation = False
+            if event["type"] == "report.dismissed":
+                target = self.store.automatic_report_source(event["message_id"])
+                if target is None:
+                    raise ProtocolError("automatic report source not found")
+                if target["sender_hash"] != sender_hash:
+                    if not self.everyone_admin:
+                        raise ProtocolError("only the reporter or a team admin can remove this automatic report")
+                    admin_moderation = True
             if (
                 event["type"] == "message.deleted"
                 and not self.store.message_owned_by(event["message_id"], sender_hash)
@@ -613,13 +711,13 @@ class GatewayReceiver:
                     raise ProtocolError("message not found")
                 admin_moderation = True
             if (
-                event["type"] == "marker.deleted"
+                event["type"] in {"marker.deleted", "marker.status"}
                 and not self.store.map_event_owned_by(
                     event["marker_id"], "marker.created", sender_hash
                 )
             ):
                 if not self.everyone_admin:
-                    raise ProtocolError("only the original sender can remove this marker")
+                    raise ProtocolError("only the reporter or a team admin can change this marker")
                 if self.store.map_event(event["marker_id"], "marker.created") is None:
                     raise ProtocolError("marker not found")
                 admin_moderation = True
@@ -723,10 +821,14 @@ class GatewayReceiver:
     def _known_private_identity(self, identity_hash: str) -> bool:
         if identity_hash == self.identity.hash.hex():
             return True
-        return any(
-            operator["sender_hash"] == identity_hash
-            for operator in self.store.operators(since=self.team_created_at)
-        )
+        return hasattr(self, "membership") and self.membership.approved(identity_hash)
+
+    def enforce_membership(self):
+        """End already-established subscriptions/transfers after a revocation."""
+        for link in list(self.destination.links):
+            identity = link.get_remote_identity()
+            if identity is not None and self.membership.status(identity.hash.hex()) in {"revoked", "rejected"}:
+                link.teardown()
 
     def _private_messages_request(
         self, path: str, data: Any, request_id: bytes, link_id: bytes,
@@ -872,8 +974,17 @@ class GatewayReceiver:
             self._announce()
 
     def _packet_received(self, raw: bytes, packet: RNS.Packet) -> None:
+        if self.continuity is not None and not self.continuity.ready():
+            return
         try:
             event, sender_hash = verify_envelope(raw)
+            if event["type"] == "team.joined" and not self.membership.approved(sender_hash):
+                self.membership.request(sender_hash, event["callsign"])
+                return
+            if not self.membership.approved(sender_hash):
+                raise ProtocolError("Team membership approval required")
+            if event["type"] in {"marker.status", "report.dismissed"}:
+                raise ProtocolError("report status changes require an identified Reticulum link")
             if event["type"] in {"private.message", "private.ptt"}:
                 raise ProtocolError("private communications require an identified Reticulum link")
             receiving_interface = getattr(packet, "receiving_interface", None)
@@ -918,6 +1029,8 @@ class GatewayReceiver:
             raise ProtocolError("use the private Reticulum mailbox")
         envelope = sign_event(event, self.identity, packet_limit=False)
         verified_event, sender_hash = verify_envelope(envelope)
+        if verified_event["type"] == "report.dismissed" and self.store.automatic_report_source(verified_event["message_id"]) is None:
+            raise ProtocolError("automatic report source not found")
         envelope_hash = RNS.Identity.full_hash(envelope).hex()
         received_at = int(time.time())
         inserted = self.store.insert(
@@ -966,6 +1079,10 @@ class GatewayReceiver:
         verified_event, sender_hash = verify_envelope(envelope)
         if verified_event["type"] in {"private.message", "private.ptt"}:
             raise ProtocolError("use the private Reticulum mailbox")
+        if verified_event["type"] == "report.dismissed":
+            target = self.store.automatic_report_source(verified_event["message_id"])
+            if target is None or (target["sender_hash"] != sender_hash and not admin):
+                raise ProtocolError("only the reporter or a team admin can remove this automatic report")
         if verified_event["type"] == "message.deleted" and not self.store.message_owned_by(
             verified_event["message_id"], sender_hash
         ):
@@ -973,13 +1090,13 @@ class GatewayReceiver:
                 verified_event["message_id"], "chat.message"
             ):
                 raise ProtocolError("only the original sender can remove this message")
-        if verified_event["type"] == "marker.deleted" and not self.store.map_event_owned_by(
+        if verified_event["type"] in {"marker.deleted", "marker.status"} and not self.store.map_event_owned_by(
             verified_event["marker_id"], "marker.created", sender_hash
         ):
             if not admin or self.store.map_event(
                 verified_event["marker_id"], "marker.created"
             ) is None:
-                raise ProtocolError("only the original sender can remove this marker")
+                raise ProtocolError("only the reporter or a team admin can change this marker")
         if verified_event["type"] == "drawing.deleted" and not self.store.map_event_owned_by(
             verified_event["drawing_id"], "drawing.created", sender_hash
         ):
@@ -993,7 +1110,7 @@ class GatewayReceiver:
             verified_event,
             sender_hash,
             packet_hash=envelope_hash,
-            interface_name="Hosted Field origin · Reticulum feed",
+            interface_name="Team admin · Authenticated Reticulum Link" if admin and verified_event["type"] in {"marker.status", "report.dismissed"} else "Hosted Field origin · Reticulum feed",
         )
         if not inserted:
             raise ProtocolError("field event already exists")
@@ -1119,13 +1236,17 @@ class GatewayReceiver:
         }
 
     def stop(self) -> None:
+        if self.continuity is not None:
+            self.continuity.stop()
         self._stop.set()
-        for link in self._live_links_except():
+        self.destination.accepts_links(False)
+        RNS.Transport.deregister_destination(self.destination)
+        # Also close ordinary feed/admin links when a Command team stops hosting.
+        for link in set(self.destination.links) | set(self._live_links_except()):
             try:
                 link.teardown()
             except Exception:
                 pass
-        RNS.Transport.deregister_destination(self.destination)
 
 
 class TeamAnnounceHandler:
@@ -1204,11 +1325,16 @@ class FieldSender:
             str(config_dir)
         )
         self.identity = _load_or_create_identity(data_dir / "field.identity")
+        self.directory_path = data_dir / "team-hosts"
+        self.host_directory = None
         self._send_lock = threading.Lock()
         self.gateway_hash = (
             self._parse_gateway_hash(gateway_hash) if gateway_hash is not None else None
         )
+        if self.gateway_hash is not None:
+            self._load_host_directory()
         self.last_delivery: dict[str, Any] | None = None
+        self.membership_status = "unknown"
         self.live_callback = live_callback
         self._live_connect_lock = threading.Lock()
         self._live_lock = threading.RLock()
@@ -1219,6 +1345,8 @@ class FieldSender:
         self._live_streams: set[str] = set()
         self._live_assembler = LiveVoiceAssembler()
         self.announce_handler = TeamAnnounceHandler()
+        self.headings = HeadingClient(self.identity, self._destination, self._emit_live,
+            lambda destination: self.host_directory.failed(destination) if self.host_directory else None)
         RNS.Transport.register_announce_handler(self.announce_handler)
 
     @staticmethod
@@ -1235,11 +1363,29 @@ class FieldSender:
         parsed = self._parse_gateway_hash(gateway_hash)
         with self._send_lock:
             self.close_live_link()
+            self.headings.close()
             self.gateway_hash = parsed
+            self._load_host_directory()
             self.last_delivery = None
+            self.membership_status = "unknown"
         if not RNS.Transport.has_path(parsed):
             RNS.Transport.request_path(parsed)
         return parsed.hex()
+
+    def _load_host_directory(self):
+        from .continuity import HostDirectory
+        root = self.gateway_hash.hex()
+        self.host_directory = HostDirectory(self.directory_path / f"{root}.json", root)
+
+    def clear_gateway(self):
+        """Leave the team transport as well as its local UI membership."""
+        with self._send_lock:
+            self.close_live_link()
+            self.headings.close()
+            self.gateway_hash = None
+            self.host_directory = None
+            self.membership_status = "unknown"
+            self.last_delivery = None
 
     def _emit_live(self, frame: dict[str, Any]) -> None:
         if self.live_callback is not None:
@@ -1438,12 +1584,13 @@ class FieldSender:
     def _destination(self, timeout: float = 12.0) -> RNS.Destination:
         if self.gateway_hash is None:
             raise RuntimeError("Join a team first")
+        target = bytes.fromhex(self.host_directory.candidates()[0]) if self.host_directory else self.gateway_hash
         deadline = time.monotonic() + timeout
-        if not RNS.Transport.has_path(self.gateway_hash):
-            RNS.Transport.request_path(self.gateway_hash)
+        if not RNS.Transport.has_path(target):
+            RNS.Transport.request_path(target)
         while time.monotonic() < deadline:
-            if RNS.Transport.has_path(self.gateway_hash):
-                identity = RNS.Identity.recall(self.gateway_hash)
+            if RNS.Transport.has_path(target):
+                identity = RNS.Identity.recall(target)
                 if identity is not None:
                     return RNS.Destination(
                         identity,
@@ -1453,76 +1600,38 @@ class FieldSender:
                         *ASPECTS,
                     )
             time.sleep(0.1)
+        if self.host_directory:
+            self.host_directory.failed(target.hex())
         raise TimeoutError("No Reticulum path to the Command destination")
 
     def send_event(self, event: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+        # A packet proof confirms transport reception, not membership acceptance.
+        return self.send_link_event(event, timeout=timeout)
+
+    def request_membership(self, callsign, timeout=5.0):
         with self._send_lock:
-            destination = self._destination()
-            encoded = sign_event(event, self.identity)
-            try:
-                receipt = RNS.Packet(destination, encoded).send()
-            except OSError as exc:
-                raise ProtocolError(
-                    "signed Reticulum event is too large; shorten the message"
-                ) from exc
-            receipt.set_timeout(timeout)
-            deadline = time.monotonic() + timeout + 1
-            while receipt.get_status() == RNS.PacketReceipt.SENT and time.monotonic() < deadline:
-                time.sleep(0.05)
-            delivered = receipt.get_status() == RNS.PacketReceipt.DELIVERED
-            result = {
-                "event_id": event["id"],
-                "delivered": delivered,
-                "status": "delivered" if delivered else "failed",
-                "rtt_ms": round(receipt.get_rtt() * 1000, 2) if delivered else None,
-                "packet_bytes": len(encoded),
-                "gateway": self.gateway_hash.hex(),
-            }
-            self.last_delivery = result
-            if not delivered:
-                raise TimeoutError("Reticulum packet was not proven by Command")
+            response, _ = self._identified_request("/membership", {"callsign": callsign}, timeout=timeout, max_response_size=4096)
+            result = self._json_response(response, "membership")
+            if result.get("identity") != self.identity.hash.hex() or result.get("status") not in {"pending", "approved", "rejected", "revoked"}:
+                raise ValueError("Invalid membership status")
+            self.membership_status = result["status"]
             return result
+
+    def request_membership_admin(self, decision: dict[str, Any] | None = None, timeout=12.0) -> dict[str, Any]:
+        """Read or update the team roster through an identified host request."""
+        payload = {"action": "list"} if decision is None else {"action": "decide", **decision}
+        with self._send_lock:
+            response, _ = self._identified_request(
+                "/membership/admin", payload, timeout=timeout, max_response_size=150_000
+            )
+            return self._json_response(response, "membership administration")
 
     def request_tasks(self, timeout: float = 12.0) -> dict[str, Any]:
         with self._send_lock:
-            destination = self._destination(timeout)
-            established = threading.Event()
-            link = RNS.Link(
-                destination,
-                established_callback=lambda _: established.set(),
-            )
-            try:
-                if not established.wait(timeout) or link.status != RNS.Link.ACTIVE:
-                    raise TimeoutError("Could not establish an encrypted Reticulum link")
-                link.identify(self.identity)
-                time.sleep(max(0.15, min(0.75, (link.rtt or 0.1) * 2)))
-                receipt = link.request(
-                    "/tasks", data=b"", timeout=timeout, max_response_size=64_000
-                )
-                if receipt is False:
-                    raise TimeoutError("Could not send task request over Reticulum")
-                deadline = time.monotonic() + timeout + 1
-                while not receipt.concluded() and time.monotonic() < deadline:
-                    time.sleep(0.05)
-                if receipt.get_status() != RNS.RequestReceipt.READY:
-                    raise TimeoutError("Task request was not answered over Reticulum")
-                response = receipt.get_response()
-                if not isinstance(response, bytes):
-                    raise ValueError("Invalid task response")
-                payload = json.loads(response.decode("utf-8"))
-                if not isinstance(payload, dict):
-                    raise ValueError("Invalid task response")
-                if payload.get("error"):
-                    raise PermissionError(str(payload["error"]))
-                payload["network"] = {
-                    "via": "authenticated Reticulum link",
-                    "response_ms": round(receipt.get_response_time() * 1000, 2),
-                    "gateway": self.gateway_hash.hex(),
-                }
-                return payload
-            finally:
-                if link.status not in {RNS.Link.CLOSED, RNS.Link.PENDING}:
-                    link.teardown()
+            response, response_time = self._identified_request("/tasks", b"", timeout=timeout, max_response_size=64_000)
+            payload = self._json_response(response, "tasks")
+            payload["network"] = {"via": "authenticated Reticulum link", "response_ms": round(response_time*1000, 2), "gateway": self.host_directory.active}
+            return payload
 
     def _identified_request(
         self,
@@ -1532,31 +1641,26 @@ class FieldSender:
         timeout: float,
         max_response_size: int,
     ) -> tuple[Any, float]:
-        destination = self._destination(timeout)
-        established = threading.Event()
-        link = RNS.Link(destination, established_callback=lambda _: established.set())
-        try:
-            if not established.wait(timeout) or link.status != RNS.Link.ACTIVE:
-                raise TimeoutError("Could not establish an encrypted Reticulum link")
-            link.identify(self.identity)
-            time.sleep(max(0.15, min(0.75, (link.rtt or 0.1) * 2)))
-            receipt = link.request(
-                path,
-                data=data,
-                timeout=timeout,
-                max_response_size=max_response_size,
-            )
-            if receipt is False:
-                raise TimeoutError(f"Could not send {path} request over Reticulum")
-            deadline = time.monotonic() + timeout + 1
-            while not receipt.concluded() and time.monotonic() < deadline:
-                time.sleep(0.05)
-            if receipt.get_status() != RNS.RequestReceipt.READY:
-                raise TimeoutError(f"{path} request was not answered over Reticulum")
-            return receipt.get_response(), receipt.get_response_time()
-        finally:
-            if link.status not in {RNS.Link.CLOSED, RNS.Link.PENDING}:
-                link.teardown()
+        from .continuity import rpc
+        if self.gateway_hash is None:
+            raise RuntimeError("Join a team first")
+        candidates = self.host_directory.candidates() if self.host_directory else [self.gateway_hash.hex()]
+        if path == "/feed" and isinstance(data, dict) and "mission" in data:
+            # Give a page time to transfer; fail over on the next poll instead
+            # of holding a local HTTP request through several long attempts.
+            candidates = candidates[:1]
+        last_error = None
+        for candidate in candidates:
+            try:
+                result = rpc(self.identity, candidate, path, data, timeout=min(timeout, 5) if len(candidates)>1 else timeout, max_response_size=max_response_size)
+                if self.host_directory:
+                    self.host_directory.active = candidate
+                return result
+            except TimeoutError as exc:
+                last_error = exc
+                if self.host_directory:
+                    self.host_directory.failed(candidate)
+        raise last_error or TimeoutError("No approved team host is reachable")
 
     @staticmethod
     def _json_response(response: Any, label: str) -> dict[str, Any]:
@@ -1569,10 +1673,10 @@ class FieldSender:
             raise PermissionError(str(payload["error"]))
         return payload
 
-    def request_feed(self, timeout: float = 15.0) -> dict[str, Any]:
+    def request_feed(self, timeout: float = 15.0, mission: dict | None = None) -> dict[str, Any]:
         with self._send_lock:
             response, response_time = self._identified_request(
-                "/feed", b"", timeout=timeout, max_response_size=256_000
+                "/feed", {"mission": mission} if mission is not None else b"", timeout=timeout, max_response_size=256_000
             )
             payload = self._json_response(response, "feed")
             payload["network"] = {
@@ -1757,15 +1861,17 @@ class FieldSender:
             return payload
 
     def state(self) -> dict[str, Any]:
+        actual = bytes.fromhex(self.host_directory.active) if self.host_directory else self.gateway_hash
         path_known = bool(
-            self.gateway_hash is not None
-            and RNS.Transport.has_path(self.gateway_hash)
+            actual is not None
+            and RNS.Transport.has_path(actual)
         )
         return {
             "identity": self.identity.hash.hex(),
-            "gateway": self.gateway_hash.hex() if self.gateway_hash is not None else None,
+            "gateway": actual.hex() if actual is not None else None,
+            "team_destination": self.gateway_hash.hex() if self.gateway_hash is not None else None,
             "path_known": path_known,
-            "hops": RNS.Transport.hops_to(self.gateway_hash) if path_known else None,
+            "hops": RNS.Transport.hops_to(actual) if path_known else None,
             "last_delivery": self.last_delivery,
             "live_voice": {
                 "ready": self.live_ready(),
@@ -1776,4 +1882,5 @@ class FieldSender:
 
     def stop(self) -> None:
         self.close_live_link()
+        self.headings.close()
         RNS.Transport.deregister_announce_handler(self.announce_handler)

@@ -1,4 +1,5 @@
 const DEFAULT_ROUTE_SERVICE = "https://router.project-osrm.org";
+export const WALKING_ROUTE_SERVICE = "https://routing.openstreetmap.de/routed-foot";
 
 function validPoint(point) {
   return Array.isArray(point)
@@ -11,8 +12,10 @@ function validPoint(point) {
     && Number(point[1]) <= 90;
 }
 
-export function calculatedRouteUrl(origin, target, service = DEFAULT_ROUTE_SERVICE) {
+export function calculatedRouteUrl(origin, target, service, profile = "driving") {
   if (!validPoint(origin) || !validPoint(target)) return null;
+  if (!["driving", "walking"].includes(profile)) return null;
+  service ??= profile === "walking" ? WALKING_ROUTE_SERVICE : DEFAULT_ROUTE_SERVICE;
   const base = String(service || "").replace(/\/+$/, "");
   if (!base) return null;
   const coordinates = `${Number(origin[0])},${Number(origin[1])};${Number(target[0])},${Number(target[1])}`;
@@ -21,7 +24,7 @@ export function calculatedRouteUrl(origin, target, service = DEFAULT_ROUTE_SERVI
 
 export function parseCalculatedRoute(payload) {
   if (payload?.code !== "Ok" || !Array.isArray(payload.routes) || !payload.routes.length) {
-    throw new Error(payload?.code === "NoRoute" ? "No road route found" : "Route service unavailable");
+    throw new Error(payload?.code === "NoRoute" ? "No route found for this travel mode" : "Route service unavailable");
   }
   const route = payload.routes[0];
   const coordinates = route?.geometry?.type === "LineString" ? route.geometry.coordinates : null;

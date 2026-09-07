@@ -19,6 +19,6 @@ COPY LICENSE ./LICENSE
 USER reticom
 EXPOSE 8780 4242
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=4 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8780/api/state', timeout=4)"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8780/api/health', timeout=4)"
 ENTRYPOINT ["python", "/app/docker/entrypoint.py"]
 CMD ["gateway"]

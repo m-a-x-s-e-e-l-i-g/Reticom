@@ -32,7 +32,7 @@ test("validates and extracts route geometry and metrics", () => {
     duration: 321,
     steps: [{distance: 20, name: "Main Road", maneuver: {type: "depart"}}],
   });
-  assert.throws(() => parseCalculatedRoute({code: "NoRoute", routes: []}), /No road route/);
+  assert.throws(() => parseCalculatedRoute({code: "NoRoute", routes: []}), /No route found/);
 });
 
 test("formats route duration and the next useful instruction", () => {

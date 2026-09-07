@@ -3,6 +3,7 @@ import json
 from retium.protocol import new_event
 from retium.store import PrivateMessageStore
 from retium.transport import GatewayReceiver
+from membership_helpers import approve_test_members
 
 
 ALPHA = "00112233445566778899aabbccddeeff"
@@ -92,6 +93,7 @@ def test_authenticated_feed_includes_only_the_requesters_private_events(tmp_path
             sender,
         )
     receiver = GatewayReceiver.__new__(GatewayReceiver)
+    approve_test_members(receiver, tmp_path, BRAVO)
     receiver.feed_response = lambda: b'{"events":[],"team":{"name":"Test"}}'
     receiver.private_store = store
     receiver.team_created_at = None
@@ -116,6 +118,7 @@ def test_private_voice_request_is_authenticated_and_stored(tmp_path, monkeypatch
     )
     saved = []
     receiver = GatewayReceiver.__new__(GatewayReceiver)
+    approve_test_members(receiver, tmp_path, ALPHA, BRAVO)
     receiver.private_store = store
     receiver.save_ptt = lambda clip, audio, mime: saved.append((clip, audio, mime))
     receiver._known_private_identity = lambda _: True

@@ -73,6 +73,7 @@ def decode_join_code(value: str) -> bytes:
 
 class TeamProfile:
     def __init__(self, path: Path):
+        self.on_change = None
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.name: str | None = None
@@ -115,6 +116,8 @@ class TeamProfile:
         if modules is not None:
             self.modules = _validated_modules(modules)
         self._save()
+        if self.on_change:
+            self.on_change()
         return name
 
     def set_modules(self, modules: Any) -> list[str]:
@@ -122,6 +125,8 @@ class TeamProfile:
             raise TeamCodeError("create a team before enabling modules")
         self.modules = _validated_modules(modules)
         self._save()
+        if self.on_change:
+            self.on_change()
         return self.modules
 
     def set_everyone_admin(self, value: Any) -> bool:
@@ -131,6 +136,8 @@ class TeamProfile:
             raise TeamCodeError("everyone_admin must be true or false")
         self.everyone_admin = value
         self._save()
+        if self.on_change:
+            self.on_change()
         return self.everyone_admin
 
     def state(self, destination_hash: bytes | str) -> dict[str, Any]:

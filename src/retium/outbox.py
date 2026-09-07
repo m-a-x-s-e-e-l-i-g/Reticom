@@ -58,6 +58,14 @@ class FieldOutbox:
             raise ValueError("unsupported outbox transport")
         encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
         with self._lock, self._connection:
+            if event.get("type") in {"navigation.updated", "navigation.stopped"}:
+                # Only the local identity writes this queue. A newer route/stop
+                # supersedes its old plan, never another team's pending work.
+                self._connection.execute(
+                    "DELETE FROM pending_events WHERE team_destination = ? "
+                    "AND event_type IN ('navigation.updated','navigation.stopped')",
+                    (destination,),
+                )
             if event.get("type") == "position.updated":
                 self._connection.execute(
                     "DELETE FROM pending_events WHERE team_destination = ? AND event_type = ?",

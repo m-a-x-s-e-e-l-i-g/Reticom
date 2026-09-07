@@ -5,10 +5,11 @@ import RNS
 from retium.protocol import new_event
 from retium.store import EventStore
 from retium.transport import GatewayReceiver
+from membership_helpers import approve_test_members
 
 
 class _FieldIdentity:
-    hash = b"field"
+    hash = bytes.fromhex("00112233445566778899aabbccddeeff")
 
 
 def test_gateway_enforces_and_records_command_team_admin_mode(tmp_path, monkeypatch):
@@ -18,13 +19,14 @@ def test_gateway_enforces_and_records_command_team_admin_mode(tmp_path, monkeypa
     assert store.insert(message, "other")
 
     receiver = GatewayReceiver.__new__(GatewayReceiver)
+    approve_test_members(receiver, tmp_path, _FieldIdentity())
     receiver.store = store
     receiver.everyone_admin = False
     receiver.event_callback = None
     receiver.last_packet_at = None
     monkeypatch.setattr(
         "retium.transport.verify_envelope",
-        lambda _: (deletion, b"field".hex()),
+        lambda _: (deletion, _FieldIdentity.hash.hex()),
     )
 
     rejected = json.loads(
@@ -43,6 +45,7 @@ def test_gateway_enforces_and_records_command_team_admin_mode(tmp_path, monkeypa
 
 def test_gateway_admin_requests_require_mode_and_known_identified_operator(tmp_path):
     receiver = GatewayReceiver.__new__(GatewayReceiver)
+    approve_test_members(receiver, tmp_path, _FieldIdentity())
     receiver.store = EventStore(tmp_path / "events.sqlite3")
     receiver.everyone_admin = False
     receiver.admin_response = lambda action, payload, sender: {
@@ -79,7 +82,7 @@ def test_gateway_admin_requests_require_mode_and_known_identified_operator(tmp_p
         "accepted": True,
         "action": "modules.set",
         "payload": {"modules": ["tasks"]},
-        "sender": b"field".hex(),
+        "sender": _FieldIdentity.hash.hex(),
     }
 
 

@@ -43,19 +43,88 @@ De host is automatisch team-admin. Via **Admin Settings**, direct naast User Set
 
 Zonder team blijft de operationele interface dicht. Een geconfigureerde Reticulum-route is transport, geen automatisch teamlidmaatschap.
 
+### Later aansluiten: de huidige missie ophalen
+
+Field haalt automatisch een **mission snapshot** op: alle nog aanwezige markers
+en tekeningen, opdrachten, teaminstellingen, recente intel en een beperkt
+positieverleden per operator. Oude kaartobjecten vallen niet uit de sync doordat
+er nieuwere GPS-updates zijn. Onder **Connection → Mission sync → Sync now** kun
+je opnieuw ophalen en de voortgang zien.
+
+De download gaat in kleine pagina's via een geïdentificeerde Reticulum Link.
+Onderbroken downloads worden hervat; pas na een complete, gecontroleerde
+snapshot wordt de lokale missie vervangen. Verwijderde objecten verdwijnen ook
+uit de cache. Eigen wachtrij-items blijven behouden. Audio wordt op aanvraag
+geladen; dit is geen download van alle historische audiobestanden of kaarttiles.
+Host en Field hebben hiervoor de bijgewerkte versie nodig. Zie
+[Mission sync](docs/mission-sync.md) voor de grenzen en ontwikkeltests.
+
+### Meerdere teams vanuit Command
+
+Open **Teams** in de bovenbalk om een nieuw team te maken, een ander team te openen of de huidige teamweergave te sluiten. Je kunt meerdere teams tegelijk hosten en ze in aparte browsertabs openen. Elk team heeft een eigen joincode, kaart, berichten, taken en rechten. Wisselen van weergave stopt de andere hosts niet; audio-alerts horen bij het team dat je in die tab open hebt.
+
+**Rename** wijzigt de teamnaam zonder de joincode, leden, geschiedenis, modules of rechten te veranderen. Dit werkt ook voor gestopte teams, zonder ze te starten. Bij actieve teams wordt de nieuwe naam via de bestaande Reticulum-announces en feeds gedeeld.
+
+**Stop hosting** pauzeert de teamsynchronisatie voor de leden, maar bewaart de identiteit, joincode en geschiedenis. **Start hosting** hervat hetzelfde team. Deze instelling blijft na een herstart bewaard. Een elders gehost team overnemen of teams in een militaire hiërarchie indelen is hiermee niet geïmplementeerd.
+
+**All Teams** combineert de teams van deze Command in één kaart met een gezamenlijk intelfeed. Filter teams met de selectievakjes, gebruik **Locate** om een team op te zoeken en **Fit visible** om de zichtbare teams in beeld te brengen. Elke kaartmarkering en feedmelding vermeldt het team. De weergave ververst iedere vijf seconden zonder automatisch opnieuw te zoomen. Gestopte hosts blijven zichtbaar als laatst opgeslagen data; oude posities zijn gedimd. Er komen geen privégesprekken in dit overzicht. Open het betreffende team om berichten/audio te versturen of de kaart te bewerken.
+
+### Team continuity: een vertrouwde backuphost
+
+Via **Team continuity** kan de oorspronkelijke host een Field-apparaat als backup
+goedkeuren. Die krijgt een eigen Reticulum-identiteit en een door de eigenaar
+ondertekende hostautorisatie; de joincode blijft gelijk. Na de eerste volledige
+sync kunnen bijgewerkte clients uitwijken naar een bereikbare backup wanneer de
+voorkeurshost wegvalt. Berichten, markers, taken, instellingen, private mailboxes
+en opgenomen audio worden tussen hosts gerepliceerd, ook na herverbinden.
+
+Dit is een **experimentele, asynchrone** voorziening: nog niet gekopieerde wijzigingen
+zijn niet gegarandeerd beschikbaar bij hostverlies, live audio kan onderbreken,
+en backups moeten nadrukkelijk met alle teamdata worden vertrouwd. Zie
+[Team continuity](docs/team-continuity.md) voor instellen, beveiliging, tests en grenzen.
+
 ### 2. Werk vanuit de kaart
 
+**Report** vervangt de vage losse knoppen Warning, Observation en Obstacle. Kies
+wat er daadwerkelijk is: een geblokkeerde weg, beschadigde brug, slachtoffer,
+brand/rook, overstroming of elektrisch gevaar. Operationele punten blijven in
+dezelfde kiezer beschikbaar. **Note** en **Other / unknown** vereisen een korte
+omschrijving; casualty en blocked road zijn ook snelle menuacties.
+
+Voor het delen kun je een beschrijving, **Urgent** en een status kiezen:
+**Unconfirmed**, **Confirmed** of **Cleared**. Callsign en tijd worden automatisch
+toegevoegd. De melder of team-admin kan de status later via de marker aanpassen.
+Cleared dimt dezelfde pin; Remove verwijdert hem. Een geldige handtekening
+bevestigt de afzender, niet dat de inhoud feitelijk bevestigd is. Bestaande
+markers blijven leesbaar. Dit statusbeheer geldt voor handmatig geplaatste
+rapporten; automatische tekst/PTT-projecties behouden hun eigen vervaltijd.
+
 De mobiele kaart toont bovenaan de teamnaam, MGRS-positie, Reticulum-status en een numeriek kompas. Waypoints en contacten verschijnen als richtingindicator op dat kompas. Vanuit de eigen locatie loopt een transparante zichtlijn in de richting waarin de telefoon kijkt.
+
+**Live kijkrichting delen:** teamgenoten zien een korte, vloeiend bewegende pijl
+vanaf je recente positie. Dit is de richting van de telefoon, geen oogtracking:
+de bovenrand als je hem plat houdt, de achtercamera als je hem rechtop houdt.
+In de bijgewerkte Android-app staat **User Settings → Share facing direction**
+standaard aan. Delen stopt zodra Reticom niet meer op de voorgrond staat, je het
+scherm vergrendelt of je de instelling uitzet. Op snelle verbindingen tot tien
+updates per seconde; geen heading-berichten in het feed of de offline wachtrij.
+Alle deelnemende clients en hosts moeten bijgewerkt zijn. Zie
+[Live pointing](docs/live-pointing.md) voor werking, tests en beperkingen.
 
 Een lange druk met één vinger opent het radiale menu. Pinchen en tweevingerbediening blijven gewoon beschikbaar voor navigatie. Op desktop opent rechtsklikken een compact contextmenu.
 
 Vanuit het kaartmenu plaats je ondertekende:
 
 - waarschuwingen, observaties, obstakels en automatisch genummerde waypoints;
-- tekst, pijlen, freehand traces en voertuig-/luchtvaartsymbolen;
+- tekst, pijlen, benoemde freehand traces, ingekleurde gebieden en voertuig-/luchtvaartsymbolen;
+- operationele markers: command post, base camp, objective en assembly point;
 - medische, logistieke, dreigings-, infrastructuur- en controlemarkers.
 
 Handmatig geplaatste markers blijven staan tot iemand met voldoende rechten ze verwijdert. Automatisch afgeleide meldingen hebben juist een toepasselijke vervaltijd.
+
+**Gebied tekenen:** houd de kaart ingedrukt → **Draw → Area** (desktop: rechtermuisknop → **Draw area**). Teken en laat los. Geef het gebied een naam, kies een kleur en selecteer alleen een rand, solid, lijnen of kruisjes. De naam staat midden in het gebied. **Save & share** deelt het; **Redraw** tekent opnieuw en **Discard** gooit alleen de onopgeslagen preview weg. De kaart houdt dezelfde zoom. Dezelfde tekeningen zijn zichtbaar in Field, Command en het overzicht van alle teams.
+
+De nieuwe tekenvelden en operationele markertypen vereisen bijgewerkte clients én hosts. Oudere versies kunnen deze ondertekende events niet valideren. Bestaande traces blijven geldig; namen en stijlen worden samen met de coördinaten ondertekend en via een Reticulum Link verstuurd.
 
 ### 3. Zend zonder van context te wisselen
 
@@ -171,6 +240,10 @@ Op afzonderlijke apparaten gebruikt Reticom `AutoInterface` voor bereikbare Ethe
 
 ### Eventstroom
 
+Command kan meerdere teamhosts tegelijk draaien. De bestaande Command-data blijven ongewijzigd als `default`. Nieuwe teams staan in `teams/<id>/`, met een eigen app-lifecycle en Reticulum-destination op dezelfde netwerkstack. `command-teams.json` bewaart de hoststatus. API-, audio- en WebSocket-verzoeken selecteren hun team expliciet via `?team=<id>`; die selectie is routing, geen authenticatie. Houd de lokale web-API privé.
+
+`GET /api/command/overview` leest de teamdatabases read-only, ook als een host is gestopt. Het overzicht bevat alle niet-verwijderde handmatige kaartobjecten, maximaal 80 recente fixes per identiteit en 100 recente overige teamevents per team. De UI toont de laatste 100 feeditems over de zichtbare teams. Bestaande lokale PTT-transcripties worden meegenomen; deze weergave start geen transcriptie of audio-autoplay. Team-ID's houden locaties en automatische meldingen gescheiden, ook bij gelijke callsigns of identiteiten.
+
 1. Field maakt bijvoorbeeld een `chat.message`, `position.updated` of `marker.created` event.
 2. Coördinaten en compacte velden worden genormaliseerd.
 3. Field slaat het event direct per team op en toont het als `LOCAL · QUEUED`; daarvoor is geen Command-pad nodig.
@@ -220,8 +293,44 @@ $env:RETIUM_TRANSCRIPTION_MODEL = "base"      # standaardmodel
 - Routinefixes blijven uit de Intel-feed. `OPERATOR ACTIVE` verschijnt alleen wanneer locatie delen na meer dan een uur weer actief wordt.
 - Waypoint-arrival gebruikt een accuracy-aware radius van minimaal 35 meter en negeert fixes slechter dan 75 meter.
 - Berekende routes worden als routegeometrie in Reticom getekend; bij een routingfout blijft de directe lijn beschikbaar.
+- **Samen dezelfde route volgen:** start navigatie en kies **SHARE WITH TEAM**. In **Ops → Shared routes** kan een teamgenoot **FOLLOW & SHARE** kiezen. Command ziet de bestemming en het volledige gedeelde pad, ook in All Teams. Een volger gebruikt dezelfde route en richtingen, zonder deze opnieuw per telefoon te berekenen.
+- Navigatie is standaard privé. **STOP SHARING** houdt je eigen navigatie actief; **END** stopt ook het delen. Routes en stops worden offline in de wachtrij gezet en meegenomen in mission sync voor late deelnemers. Een gedeelde route is een plan met een tijdstip, geen bewijs dat iemand op dat moment beweegt.
+
+Protocol, grenzen en tests: [Gedeelde navigatie](docs/shared-navigation.md).
+
+**Offline lopen en rijden:** via **User settings → Offline navigation** kun je
+een regio zoeken en downloaden, of een `.retiroute`-pakket importeren. Routeberekening en herberekening
+gebeuren dan op het apparaat, zonder Command of internet. **Offline only** voorkomt
+online routeaanvragen. Kaartbeelden download je apart. De ingebouwde catalogus
+begint met Noord-Brabant, Zeeland en Limburg, inclusief groottes, voortgang,
+annuleren en updates. De echte pakketten zijn lokaal gebouwd; publieke downloads
+wachten nog op publicatie van de aparte datarelease. Gesproken afslagbegeleiding
+is er nog niet. Zie [offline navigatie](docs/offline-navigation.md)
+voor installatie, databereik, platformbeperkingen en verificatie.
 
 Offline map packs bevatten de zichtbare vector tiles plus veelgebruikte labelglyphs, met een veiligheidslimiet van 2.500 tiles per download. MGRS/UPS-berekening en Reticulum-overlays blijven onafhankelijk van internet. Satellietbeelden zijn online-only, omdat de huidige imagery-provider bulkopslag niet toestaat.
+
+### Intel packs: openbare context bovenop de kaart
+
+De **Hiking map** is standaard. Wandelpaden en tracks zijn altijd onderdeel van de kaart, ook boven satellietbeelden: dezelfde kleur als wegen, maar gestippeld. Geen aparte Hiking trails-schakelaar of extra trail-API-aanvragen. Opgeslagen kaarttegels bevatten deze paden voor offline gebruik; beschikbaarheid hangt af van kaartdata en zoomniveau.
+
+Open **Intel packs** via het lagen-icoon in de bovenbalk. Iedere aanvullende bron kan apart aan of uit, in Field, Command en de gecombineerde teamkaart. Je zoomniveau blijft behouden. Disaster alerts en Military areas & airstrips beginnen aan; keuzes zijn lokaal voor dit apparaat, niet voor het hele team.
+
+| Pack | Op de kaart | Toegang |
+| --- | --- | --- |
+| Military areas & airstrips | Openbaar ingetekende bases, oefenterreinen en militaire gebieden met contouren; ook afzonderlijk gelabelde civiele vliegvelden/airstrips | Zonder sleutel, zoom 10+ |
+| Disaster alerts | Gepubliceerde GDACS-rampenmeldingen | Zonder sleutel |
+| Satellite heat detections | NASA FIRMS VIIRS NOAA-20-detecties van de laatste drie dagen | Gratis NASA MAP_KEY, zoom 4+ |
+| Conflict & protest reports | ACLED-meldingen van de laatste dertig dagen | Eigen ACLED-account en geldig access token, zoom 4+ |
+| Hoogtelijnen | Zwarte contourlijnen met hoogteaanduidingen in meters | Zonder sleutel |
+
+Sleutels voeg je toe onder **Source access**. Deze blijven in de lokale applicatie-opslag; ze worden niet getoond in API-antwoorden en gaan nooit via Reticulum naar teamleden. ACLED-toegang en gebruik blijven onderworpen aan de voorwaarden van je account; deel deze feed of credentials niet met andere gebruikers.
+
+Een openbare melding is geen geverifieerd teamrapport. Klik op een object voor bron, datum en beschikbare onzekerheid. NASA-hittedetecties zijn niet automatisch branden of aanvallen; een ingetekend pad of terrein geeft geen toestemming om het te betreden. De packs werken zonder teamhost, maar nieuwe gegevens vereisen internet. Inschakelen deelt de bekeken kaartregio met de betreffende provider.
+
+Recent bekeken gegevens worden begrensd lokaal gecachet. Oude data krijgt een stale-label bij een verbindingsfout; ongecachete gebieden blijven dan leeg met een foutstatus. Dit is geen volledige offline-download van de intelbron. Publieke Overpass-capaciteit is beperkt: OSM-aanvragen worden geserialiseerd, maximaal één per 30 seconden, met een dagbudget per apparaat. Voor grootschalige distributie is een eigen of gecontracteerde bron nodig.
+
+Bronnen, datalicenties, API-toegang en beperkingen: [Public Intel packs](docs/intel-providers.md) en [Terrain / elevation](docs/elevation.md). De softwarelicentie van Reticom verandert niets aan de licenties van deze externe gegevens.
 
 ## Security- en trustmodel
 
@@ -231,6 +340,7 @@ Wat Reticom wél doet:
 - ontvangen Reticulum-events worden vóór opslag en weergave cryptografisch geverifieerd;
 - eigen nog niet verzonden events zijn expliciet gemarkeerd als lokaal en queued en worden bij transport ondertekend;
 - identified encrypted Reticulum Links voor feed, audio, taken en privéverkeer;
+- door de oorspronkelijke teameigenaar goedgekeurde leden: **Team membership** in Command of Field Admin Settings; verifieer de volledige apparaatidentiteit vóór goedkeuring;
 - geauthenticeerde live Channels voor PTT;
 - signed tombstones voor verwijderde berichten en kaartobjecten;
 - lokale opslag van identity en data per node.
@@ -240,7 +350,7 @@ Belangrijke grenzen:
 - Command is een vertrouwde relay en kan private mailboxinhoud verwerken;
 - publieke TCP-entrypoints kunnen IP-adressen, timing en verkeersvolume zien, maar niet de beschermde application payload;
 - community nodes zijn externe infrastructuur en kunnen verdwijnen;
-- de huidige MVP heeft nog geen Command-side member approval of key revocation;
+- bestaande leden moeten na deze update eenmalig worden goedgekeurd; werk alle clients en backuphosts bij. Intrekking blokkeert toekomstige toegang, niet eerder ontvangen data. Offline backuphosts ontvangen nieuwe intrekkingen pas na herverbinden. Zie [Approved team membership](docs/team-membership.md);
 - Bluetooth proximity wordt niet gesimuleerd en vereist een native Reticulum-capable bearer.
 
 ## Lokaal starten op Windows
@@ -394,7 +504,8 @@ De tests dekken onder andere:
 - automatische tactische reports en geometrie;
 - GPS accuracy filtering en teleport-quarantine;
 - map view preservation, MGRS, kompas en routeberekening;
-- alle 22 handmatige tactische markertypen.
+- alle 26 handmatige tactische/operationele markertypen, plus voertuig-/luchtvaartsymbolen;
+- benoemde gebieden, kleuren, patronen, geometrie en signed-event round-trips.
 
 Een Android-wijziging is pas klaar na een echte build, installatie met `adb install -r` en controle op een fysiek toestel. Browser-only succes bewijst geen permissies, foreground service, native TTS, microfoon of achtergrondalerts.
 

@@ -16,13 +16,20 @@ dependencies = [
   "Pillow==12.3.0",
   "zxing-cpp==3.1.1",
   "faster-whisper==1.2.1",
+  "websockets==15.0.1",
 ]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[project.optional-dependencies]
+offline-routing = ["pyvalhalla==3.8.3; python_version >= '3.12'"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+retium = ["routing-defaults.json", "routing-catalogue.json", "static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

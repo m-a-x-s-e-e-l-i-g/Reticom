@@ -9,6 +9,8 @@ static_dir = project_root / "src" / "retium" / "static"
 generated_dir = project_root / "build" / "windows"
 
 datas = [(str(static_dir), "retium/static")]
+datas += [(str(project_root / "src/retium/routing-defaults.json"), "retium")]
+datas += [(str(project_root / "src/retium/routing-catalogue.json"), "retium")]
 datas += collect_data_files("webview")
 datas += copy_metadata("pywebview")
 # RNS discovers interface names by globbing its package directory at runtime.

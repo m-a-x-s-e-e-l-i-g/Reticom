@@ -3,19 +3,26 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import uvicorn
+import RNS
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .bootstrap import network_settings, write_custom_node
+from .continuity import TeamContinuity, atomic_json, endpoint
 from .live_voice import LIVE_VOICE_MAX_CHUNK, LiveVoiceError
+from .live_heading import HeadingClient, clock_ms, interval as heading_interval, TTL_MS
 from .offline_maps import OfflineMapError, OfflineMapStore
+from .offline_routing import offline_routing_router
+from .intel_packs import intel_router
 from .outbox import FieldOutbox
 from .protocol import ProtocolError, new_event
 from .ptt import PTT_MAX_BYTES, PTTError, PTTStore
@@ -23,13 +30,26 @@ from .qr import decode_join_code_image, join_code_svg
 from .store import EventStore, PrivateMessageStore
 from .team import TeamCodeError, TeamMembership, TeamProfile, decode_join_code
 from .tasks import TaskError, TaskStore
-from .transport import FieldSender, GatewayReceiver
+from .transport import FieldSender, GatewayReceiver, _load_or_create_identity
 from .transcription import LocalTranscriber, TranscriptionError
 from .user import UserProfile
 from .waypoints import WaypointArrivalDetector
 
 
 def create_app(
+    role: str,
+    config_dir: Path,
+    data_dir: Path,
+    gateway_hash: str | None = None,
+) -> FastAPI:
+    if role == "gateway":
+        from .command import create_command_app
+
+        return create_command_app(config_dir, data_dir, create_node_app)
+    return create_node_app(role, config_dir, data_dir, gateway_hash)
+
+
+def create_node_app(
     role: str,
     config_dir: Path,
     data_dir: Path,
@@ -47,10 +67,15 @@ def create_app(
     field_ptt_store: PTTStore | None = None
     transcriber: LocalTranscriber | None = None
     field_event_stores: dict[str, EventStore] = {}
+    field_mission_lock = asyncio.Lock()
+    navigation_lock = asyncio.Lock()
     field_outbox: FieldOutbox | None = None
     field_flush_task: asyncio.Task[None] | None = None
+    continuity_task: asyncio.Task[None] | None = None
+    continuity_stopping = False
     subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
     voice_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+    heading_subscribers: dict[asyncio.Event, dict[str, Any]] = {}
     event_loop: asyncio.AbstractEventLoop | None = None
     waypoint_arrivals = WaypointArrivalDetector()
     offline_maps = OfflineMapStore(data_dir / "offline-maps")
@@ -66,7 +91,10 @@ def create_app(
             role == "field"
             and hosted_service is not None
             and team_membership is not None
-            and team_membership.destination == hosted_service.destination.hash.hex()
+            and team_membership.destination == (
+                hosted_service.continuity.root if hosted_service.continuity else hosted_service.destination.hash.hex()
+            )
+            and (hosted_service.continuity is None or hosted_service.continuity.ready())
         )
 
     def field_team_state(
@@ -79,7 +107,8 @@ def create_app(
             discovered_name, discovered_modules, discovered_everyone_admin
         )
         state["hosted"] = field_hosts_team()
-        state["admin"] = field_hosts_team() or state["everyone_admin"]
+        state["membership_status"] = "approved" if field_hosts_team() else getattr(service, "membership_status", "unknown")
+        state["admin"] = field_hosts_team() or (state["everyone_admin"] and state["membership_status"] == "approved")
         return state
 
     def field_event_store(destination: str | None = None) -> EventStore | None:
@@ -93,6 +122,16 @@ def create_app(
                 data_dir / "field-cache" / team_destination / "events.sqlite3"
             )
         return field_event_stores[team_destination]
+
+    def mission_inbox(destination=None):
+        from .mission import MissionInbox
+        cache = field_event_store(destination)
+        return MissionInbox(cache) if cache is not None else None
+
+    def mission_status(destination=None):
+        inbox = mission_inbox(destination)
+        status = inbox.status() if inbox else {"state": "pending"}
+        return {k: v for k, v in status.items() if k not in {"team", "tasks", "private_events"}}
 
     def cache_field_feed(events: Any) -> None:
         cache = field_event_store()
@@ -123,6 +162,8 @@ def create_app(
                     )
                 if field_outbox is not None:
                     field_outbox.remove(clean_event["id"])
+                if isinstance(event.get("report_view"), dict):
+                    cache.cache_report_view(clean_event["id"], event["report_view"])
             except (KeyError, TypeError, ValueError):
                 continue
 
@@ -189,6 +230,16 @@ def create_app(
         if event_loop is None:
             return
 
+        if frame.get("type") == "heading.sample":
+            def latest_heading() -> None:
+                for signal, pending in tuple(heading_subscribers.items()):
+                    key = frame["sender_hash"]
+                    if key in pending or len(pending) < 128:
+                        pending[key] = frame
+                        signal.set()
+            event_loop.call_soon_threadsafe(latest_heading)
+            return
+
         def publish() -> None:
             for queue in tuple(voice_subscribers):
                 if queue.full():
@@ -241,7 +292,7 @@ def create_app(
         return {"team": team_profile.state(gateway.destination.hash)}
 
     def start_gateway_stack(
-        stack_data_dir: Path, profile: TeamProfile
+        stack_data_dir: Path, profile: TeamProfile, replication_root: str | None = None
     ) -> GatewayReceiver:
         nonlocal store, private_store, team_profile, task_store, ptt_store, transcriber
         store = EventStore(stack_data_dir / "events.sqlite3")
@@ -259,9 +310,12 @@ def create_app(
                 separators=(",", ":"),
             ).encode("utf-8")
 
-        def feed_response() -> bytes:
+        def feed_response(mission=False) -> bytes:
             assert store is not None and team_profile is not None
-            events = store.recent(60, since=team_profile.created_at)
+            events = store.mission_events(since=team_profile.created_at) if mission else store.recent(60, since=team_profile.created_at)
+            if not mission:
+                event_ids = {item["id"] for item in events}
+                events.extend(item for item in store.navigation_events(since=team_profile.created_at) if item["id"] not in event_ids)
             compact = []
             for event in events:
                 network = event.get("network", {})
@@ -289,6 +343,7 @@ def create_app(
                         "modules": team_profile.modules,
                         "everyone_admin": team_profile.everyone_admin,
                     },
+                    **({"tasks": task_store.list() if task_store and "tasks" in team_profile.modules else []} if mission else {}),
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -308,7 +363,7 @@ def create_app(
                 return {"status": "processing", "clip_id": clip_id}
             return result
 
-        return GatewayReceiver(
+        gateway = GatewayReceiver(
             config_dir,
             stack_data_dir,
             store,
@@ -316,6 +371,7 @@ def create_app(
             team_modules=team_profile.modules,
             task_response=task_response,
             feed_response=feed_response,
+            mission_response=lambda: feed_response(True),
             save_ptt=save_and_transcribe,
             audio_response=ptt_store.read,
             transcription_response=transcription_response,
@@ -326,6 +382,29 @@ def create_app(
             team_created_at=team_profile.created_at,
             everyone_admin=team_profile.everyone_admin,
         )
+        gateway.continuity = TeamContinuity(gateway, profile, task_store, private_store, ptt_store, replication_root)
+        if role == "field" and not replication_root:
+            local_identity = _load_or_create_identity(data_dir / "field.identity")
+            if not gateway.membership.approved(local_identity.hash.hex()):
+                gateway.membership.decide(local_identity.hash.hex(), "approved", user_profile.callsign if user_profile else "Owner")
+        # A newly approved replica must finish its initial data/audio sync before
+        # it serves application requests. Replication endpoints remain available.
+        if replication_root:
+            for route, handler in {
+                "/feed": gateway._feed_request, "/tasks": gateway._tasks_request,
+                "/event": gateway._event_request, "/ptt": gateway._ptt_request,
+                "/audio": gateway._audio_request, "/transcription": gateway._transcription_request,
+                "/admin": gateway._admin_request, "/private/messages": gateway._private_messages_request,
+                "/private/send": gateway._private_send_request, "/private/ptt": gateway._private_ptt_request,
+            }.items():
+                def guard(handler):
+                    def gated(path, data, request_id, link_id, remote_identity, requested_at):
+                        if not gateway.continuity.ready():
+                            return b'{"error":"Backup is still synchronizing"}'
+                        return handler(path, data, request_id, link_id, remote_identity, requested_at)
+                    return gated
+                gateway.destination.register_request_handler(route, response_generator=guard(handler), allow=RNS.Destination.ALLOW_ALL)
+        return gateway
 
     def publish_field_event_sync(
         event: dict[str, Any], *, linked: bool = False
@@ -342,10 +421,24 @@ def create_app(
         destination = team_membership.destination
         cache = field_event_store(destination)
         assert cache is not None
+        report_admin = False
+        if event["type"] == "report.dismissed":
+            target = cache.automatic_report_source(event["message_id"])
+            if target is None:
+                raise ProtocolError("automatic report source not found in the local team feed")
+            report_admin = target["sender_hash"] != service.identity.hash.hex()
+            if report_admin and not team_membership.everyone_admin:
+                raise ProtocolError("only the reporter or a team admin can remove this automatic report")
+        if event["type"] == "marker.status":
+            target = cache.map_event(event["marker_id"], "marker.created")
+            if target is None:
+                raise ProtocolError("marker not found in the local team feed")
+            if target["sender_hash"] != service.identity.hash.hex() and not team_membership.everyone_admin:
+                raise ProtocolError("only the reporter or a team admin can change this marker")
         cache.insert(
             event,
             service.identity.hash.hex(),
-            interface_name="Local device · Reticulum outbox",
+            interface_name="Local team admin · Reticulum outbox" if report_admin else "Local device · Reticulum outbox",
             delivery_status="queued",
         )
         field_outbox.add(destination, event, linked=linked)
@@ -382,6 +475,7 @@ def create_app(
                 cache.mark_verified(
                     event["id"],
                     packet_hash=delivery.get("packet_hash"),
+                    interface_name="Team admin · Authenticated Reticulum Link" if event["type"] == "report.dismissed" else "Authenticated Reticulum delivery",
                 )
 
     def schedule_field_outbox_flush() -> None:
@@ -393,6 +487,7 @@ def create_app(
             or not team_membership.destination
             or field_outbox is None
             or field_outbox.count(team_membership.destination) == 0
+            or (not field_hosts_team() and getattr(service, "membership_status", "unknown") != "approved")
         ):
             return
         destination = team_membership.destination
@@ -451,10 +546,56 @@ def create_app(
             return service.send_private_message(event)
         return service.send_private_ptt(event, audio)
 
+    async def maintain_field_continuity():
+        nonlocal hosted_service
+        checked_team, checked_at = None, 0
+        while not continuity_stopping:
+            try:
+                if isinstance(service, FieldSender) and team_membership is not None and team_membership.joined:
+                    if not field_hosts_team() and (checked_team != team_membership.destination or time.monotonic() - checked_at > 15):
+                        checked_team, checked_at = team_membership.destination, time.monotonic()
+                        await asyncio.to_thread(service.request_membership, user_profile.callsign)
+                    directory = service.host_directory
+                    if directory is not None:
+                        gateway = active_gateway()
+                        if gateway and gateway.continuity and gateway.continuity.root == team_membership.destination:
+                            directory.accept(gateway.continuity.directory.envelope)
+                        else:
+                            await asyncio.to_thread(directory.refresh, service.identity)
+                        choice = data_dir / "backup-choice.json"
+                        if hosted_service is None and choice.exists() and directory.envelope:
+                            requested = json.loads(choice.read_text())
+                            if requested.get("team") == team_membership.destination:
+                                replica_dir = data_dir / "backups" / team_membership.destination
+                                identity = _load_or_create_identity(replica_dir / "gateway.identity")
+                                if any(h["destination"] == endpoint(identity) for h in directory.envelope["policy"]["hosts"]):
+                                    atomic_json(replica_dir / "continuity" / "policy.json", directory.envelope)
+                                    hosted_service = start_gateway_stack(replica_dir, TeamProfile(replica_dir / "team.json"), team_membership.destination)
+                        if field_hosts_team() and hosted_service is not None:
+                            team_membership.update_metadata(team_profile.name, team_profile.modules, team_profile.everyone_admin)
+                    # Retry queued work without depending on the UI polling /feed.
+                    if field_hosts_team() and field_outbox is not None:
+                        for item in field_outbox.pending(team_membership.destination):
+                            event = item["event"]
+                            if item["transport"] == "ptt":
+                                audio, _ = field_ptt_store.read(event["clip_id"])
+                                hosted_service.publish_local_field_ptt(event, audio, service.identity)
+                            else:
+                                hosted_service.publish_local_field_event(event, service.identity, admin=True)
+                            field_outbox.remove(event["id"])
+                    else:
+                        schedule_field_outbox_flush()
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                # Connectivity failure is expected; keep local work and retry.
+                if active_gateway() and active_gateway().continuity:
+                    active_gateway().continuity.last_error = str(exc)
+            await asyncio.sleep(3)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         nonlocal service, hosted_service, team_membership, user_profile, event_loop
         nonlocal field_outbox, field_flush_task, field_ptt_store
+        nonlocal continuity_task, continuity_stopping
         event_loop = asyncio.get_running_loop()
         if role == "gateway":
             user_path = data_dir / "user.json"
@@ -491,7 +632,14 @@ def create_app(
                 gateway_hash or team_membership.destination,
                 live_callback=publish_live_from_reticulum,
             )
+            continuity_task = asyncio.create_task(maintain_field_continuity())
         yield
+        await public_intel.traffic.close()
+        await offline_routes.downloads.close()
+        await asyncio.to_thread(offline_routes.store.close)
+        continuity_stopping = True
+        if continuity_task is not None:
+            await continuity_task
         if field_flush_task is not None:
             field_flush_task.cancel()
             try:
@@ -516,6 +664,165 @@ def create_app(
             field_outbox.close()
 
     app = FastAPI(title="Reticom", version="0.1.0", lifespan=lifespan)
+    public_intel = intel_router(data_dir)
+    app.include_router(public_intel)
+    offline_routes = offline_routing_router(data_dir)
+    app.include_router(offline_routes)
+
+    def membership_owner(request: Request):
+        # These are privileged local-device controls, not remote team-admin RPCs.
+        origin = request.headers.get("origin")
+        if (not request.client or request.client.host not in {"127.0.0.1", "::1"}
+            or request.headers.get("sec-fetch-site") == "cross-site"
+            or (origin and urlsplit(origin).netloc != request.url.netloc)):
+            raise HTTPException(403, "Manage membership on the team owner's device")
+        gateway = active_gateway()
+        if gateway is None or not gateway.membership.owner or not team_profile or not team_profile.name:
+            raise HTTPException(403, "Only the original team owner can manage membership")
+        return gateway
+
+    def field_membership_admin(request: Request) -> FieldSender:
+        """Authorize a local Field UI to delegate a roster decision to its host."""
+        origin = request.headers.get("origin")
+        if (not request.client or request.client.host not in {"127.0.0.1", "::1"}
+            or request.headers.get("sec-fetch-site") == "cross-site"
+            or (origin and urlsplit(origin).netloc != request.url.netloc)):
+            raise HTTPException(403, "Manage membership from the local Reticom app")
+        if (
+            role != "field" or not isinstance(service, FieldSender)
+            or team_membership is None or not team_membership.joined
+            or not team_membership.everyone_admin
+            or service.membership_status != "approved"
+        ):
+            raise HTTPException(403, "Team admin rights are required")
+        return service
+
+    def membership_listing(gateway: GatewayReceiver) -> dict[str, Any]:
+        """Include known senders as reviewable requests without granting access."""
+        candidates = [{"identity": item["sender_hash"], "callsign": item["callsign"]}
+            for item in gateway.store.operators(since=gateway.team_created_at)
+            if item["sender_hash"] != gateway.identity.hash.hex() and gateway.membership.status(item["sender_hash"]) == "pending"]
+        state = gateway.membership.listing()
+        known = {item["identity"] for item in state["requests"]}
+        state["requests"].extend({**item, "previously_seen": True} for item in candidates if item["identity"] not in known)
+        return state
+
+    @app.get("/api/team/members")
+    async def members(request: Request):
+        try:
+            gateway = membership_owner(request)
+            return JSONResponse(membership_listing(gateway), headers={"Cache-Control": "no-store"})
+        except HTTPException as owner_error:
+            if owner_error.status_code != 403:
+                raise
+        sender = field_membership_admin(request)
+        try:
+            return JSONResponse(
+                await asyncio.to_thread(sender.request_membership_admin),
+                headers={"Cache-Control": "no-store"},
+            )
+        except (RuntimeError, TimeoutError, ValueError, PermissionError) as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    @app.post("/api/team/members")
+    async def decide_member(request: Request):
+        try:
+            if request.headers.get("content-type", "").split(";")[0] != "application/json":
+                raise ValueError("Use a JSON membership decision")
+            raw = bytearray()
+            async for chunk in request.stream():
+                raw.extend(chunk)
+                if len(raw) > 2048:
+                    raise ValueError("Membership decision is too large")
+            body = json.loads(raw)
+            if not isinstance(body, dict) or set(body) - {"identity", "status", "callsign"}:
+                raise ValueError("Invalid membership decision")
+            try:
+                gateway = membership_owner(request)
+            except HTTPException as owner_error:
+                if owner_error.status_code != 403:
+                    raise
+                sender = field_membership_admin(request)
+                state = await asyncio.to_thread(sender.request_membership_admin, body)
+                return JSONResponse(state, headers={"Cache-Control": "no-store"})
+            if isinstance(service, FieldSender) and body.get("identity") == service.identity.hash.hex():
+                raise ValueError("The hosting device cannot revoke itself")
+            await asyncio.to_thread(gateway.membership.decide, body.get("identity"), body.get("status"), body.get("callsign"))
+            gateway.enforce_membership()
+            return JSONResponse(membership_listing(gateway), headers={"Cache-Control": "no-store"})
+        except (ValueError, TypeError, UnicodeDecodeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    def rename_hosted_team(name: str) -> None:
+        """Local Command workspace operation; retain the running host and identity."""
+        gateway = active_gateway()
+        if gateway is None or team_profile is None or team_profile.name is None:
+            raise HTTPException(409, "Create a team before renaming it")
+        team_profile.set_name(name)
+        gateway.set_team(
+            team_profile.name, team_profile.modules,
+            team_profile.created_at, team_profile.everyone_admin,
+        )
+
+    app.state.rename_team = rename_hosted_team
+
+    @app.get("/api/team/continuity")
+    async def continuity_state():
+        gateway = active_gateway()
+        if gateway and gateway.continuity:
+            return gateway.continuity.state()
+        directory = service.host_directory if isinstance(service, FieldSender) else None
+        choice = data_dir / "backup-choice.json"
+        requested = json.loads(choice.read_text()) if choice.exists() else None
+        current = team_membership.destination if team_membership else None
+        offer = None
+        if current and requested and requested.get("team") == current:
+            identity = _load_or_create_identity(data_dir / "backups" / current / "gateway.identity")
+            offer = {"public_key": identity.get_public_key().hex(), "destination": endpoint(identity)}
+        return {"owner": False, "ready": False, "offer": offer,
+            "policy": directory.envelope["policy"] if directory and directory.envelope else None}
+
+    @app.post("/api/team/continuity/offer")
+    async def offer_backup():
+        if role != "field" or not team_membership or not team_membership.joined:
+            raise HTTPException(409, "Join a team on Field before offering to host a backup")
+        if field_hosts_team():
+            raise HTTPException(409, "This device already hosts the team")
+        identity = _load_or_create_identity(data_dir / "backups" / team_membership.destination / "gateway.identity")
+        atomic_json(data_dir / "backup-choice.json", {"team": team_membership.destination})
+        return {"public_key": identity.get_public_key().hex(), "destination": endpoint(identity)}
+
+    @app.post("/api/team/continuity/approve")
+    async def approve_backup(request: Request):
+        gateway = active_gateway()
+        if gateway is None or not gateway.continuity or not gateway.continuity.owner:
+            raise HTTPException(403, "Only the original team owner can approve backup hosts")
+        try:
+            body = await request.json()
+            if not isinstance(body, dict) or body.get("trust_host") is not True:
+                raise ValueError("Confirm that this backup is trusted with team data and private mailboxes")
+            gateway.continuity.approve(body.get("public_key"), body.get("label"))
+            return gateway.continuity.state()
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/team/continuity/handover")
+    async def handover(request: Request):
+        gateway = active_gateway()
+        if gateway is None or not gateway.continuity or not gateway.continuity.owner:
+            raise HTTPException(403, "Only the original team owner can hand over preferred hosting")
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Invalid handover request")
+            gateway.continuity.prefer(body.get("destination"))
+            return gateway.continuity.state()
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/health")
+    async def health():
+        return {"ready": service is not None}
 
     @app.get("/api/state")
     async def state(limit: int = Query(default=200, ge=1, le=500)) -> dict[str, Any]:
@@ -535,7 +842,7 @@ def create_app(
                     store.count(since=team_profile.created_at) if team_created else 0
                 ),
                 "events": (
-                    store.recent(limit, since=team_profile.created_at)
+                    store.mission_events(since=team_profile.created_at, intel_limit=limit)
                     if team_created
                     else []
                 ),
@@ -568,7 +875,7 @@ def create_app(
         return {
             "role": role,
             "network": network_state,
-            "events": cache.recent(60) if cache is not None else [],
+            "events": cache.mission_events() if cache is not None else [],
             "team": field_team_state(),
             "user": user_profile.state() if user_profile is not None else None,
             "nearby_teams": service.nearby_teams(team_membership.destination),
@@ -637,6 +944,8 @@ def create_app(
         nonlocal hosted_service, transcriber
         was_hosting = field_hosts_team()
         team_membership.leave()
+        if isinstance(service, FieldSender):
+            await asyncio.to_thread(service.clear_gateway)
         if was_hosting and hosted_service is not None:
             hosted_service.stop()
             hosted_service = None
@@ -651,7 +960,7 @@ def create_app(
             if store is None or team_profile is None or team_profile.name is None:
                 raise HTTPException(status_code=409, detail="Create a team first")
             return JSONResponse(
-                {"events": store.recent(60, since=team_profile.created_at)}
+                {"events": store.mission_events(since=team_profile.created_at)}
             )
         if (
             not isinstance(service, FieldSender)
@@ -664,7 +973,7 @@ def create_app(
                 assert store is not None and team_profile is not None
                 assert private_store is not None
                 payload = {
-                    "events": store.recent(60, since=team_profile.created_at),
+                    "events": store.mission_events(since=team_profile.created_at),
                     "private_events": private_store.recent(
                         service.identity.hash.hex(), since=team_profile.created_at
                     ),
@@ -686,7 +995,8 @@ def create_app(
                 if not service.state().get("path_known"):
                     return JSONResponse(
                         {
-                            "events": cache.recent(60) if cache is not None else [],
+                            "events": cache.mission_events() if cache is not None else [],
+                            "mission_sync": mission_status(destination),
                             "private_events": [],
                             "team": field_team_state(),
                             "network": {
@@ -698,9 +1008,23 @@ def create_app(
                             },
                         }
                     )
-                payload = await asyncio.to_thread(service.request_feed, 3.0)
-                cache_field_feed(payload.get("events"))
-                payload["events"] = cache.recent(60) if cache is not None else []
+                async with field_mission_lock:
+                    inbox = mission_inbox(destination)
+                    payload = await asyncio.to_thread(service.request_feed, 20.0, inbox.request())
+                    if team_membership.destination != destination:
+                        raise ValueError("Team changed during mission sync")
+                    if "mission" in payload or payload.get("mission_restart"):
+                        inbox.accept(payload)
+                        saved = inbox.status()
+                        payload["team"] = saved["team"]
+                        payload["private_events"] = saved["private_events"]
+                        payload["mission_sync"] = mission_status(destination)
+                        payload.pop("records", None)
+                        payload.pop("mission", None)
+                    else:
+                        cache_field_feed(payload.get("events"))
+                        payload["mission_sync"] = {"state": "legacy", "reason": "Update the team host for full mission sync"}
+                payload["events"] = cache.mission_events() if cache is not None else []
                 network = payload.setdefault("network", {})
                 network["online"] = True
                 network["queued"] = (
@@ -710,12 +1034,16 @@ def create_app(
                 )
                 schedule_field_outbox_flush()
             metadata = payload.get("team")
-            if isinstance(metadata, dict):
+            if isinstance(metadata, dict) and metadata.get("name"):
                 team_membership.update_metadata(
                     metadata.get("name"),
                     metadata.get("modules", []),
                     metadata.get("everyone_admin", False),
                 )
+                payload["team"] = field_team_state()
+            else:
+                # During the first partial snapshot there is no saved metadata
+                # yet. Keep the joined state; do not send an empty team to UI.
                 payload["team"] = field_team_state()
             return JSONResponse(payload)
         except (TimeoutError, PermissionError, ValueError) as exc:
@@ -723,7 +1051,8 @@ def create_app(
             cache = field_event_store(destination)
             return JSONResponse(
                 {
-                    "events": cache.recent(60) if cache is not None else [],
+                    "events": cache.mission_events() if cache is not None else [],
+                    "mission_sync": {**mission_status(destination), "state": "retrying", "reason": str(exc)},
                     "private_events": [],
                     "team": field_team_state(),
                     "network": {
@@ -736,6 +1065,14 @@ def create_app(
                     },
                 }
             )
+
+    @app.post("/api/mission/sync")
+    async def resync_mission() -> JSONResponse:
+        if role != "field" or not team_membership or not team_membership.joined:
+            raise HTTPException(status_code=409, detail="Join a team first")
+        async with field_mission_lock:
+            mission_inbox().request(force=True)
+        return await feed()
 
     @app.post("/api/ptt")
     async def send_ptt(
@@ -944,6 +1281,8 @@ def create_app(
             if role == "gateway":
                 if not isinstance(service, GatewayReceiver) or team_profile is None:
                     raise RuntimeError("Command is not ready")
+                if team_profile.name is not None:
+                    raise HTTPException(status_code=409, detail="Use Teams to create another team. The current team is unchanged.")
                 name = team_profile.set_name(body.get("name"), body.get("modules", []))
                 service.set_team(
                     name,
@@ -1112,8 +1451,7 @@ def create_app(
         except TeamCodeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    @app.post("/api/team/join")
-    async def join_team(request: Request) -> JSONResponse:
+    async def join_team_data(body) -> JSONResponse:
         if (
             role != "field"
             or not isinstance(service, FieldSender)
@@ -1121,7 +1459,6 @@ def create_app(
         ):
             raise HTTPException(status_code=405, detail="Only a Field node can join")
         try:
-            body = await request.json()
             if not isinstance(body, dict):
                 raise TeamCodeError("request body must be an object")
             if user_profile is None:
@@ -1157,6 +1494,19 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except TimeoutError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    app.state.join_team = join_team_data
+    app.state.nearby_teams = lambda: service.nearby_teams(None) if isinstance(service, FieldSender) else []
+
+    app.state.sync_feed = feed
+
+    @app.post("/api/team/join")
+    async def join_team(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(422, "Enter a valid JSON object") from exc
+        return await join_team_data(body)
 
     @app.get("/api/team/nearby")
     async def nearby_teams() -> JSONResponse:
@@ -1196,6 +1546,9 @@ def create_app(
                 )
             return JSONResponse(await asyncio.to_thread(service.request_tasks))
         except (TimeoutError, PermissionError, ValueError) as exc:
+            saved = mission_inbox().status()
+            if saved.get("last_synced_at"):
+                return JSONResponse({"module": "tasks", "enabled": True, "tasks": saved["tasks"], "cached": True})
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/api/private/messages")
@@ -1331,8 +1684,8 @@ def create_app(
     @app.post("/api/tasks")
     async def create_task(request: Request) -> JSONResponse:
         if (
-            role != "gateway"
-            or not isinstance(service, GatewayReceiver)
+            (role != "gateway" and not field_hosts_team())
+            or active_gateway() is None
             or team_profile is None
             or task_store is None
             or user_profile is None
@@ -1354,7 +1707,9 @@ def create_app(
                 title=task["title"],
                 assignee=task["assignee"],
             )
-            delivery = await asyncio.to_thread(service.publish_event, event)
+            delivery = await asyncio.to_thread(
+                service.publish_event if isinstance(service, GatewayReceiver) else publish_field_event_sync, event
+            )
             return JSONResponse(
                 {"task": task, "event": event, "delivery": delivery},
                 status_code=201,
@@ -1365,8 +1720,8 @@ def create_app(
     @app.delete("/api/tasks/{task_id}")
     async def delete_task(task_id: str) -> JSONResponse:
         if (
-            role != "gateway"
-            or not isinstance(service, GatewayReceiver)
+            (role != "gateway" and not field_hosts_team())
+            or active_gateway() is None
             or team_profile is None
             or task_store is None
         ):
@@ -1438,6 +1793,8 @@ def create_app(
             if not isinstance(body, dict):
                 raise ProtocolError("request body must be an object")
             event_type = str(body.pop("type", ""))
+            if event_type in {"navigation.updated", "navigation.stopped"}:
+                raise ProtocolError("Use the navigation endpoint to share a route")
             body.pop("callsign", None)
             body.pop("icon", None)
             body.pop("color", None)
@@ -1445,6 +1802,7 @@ def create_app(
                 "chat.message",
                 "drawing.created",
                 "marker.created",
+                "marker.status",
             }:
                 raise ProtocolError("Command can send messages and map updates")
             event = new_event(
@@ -1455,6 +1813,8 @@ def create_app(
                 **body,
             )
             if isinstance(service, GatewayReceiver):
+                if event_type == "marker.status" and store.map_event(event["marker_id"], "marker.created") is None:
+                    raise ProtocolError("marker not found")
                 delivery = await asyncio.to_thread(service.publish_event, event)
             else:
                 delivery = await asyncio.to_thread(
@@ -1465,6 +1825,74 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except TimeoutError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    def navigation_context():
+        command_ready = (isinstance(service, GatewayReceiver) and team_profile is not None
+                         and team_profile.name is not None and store is not None)
+        field_ready = (isinstance(service, FieldSender) and team_membership is not None
+                       and team_membership.joined)
+        if not command_ready and not field_ready:
+            raise HTTPException(status_code=409, detail="Create or join a team before sharing navigation")
+        selected = store if command_ready or field_hosts_team() else field_event_store()
+        if selected is None or user_profile is None:
+            raise HTTPException(status_code=503, detail="Navigation storage is unavailable")
+        since = team_profile.created_at if (command_ready or field_hosts_team()) else None
+        return selected, service.identity.hash.hex(), since
+
+    @app.get("/api/navigation")
+    async def navigation_plans() -> dict[str, Any]:
+        from .navigation import as_plan
+        selected, sender, since = navigation_context()
+        return {"plans": [as_plan(event) for event in selected.navigation_events(since)], "sender_hash": sender}
+
+    @app.put("/api/navigation")
+    async def share_navigation(request: Request) -> JSONResponse:
+        from .navigation import as_plan, fields_from_request
+        selected, sender, since = navigation_context()
+        raw = await request.body()
+        if len(raw) > 250_000:
+            raise HTTPException(status_code=413, detail="Route request is too large; route was not shared")
+        try:
+            body = json.loads(raw)
+            async with navigation_lock:
+                current = next((event for event in selected.navigation_events(since)
+                                if event["network"]["sender_hash"] == sender), None)
+                route_id = current["route_id"] if current and current["type"] == "navigation.updated" else str(uuid.uuid4())
+                fields = fields_from_request(body, route_id, selected.next_navigation_revision(sender))
+                event = new_event("navigation.updated", user_profile.callsign,
+                                  icon=user_profile.icon, color=user_profile.color, **fields)
+                if isinstance(service, GatewayReceiver):
+                    delivery = await asyncio.to_thread(service.publish_event, event)
+                else:
+                    delivery = await asyncio.to_thread(publish_field_event_sync, event, linked=True)
+                projected = next(item for item in selected.navigation_events(since) if item["id"] == event["id"])
+            schedule_field_outbox_flush()
+            return JSONResponse({"event": event, "delivery": delivery, "plan": as_plan(projected)}, status_code=201)
+        except (ProtocolError, ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/api/navigation")
+    async def stop_shared_navigation() -> JSONResponse:
+        from .navigation import as_plan
+        selected, sender, since = navigation_context()
+        try:
+            async with navigation_lock:
+                current = next((event for event in selected.navigation_events(since)
+                                if event["network"]["sender_hash"] == sender), None)
+                if current is None or current["type"] == "navigation.stopped":
+                    return JSONResponse({"stopped": False})
+                event = new_event("navigation.stopped", user_profile.callsign,
+                                  icon=user_profile.icon, color=user_profile.color,
+                                  route_id=current["route_id"], revision=selected.next_navigation_revision(sender))
+                if isinstance(service, GatewayReceiver):
+                    delivery = await asyncio.to_thread(service.publish_event, event)
+                else:
+                    delivery = await asyncio.to_thread(publish_field_event_sync, event, linked=True)
+                projected = next(item for item in selected.navigation_events(since) if item["id"] == event["id"])
+            schedule_field_outbox_flush()
+            return JSONResponse({"stopped": True, "event": event, "delivery": delivery, "plan": as_plan(projected)})
+        except (ProtocolError, ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.delete("/api/map/{kind}/{map_event_id}")
     async def delete_map_event(kind: str, map_event_id: str) -> JSONResponse:
@@ -1483,15 +1911,16 @@ def create_app(
         )
         if (not command_ready and not field_ready) or user_profile is None:
             raise HTTPException(status_code=409, detail="Join a team before editing the map")
-        if kind not in {"marker", "drawing"}:
+        if kind not in {"marker", "drawing", "automatic-report"}:
             raise HTTPException(status_code=404, detail="Unknown map item")
         created_type = f"{kind}.created"
-        deleted_type = f"{kind}.deleted"
-        reference_key = f"{kind}_id"
+        deleted_type = "report.dismissed" if kind == "automatic-report" else f"{kind}.deleted"
+        reference_key = "message_id" if kind == "automatic-report" else f"{kind}_id"
         try:
             if isinstance(service, GatewayReceiver):
                 assert store is not None
-                if store.map_event(map_event_id, created_type) is None:
+                target = store.automatic_report_source(map_event_id) if kind == "automatic-report" else store.map_event(map_event_id, created_type)
+                if target is None:
                     raise FileNotFoundError("Map item not found")
             event = new_event(
                 deleted_type,
@@ -1778,6 +2207,85 @@ def create_app(
             voice_subscribers.discard(queue)
             if isinstance(voice_transport, FieldSender) and not voice_subscribers:
                 await asyncio.to_thread(voice_transport.close_live_link)
+
+    @app.websocket("/api/heading/live")
+    async def live_heading(websocket: WebSocket) -> None:
+        if service is None or user_profile is None:
+            await websocket.close(code=1013)
+            return
+        if not ((role == "gateway" and team_profile and team_profile.name) or
+                (role == "field" and team_membership and team_membership.joined)):
+            await websocket.close(code=1008)
+            return
+        transport = active_gateway() or service
+        headings = transport.headings
+        destination = team_membership.destination if team_membership else None
+        await websocket.accept()
+        signal = asyncio.Event()
+        pending: dict[str, Any] = {}
+        heading_subscribers[signal] = pending
+        sent_heading = False
+
+        async def stream() -> None:
+            while True:
+                await signal.wait()
+                signal.clear()
+                frames = list(pending.values())
+                pending.clear()
+                for frame in frames:
+                    if frame.get("at") and clock_ms() - frame["at"] > TTL_MS:
+                        continue
+                    await websocket.send_json({**frame, "server_at": clock_ms()} if frame.get("type") == "heading.clock" else frame)
+
+        async def maintain() -> None:
+            while True:
+                if (active_gateway() or service) is not transport or (team_membership and team_membership.destination != destination):
+                    await websocket.close(code=1000, reason="Team changed")
+                    return
+                try:
+                    ready = await asyncio.to_thread(headings.ensure) if isinstance(headings, HeadingClient) else headings.ready()
+                    period = heading_interval(headings.link) if isinstance(headings, HeadingClient) and headings.ready() else .1
+                except (TimeoutError, OSError, RuntimeError, ValueError):
+                    ready, period = False, 1
+                pending["state"] = {"type": "heading.ready", "ready": ready, "interval_ms": round(period * 1000)}
+                signal.set()
+                await asyncio.sleep(2)
+
+        sender, keeper = asyncio.create_task(stream()), asyncio.create_task(maintain())
+        try:
+            while True:
+                body = await websocket.receive_json()
+                if isinstance(body, dict) and body.get("type") == "heading.clock" and type(body.get("request_id")) is int:
+                    pending["clock"] = {"type": "heading.clock", "request_id": body["request_id"]}
+                    signal.set()
+                    continue
+                if not isinstance(body, dict) or body.get("type") != "heading.sample":
+                    continue
+                # Never turn delayed browser frames into fresh network samples.
+                if type(body.get("at")) not in (int, float) or not -1000 <= clock_ms() - body["at"] <= 750:
+                    continue
+                value = body.get("heading")
+                if value is not None and (type(value) not in (int, float) or not 0 <= value < 360):
+                    continue
+                sent_heading = value is not None
+                if isinstance(headings, HeadingClient):
+                    await asyncio.to_thread(headings.send, value)
+                else:
+                    await asyncio.to_thread(headings.publish, value, service.identity.hash)
+        except (WebSocketDisconnect, RuntimeError, ValueError, OSError):
+            pass
+        finally:
+            heading_subscribers.pop(signal, None)
+            sender.cancel()
+            keeper.cancel()
+            await asyncio.gather(sender, keeper, return_exceptions=True)
+            if sent_heading:
+                if isinstance(headings, HeadingClient):
+                    await asyncio.to_thread(headings.send, None)
+                else:
+                    await asyncio.to_thread(headings.publish, None, service.identity.hash)
+            if isinstance(headings, HeadingClient) and not heading_subscribers:
+                headings.close()
 
     static_dir = Path(__file__).with_name("static")
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")

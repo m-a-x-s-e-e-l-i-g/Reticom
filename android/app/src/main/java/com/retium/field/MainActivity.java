@@ -3,6 +3,7 @@ package com.retium.field;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.KeyguardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -12,12 +13,17 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.hardware.GeomagneticField;
+import android.location.Location;
+import android.location.LocationManager;
 import android.media.AudioAttributes;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
@@ -33,6 +39,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.ValueCallback;
 import android.widget.FrameLayout;
 
 import com.google.mlkit.vision.barcode.common.Barcode;
@@ -58,6 +65,8 @@ public final class MainActivity extends Activity {
     private static final String TTS_VOICE_KEY = "voice-name";
     private static final int PERMISSIONS_REQUEST = 8143;
     private static final int MICROPHONE_PERMISSION_REQUEST = 8144;
+    private static final int ROUTING_FILE_REQUEST = 8145;
+    private ValueCallback<Uri[]> pendingFileChooser;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private WebView webView;
     private GmsBarcodeScanner qrScanner;
@@ -68,10 +77,18 @@ public final class MainActivity extends Activity {
     private Sensor rotationSensor;
     private SensorEventListener compassListener;
     private float lastCompassHeading = Float.NaN;
+    private volatile boolean compassForeground = false;
+    private volatile float compassDeclination = Float.NaN;
+    private final CompassBearing compassBearing = new CompassBearing();
+    private long lastCompassEmit = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (RetiumNodeService.isShuttingDown()) {
+            finishAndRemoveTask();
+            return;
+        }
         getWindow().setStatusBarColor(Color.rgb(9, 13, 10));
         getWindow().setNavigationBarColor(Color.rgb(9, 13, 10));
         startNodeService();
@@ -86,8 +103,32 @@ public final class MainActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
+        if (RetiumNodeService.isShuttingDown()) return;
         startCompass();
         updateNodeServiceVisibility(true);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (RetiumNodeService.isShuttingDown()) return;
+        compassForeground = true;
+        startCompass();
+    }
+
+    @Override
+    protected void onPause() {
+        compassForeground = false;
+        stopCompass();
+        if (webView != null) webView.evaluateJavascript("window.retiumAndroidHeadingPaused&&window.retiumAndroidHeadingPaused()", null);
+        super.onPause();
+    }
+
+    private boolean headingForeground() {
+        KeyguardManager keyguard = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        return compassForeground && power != null && power.isInteractive()
+                && keyguard != null && !keyguard.isKeyguardLocked();
     }
 
     @Override
@@ -99,6 +140,11 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (pendingFileChooser != null) {
+            pendingFileChooser.onReceiveValue(null);
+            pendingFileChooser = null;
+        }
+        handler.removeCallbacksAndMessages(null);
         if (pendingAudioPermissionRequest != null) {
             pendingAudioPermissionRequest.deny();
             pendingAudioPermissionRequest = null;
@@ -117,6 +163,7 @@ public final class MainActivity extends Activity {
     }
 
     private void startNodeService() {
+        if (RetiumNodeService.isShuttingDown()) return;
         Intent service = new Intent(this, RetiumNodeService.class)
                 .setAction(BackgroundAlertController.ACTION_APP_VISIBILITY)
                 .putExtra(BackgroundAlertController.EXTRA_APP_FOREGROUND, true);
@@ -129,6 +176,7 @@ public final class MainActivity extends Activity {
         compassListener = new SensorEventListener() {
             @Override
             public void onSensorChanged(SensorEvent event) {
+                if (!headingForeground()) return;
                 float[] rotation = new float[9];
                 float[] adjusted = new float[9];
                 SensorManager.getRotationMatrixFromVector(rotation, event.values);
@@ -146,13 +194,15 @@ public final class MainActivity extends Activity {
                     default:
                         System.arraycopy(rotation, 0, adjusted, 0, rotation.length);
                 }
-                float[] orientation = new float[3];
-                SensorManager.getOrientation(adjusted, orientation);
-                float heading = (float) ((Math.toDegrees(orientation[0]) + 360.0) % 360.0);
+                float heading = compassBearing.heading(adjusted);
+                if (Float.isNaN(heading)) return;
+                if (!Float.isNaN(compassDeclination)) heading = (heading + compassDeclination + 360f) % 360f;
                 float change = Float.isNaN(lastCompassHeading)
                         ? 360f
                         : Math.abs(((heading - lastCompassHeading + 540f) % 360f) - 180f);
-                if (change < 0.35f) return;
+                long now = SystemClock.elapsedRealtime();
+                if (now - lastCompassEmit < 50 || (change < 0.35f && now - lastCompassEmit < 500)) return;
+                lastCompassEmit = now;
                 lastCompassHeading = heading;
                 emitCompassHeading();
             }
@@ -171,7 +221,7 @@ public final class MainActivity extends Activity {
     }
 
     private void emitCompassHeading() {
-        if (webView == null || Float.isNaN(lastCompassHeading)) return;
+        if (webView == null || Float.isNaN(lastCompassHeading) || !headingForeground()) return;
         webView.evaluateJavascript(
                 "window.retiumAndroidHeading&&window.retiumAndroidHeading(" + lastCompassHeading + ")",
                 null
@@ -186,6 +236,7 @@ public final class MainActivity extends Activity {
     }
 
     private void updateNodeServiceVisibility(boolean foreground) {
+        if (RetiumNodeService.isShuttingDown()) return;
         Intent service = new Intent(this, RetiumNodeService.class)
                 .setAction(BackgroundAlertController.ACTION_APP_VISIBILITY)
                 .putExtra(BackgroundAlertController.EXTRA_APP_FOREGROUND, foreground);
@@ -193,6 +244,7 @@ public final class MainActivity extends Activity {
     }
 
     private void updateBackgroundAlertPreference(boolean enabled) {
+        if (RetiumNodeService.isShuttingDown()) return;
         BackgroundAlertController.setAlertsEnabled(this, enabled);
         Intent service = new Intent(this, RetiumNodeService.class)
                 .setAction(BackgroundAlertController.ACTION_ALERTS_ENABLED)
@@ -201,12 +253,14 @@ public final class MainActivity extends Activity {
     }
 
     private void notifyBackgroundTtsVoiceChanged() {
+        if (RetiumNodeService.isShuttingDown()) return;
         Intent service = new Intent(this, RetiumNodeService.class)
                 .setAction(BackgroundAlertController.ACTION_TTS_VOICE_CHANGED);
         startService(service);
     }
 
     private void updateAutomaticLocationPreference(boolean enabled) {
+        if (RetiumNodeService.isShuttingDown()) return;
         LocationUpdateController.setEnabled(this, enabled);
         Intent service = new Intent(this, RetiumNodeService.class)
                 .setAction(RetiumNodeService.ACTION_AUTOMATIC_LOCATION)
@@ -318,6 +372,22 @@ public final class MainActivity extends Activity {
         });
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                if (!isLocalOrigin(Uri.parse(view.getUrl()))) return false;
+                if (pendingFileChooser != null) pendingFileChooser.onReceiveValue(null);
+                pendingFileChooser = callback;
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("*/*");
+                try { startActivityForResult(intent, ROUTING_FILE_REQUEST); }
+                catch (android.content.ActivityNotFoundException error) {
+                    pendingFileChooser.onReceiveValue(null);
+                    pendingFileChooser = null;
+                }
+                return true;
+            }
+
+            @Override
             public void onPermissionRequest(PermissionRequest request) {
                 runOnUiThread(() -> {
                     if (!isLocalOrigin(request.getOrigin()) || !requestsAudioCapture(request)) {
@@ -372,6 +442,16 @@ public final class MainActivity extends Activity {
                 && "http".equals(origin.getScheme())
                 && "127.0.0.1".equals(origin.getHost())
                 && origin.getPort() == 8781;
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == ROUTING_FILE_REQUEST && pendingFileChooser != null) {
+            pendingFileChooser.onReceiveValue(resultCode == RESULT_OK && data != null && data.getData() != null
+                    ? new Uri[]{data.getData()} : null);
+            pendingFileChooser = null;
+        }
     }
 
     private boolean requestsAudioCapture(PermissionRequest request) {
@@ -520,6 +600,7 @@ public final class MainActivity extends Activity {
     }
 
     private void waitForNode(int attempt) {
+        if (RetiumNodeService.isShuttingDown() || isFinishing() || isDestroyed()) return;
         new Thread(() -> {
             boolean ready = false;
             try {
@@ -534,6 +615,7 @@ public final class MainActivity extends Activity {
             }
             boolean nodeReady = ready;
             handler.post(() -> {
+                if (RetiumNodeService.isShuttingDown() || isFinishing() || isDestroyed()) return;
                 if (nodeReady) {
                     webView.loadUrl(LOCAL_URL);
                 } else if (attempt < 120) {
@@ -558,6 +640,49 @@ public final class MainActivity extends Activity {
     }
 
     private final class AndroidBridge {
+        @JavascriptInterface
+        public boolean isHeadingScreenActive() {
+            return headingForeground();
+        }
+
+        @JavascriptInterface
+        public boolean isHeadingSharingActive() {
+            return headingForeground() && !Float.isNaN(compassDeclination);
+        }
+
+        @JavascriptInterface
+        public void setCompassLocation(double latitude, double longitude, double altitude) {
+            if (!Double.isFinite(latitude) || !Double.isFinite(longitude)
+                    || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return;
+            compassDeclination = new GeomagneticField((float) latitude, (float) longitude,
+                    Double.isFinite(altitude) ? (float) altitude : 0f, System.currentTimeMillis()).getDeclination();
+        }
+
+        @JavascriptInterface
+        public String getLastKnownLocation() {
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                    != PackageManager.PERMISSION_GRANTED) return "";
+            try {
+                LocationManager manager = (LocationManager) getSystemService(LOCATION_SERVICE);
+                if (manager == null) return "";
+                Location best = null;
+                for (String provider : new String[]{LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER}) {
+                    Location candidate = manager.getLastKnownLocation(provider);
+                    if (candidate != null && (best == null || candidate.getTime() > best.getTime())) best = candidate;
+                }
+                // A stale last-known point is worse than no immediate center.
+                if (best == null || System.currentTimeMillis() - best.getTime() > 5 * 60_000L) return "";
+                JSONObject result = new JSONObject();
+                result.put("latitude", best.getLatitude());
+                result.put("longitude", best.getLongitude());
+                if (best.hasAccuracy()) result.put("accuracy", best.getAccuracy());
+                if (best.hasAltitude()) result.put("altitude", best.getAltitude());
+                return result.toString();
+            } catch (Exception error) {
+                return "";
+            }
+        }
+
         @JavascriptInterface
         public boolean isTtsReady() {
             return textToSpeechReady && textToSpeech != null;

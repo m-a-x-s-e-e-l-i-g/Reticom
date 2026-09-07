@@ -1,0 +1,74 @@
+{
+  "format": "reticom-routing-catalogue-v1",
+  "valhalla_version": "3.8.3",
+  "generated_at": "2026-09-07T12:17:15.472095+00:00",
+  "regions": [
+    {
+      "id": "netherlands-noord-brabant",
+      "name": "Noord-Brabant",
+      "country": "Netherlands",
+      "bounds": [
+        4.189152,
+        51.21808,
+        6.049354,
+        51.83181
+      ],
+      "profiles": [
+        "walking",
+        "driving"
+      ],
+      "data_date": "2026-09-06",
+      "created_at": "2026-09-07T12:11:32.907791+00:00",
+      "bytes": 48348328,
+      "expanded_bytes": 129026596,
+      "sha256": "7f82f66e78dda6b2b12aace6bacd061db21a9eb35c0fdacd7f47bc20401c59ce",
+      "source": "https://download.geofabrik.de/europe/netherlands/noord-brabant-260906.osm.pbf",
+      "url": "https://github.com/m-a-x-s-e-e-l-i-g/Reticom/releases/download/routing-data-20260907/netherlands-noord-brabant-2026-09-06.retiroute"
+    },
+    {
+      "id": "netherlands-zeeland",
+      "name": "Zeeland",
+      "country": "Netherlands",
+      "bounds": [
+        3.233941,
+        51.19717,
+        4.278407,
+        51.87013
+      ],
+      "profiles": [
+        "walking",
+        "driving"
+      ],
+      "data_date": "2026-09-06",
+      "created_at": "2026-09-07T12:12:59.919193+00:00",
+      "bytes": 11118868,
+      "expanded_bytes": 29053125,
+      "sha256": "09738851738ad1c13b7a39f1988b9f876321d0216f8ea41b24c376514a45fac3",
+      "source": "https://download.geofabrik.de/europe/netherlands/zeeland-260906.osm.pbf",
+      "url": "https://github.com/m-a-x-s-e-e-l-i-g/Reticom/releases/download/routing-data-20260907/netherlands-zeeland-2026-09-06.retiroute"
+    },
+    {
+      "id": "netherlands-limburg",
+      "name": "Limburg",
+      "country": "Netherlands",
+      "bounds": [
+        5.563304,
+        50.74753,
+        6.22939,
+        51.77992
+      ],
+      "profiles": [
+        "walking",
+        "driving"
+      ],
+      "data_date": "2026-09-06",
+      "created_at": "2026-09-07T12:17:10.489304+00:00",
+      "bytes": 24182746,
+      "expanded_bytes": 62376967,
+      "sha256": "e2dbeee1c38a0447a596e6cea8cdb0e5cfb020fad024f43b8373b07249f15052",
+      "source": "https://download.geofabrik.de/europe/netherlands/limburg-260906.osm.pbf",
+      "url": "https://github.com/m-a-x-s-e-e-l-i-g/Reticom/releases/download/routing-data-20260907/netherlands-limburg-2026-09-06.retiroute"
+    }
+  ],
+  "published": false
+}

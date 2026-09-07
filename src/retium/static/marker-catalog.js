@@ -1,4 +1,10 @@
 export const TACTICAL_MARKERS = [
+  {type: "note", label: "Note", symbol: "N", color: "#8cabc0", group: "Notes / unknown"},
+  {type: "other", label: "Other / unknown", symbol: "?", color: "#b8a16d", group: "Notes / unknown"},
+  {type: "command-post", label: "Command post", symbol: "HQ", color: "#a79669", group: "Operations"},
+  {type: "base-camp", label: "Base camp", symbol: "BASE", color: "#899a78", group: "Operations"},
+  {type: "objective", label: "Objective", symbol: "OBJ", color: "#c79558", group: "Operations"},
+  {type: "assembly-point", label: "Assembly point", symbol: "AP", color: "#718d80", group: "Operations"},
   {type: "casualty", label: "Casualty", symbol: "MED", color: "#d5d1bd", group: "Medical"},
   {type: "medevac", label: "MEDEVAC", symbol: "EVAC", color: "#d5d1bd", group: "Medical"},
   {type: "evac-point", label: "Evac point", symbol: "EVAC", color: "#d5d1bd", group: "Medical"},
@@ -14,6 +20,8 @@ export const TACTICAL_MARKERS = [
   {type: "possible-movement", label: "Possible movement", symbol: "?", color: "#c79558", group: "Threat / hazard"},
   {type: "drone-spotted", label: "Drone spotted", symbol: "UAV", color: "#c46855", group: "Threat / hazard"},
   {type: "fire-smoke", label: "Fire / smoke", symbol: "FIRE", color: "#c46855", group: "Threat / hazard"},
+  {type: "flooding", label: "Flooding", symbol: "FLD", color: "#668995", group: "Threat / hazard"},
+  {type: "electrical-hazard", label: "Electrical hazard", symbol: "ELEC", color: "#c79558", group: "Threat / hazard"},
   {type: "road-blocked", label: "Road blocked", symbol: "OBS", color: "#c46855", group: "Threat / hazard"},
   {type: "route-compromised", label: "Route compromised", symbol: "RTE", color: "#c46855", group: "Threat / hazard"},
   {type: "bridge-damaged", label: "Bridge damaged", symbol: "BRG", color: "#c46855", group: "Threat / hazard"},
@@ -49,5 +57,19 @@ export function tacticalMarkerGroups() {
     if (!groups.has(item.group)) groups.set(item.group, []);
     groups.get(item.group).push(item);
   });
-  return [...groups.entries()].map(([label, markers]) => ({label, markers}));
+  const order = ["Threat / hazard", "Medical", "Control", "Operations", "Movement / support", "Units", "Notes / unknown"];
+  return order.map(label => ({label, markers: groups.get(label) || []}));
+}
+
+export const REPORT_STATUS_LABELS = {reported: "Unconfirmed", confirmed: "Confirmed", cleared: "Cleared"};
+
+export function reportProperties(event) {
+  if (event.type !== "marker.created" || ["waypoint", "text"].includes(event.marker_type)) return {};
+  const status = event.report_view?.status || event.report_status || "reported";
+  return {reportStatus: status, reportDescription: event.description || "",
+    reportUrgent: event.urgent === true && status !== "cleared", reportedAt: event.created_at,
+    reportUpdatedBy: event.report_view?.updated_by || "", reportUpdatedAt: event.report_view?.updated_at || 0,
+    reportUpdateQueued: event.report_view?.queued === true,
+    reportRevision: event.report_view?.revision || 0,
+    ...(status === "cleared" ? {markerColor: "#59615c", symbol: "✓", label: `${event.label} · cleared`} : {})};
 }

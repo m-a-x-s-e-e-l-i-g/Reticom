@@ -41,6 +41,38 @@ class EventStore:
                 self._connection.execute(
                     "ALTER TABLE events ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'verified'"
                 )
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS navigation_revisions "
+                "(sender_hash TEXT PRIMARY KEY, revision INTEGER NOT NULL)"
+            )
+
+    def next_navigation_revision(self, sender_hash: str) -> int:
+        """Reserve a device-local sequence, surviving restarts and snapshot pruning."""
+        from .navigation import MAX_REVISION
+        with self._lock, self._connection:
+            saved = self._connection.execute(
+                "SELECT revision FROM navigation_revisions WHERE sender_hash=?", (sender_hash,)
+            ).fetchone()
+            rows = self._connection.execute(
+                "SELECT payload_json FROM events WHERE sender_hash=? "
+                "AND event_type IN ('navigation.updated','navigation.stopped')", (sender_hash,)
+            ).fetchall()
+            revision = max([saved[0] if saved else 0] + [json.loads(row[0]).get("revision", 0) for row in rows]) + 1
+            if revision > MAX_REVISION:
+                raise ValueError("navigation revision limit reached")
+            self._connection.execute(
+                "INSERT OR REPLACE INTO navigation_revisions VALUES(?,?)", (sender_hash, revision)
+            )
+        return revision
+
+    def navigation_events(self, since: int | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM events WHERE received_at>=? "
+                "AND event_type IN ('navigation.updated','navigation.stopped') "
+                "ORDER BY received_at DESC,rowid DESC", (since or 0,)
+            ).fetchall()
+        return self._visible(rows)
 
     def insert(
         self,
@@ -135,6 +167,28 @@ class EventStore:
         event = self.map_event(event_id, event_type)
         return bool(event and event["sender_hash"] == sender_hash)
 
+    def automatic_report_source(self, event_id: str) -> dict[str, Any] | None:
+        return self.map_event(event_id, "chat.message") or self.map_event(event_id, "ptt.broadcast")
+
+    def cache_report_view(self, event_id: str, view: dict[str, Any]) -> None:
+        """Cache a projection received over the authenticated team feed.
+
+        Never replace the original signed fields; report_view is UI metadata.
+        """
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT payload_json FROM events WHERE event_id=? AND event_type='marker.created'", (event_id,)
+            ).fetchone()
+            if row:
+                payload = json.loads(row[0])
+                current = payload.get("report_view", {})
+                def version(item):
+                    return item.get("revision", 0), item.get("updated_at", 0), item.get("update_id", "")
+                if current != view and version(view) >= version(current):
+                    payload["report_view"] = view
+                    self._connection.execute("UPDATE events SET payload_json=? WHERE event_id=?",
+                                             (json.dumps(payload), event_id))
+
     def clear_communications(self, since: int | None = None) -> dict[str, Any]:
         """Delete chat/voice history while preserving operational session data."""
         event_types = ("chat.message", "message.deleted", "ptt.broadcast")
@@ -167,9 +221,11 @@ class EventStore:
 
     @staticmethod
     def _visible(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        from .navigation import NAVIGATION_TYPES, event_version
         items: list[dict[str, Any]] = []
         message_owners: dict[str, str] = {}
         map_owners: dict[str, str] = {}
+        report_owners: dict[str, str] = {}
         for row in rows:
             item = json.loads(row["payload_json"])
             item["network"] = {
@@ -183,6 +239,8 @@ class EventStore:
                 "snr": row["snr"],
             }
             items.append(item)
+            if item["type"] in {"chat.message", "ptt.broadcast"}:
+                report_owners[item["id"]] = row["sender_hash"]
             if item["type"] == "chat.message":
                 message_owners[item["id"]] = row["sender_hash"]
             if item["type"] in {"marker.created", "drawing.created"}:
@@ -206,7 +264,18 @@ class EventStore:
         moderation_interfaces = {
             "Command origin · Reticulum feed",
             "Team admin · Authenticated Reticulum Link",
+            "Local team admin · Reticulum outbox",
         }
+        dismissed_reports = {
+            item["message_id"] for item in items
+            if item["type"] == "report.dismissed" and (
+                report_owners.get(item["message_id"]) == item["network"]["sender_hash"]
+                or item["network"].get("interface") in moderation_interfaces
+            )
+        }
+        for item in items:
+            if item["id"] in dismissed_reports:
+                item["automatic_report_dismissed"] = True
         deleted = {
             item["message_id"]
             for item in items
@@ -218,6 +287,25 @@ class EventStore:
             )
         }
         deleted_map: set[str] = set()
+        report_updates: dict[str, dict[str, Any]] = {}
+        # Deterministic across replicas, independent of arrival order.
+        for item in sorted(items, key=lambda event: (event.get("report_revision", 1), event["created_at"], event["id"])):
+            if item["type"] != "marker.status":
+                continue
+            if (map_owners.get(item["marker_id"]) == item["network"]["sender_hash"]
+                    or item["network"].get("interface") in moderation_interfaces):
+                report_updates[item["marker_id"]] = {
+                    "status": item["report_status"], "updated_at": item["created_at"],
+                    "update_id": item["id"], "updated_by": item["callsign"],
+                    "queued": item["network"]["queued"],
+                    "revision": item.get("report_revision", 1),
+                }
+        for item in items:
+            if item["type"] == "marker.created":
+                current = item.get("report_view", {})
+                update = report_updates.get(item["id"])
+                if update and (update["revision"], update["updated_at"], update["update_id"]) >= (current.get("revision", 0), current.get("updated_at", 0), current.get("update_id", "")):
+                    item["report_view"] = update
         for item in items:
             if item["type"] not in {"marker.deleted", "drawing.deleted"}:
                 continue
@@ -230,13 +318,21 @@ class EventStore:
                 or moderation_origin
             ):
                 deleted_map.add(reference)
+        navigation = {}
+        for item in items:
+            if item["type"] in NAVIGATION_TYPES:
+                sender = item["network"]["sender_hash"]
+                if sender not in navigation or event_version(item) > event_version(navigation[sender]):
+                    navigation[sender] = item
         return [
             item
             for item in items
             if item["type"]
-            not in {"message.deleted", "marker.deleted", "drawing.deleted"}
+            not in {"message.deleted", "marker.deleted", "drawing.deleted", "marker.status", "report.dismissed"}
             and item["id"] not in deleted
             and item["id"] not in deleted_map
+            and (item["type"] not in NAVIGATION_TYPES
+                 or navigation[item["network"]["sender_hash"]]["id"] == item["id"])
         ]
 
     def recent(self, limit: int = 200, since: int | None = None) -> list[dict[str, Any]]:
@@ -263,6 +359,14 @@ class EventStore:
                     "SELECT * FROM events WHERE received_at >= ?", (since,)
                 ).fetchall()
         return len(self._visible(rows))
+
+    def mission_events(self, since: int | None = None, intel_limit: int = 100) -> list[dict[str, Any]]:
+        from .mission import select_mission_events
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM events WHERE received_at >= ? ORDER BY received_at DESC, rowid DESC", (since or 0,)
+            ).fetchall()
+        return select_mission_events(self._visible(rows), intel_limit=intel_limit)
 
     def operators(self, since: int | None = None) -> list[dict[str, Any]]:
         """Return one current, verified summary per sending Reticulum identity."""

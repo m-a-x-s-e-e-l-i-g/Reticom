@@ -3,6 +3,14 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 
 const html = readFileSync(new URL("../src/retium/static/index.html", import.meta.url), "utf8");
+const css = readFileSync(new URL("../src/retium/static/styles.css", import.meta.url), "utf8");
+const app = readFileSync(new URL("../src/retium/static/app.js", import.meta.url), "utf8");
+
+test("PTT returns after review is saved or discarded", () => {
+  assert.match(css, /\.map-draw-controls\.is-reviewing:not\(\.hidden\) ~ \.map-actions \.ptt-button/);
+  const stop = app.slice(app.indexOf("function stopMapDrawing"), app.indexOf("function addMapDrawPoint"));
+  assert.match(stop, /classList\.remove\("is-reviewing"\)/);
+});
 
 function between(start, end) {
   const startIndex = html.indexOf(start);
@@ -20,6 +28,7 @@ test("Field and Command expose Tactical and keep Draw focused", () => {
 
   for (const menu of menus) {
     assert.match(menu, /data-map-marker-palette/);
+    assert.equal((menu.match(/data-map-draw="area"/g) || []).length, 1);
     assert.match(menu, /data-map-radial-page="draw"/);
     assert.match(menu, /<span>DRAW<\/span>/);
     assert.doesNotMatch(menu, /data-quick-marker="(?:car|tank|helicopter|airplane)"/);
@@ -35,7 +44,10 @@ test("desktop context menus expose the shared Tactical palette", () => {
 
   for (const menu of menus) {
     assert.match(menu, /data-map-marker-palette/);
-    assert.match(menu, /TACTICAL MARKERS/);
+    assert.match(menu, /REPORT/);
+    assert.doesNotMatch(menu, /data-quick-marker="(?:warning|observation|obstacle)"/);
+    assert.match(menu, /data-quick-marker="note"/);
+    assert.equal((menu.match(/data-map-draw="area"/g) || []).length, 1);
     assert.doesNotMatch(menu, /map-context-symbols/);
     assert.doesNotMatch(menu, /data-quick-marker="(?:car|tank|helicopter|airplane)"/);
   }

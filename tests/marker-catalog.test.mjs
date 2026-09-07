@@ -11,7 +11,7 @@ import {
 } from "../src/retium/static/marker-catalog.js";
 
 test("tactical marker catalog exposes every manual report marker once", () => {
-  assert.equal(TACTICAL_MARKERS.length, 22);
+  assert.equal(TACTICAL_MARKERS.length, 30);
   assert.equal(new Set(TACTICAL_MARKER_TYPES).size, TACTICAL_MARKERS.length);
   assert.deepEqual(
     TACTICAL_MARKERS.map(({type}) => type),
@@ -23,11 +23,11 @@ test("tactical marker groups cover the complete catalog", () => {
   const groups = tacticalMarkerGroups();
   assert.deepEqual(
     groups.map(({label}) => label),
-    ["Medical", "Control", "Threat / hazard", "Movement / support", "Units"],
+    ["Threat / hazard", "Medical", "Control", "Operations", "Movement / support", "Units", "Notes / unknown"],
   );
   assert.deepEqual(
-    groups.flatMap(({markers}) => markers.map(({type}) => type)),
-    TACTICAL_PALETTE_MARKERS.map(({type}) => type),
+    groups.flatMap(({markers}) => markers.map(({type}) => type)).sort(),
+    TACTICAL_PALETTE_MARKERS.map(({type}) => type).sort(),
   );
 });
 
@@ -36,12 +36,13 @@ test("vehicle and aircraft markers live in the Tactical palette", () => {
     TACTICAL_UNIT_MARKERS.map(({type}) => type),
     ["car", "tank", "helicopter", "airplane"],
   );
-  assert.equal(new Set(TACTICAL_PALETTE_MARKERS.map(({type}) => type)).size, 26);
+  assert.equal(new Set(TACTICAL_PALETTE_MARKERS.map(({type}) => type)).size, 34);
   assert.equal(tacticalMarker("helicopter")?.group, "Units");
 });
 
 test("core speech and PTT report markers have visible manual equivalents", () => {
   for (const type of [
+    "command-post", "base-camp", "objective", "assembly-point",
     "evac-point", "casualty", "contact", "fire-smoke", "drone-spotted",
     "road-blocked", "radio-dead-zone", "supply-cache", "water-point",
   ]) {

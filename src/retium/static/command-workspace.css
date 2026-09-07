@@ -1,0 +1,100 @@
+/* Command-only canvas. Field and combined-team views retain their own layout. */
+.command-canvas-mode .topbar {height:56px;min-height:56px;padding:0 16px;gap:10px;z-index:80;}
+.command-canvas-mode .brand {order:0;font-size:1.25rem;letter-spacing:.1em;}
+.command-canvas-mode .brand-mark {display:none;}
+.command-canvas-mode #commandTeamsToggle {order:1;max-width:240px;overflow:hidden;text-overflow:ellipsis;margin:0  auto 0 4px;font-family:var(--font-body);font-size:.875rem;letter-spacing:0;text-transform:none;}
+.command-canvas-mode #networkToggle {order:3;}
+.command-canvas-mode #incomingAlertsToggle {order:4;}
+.command-canvas-mode #userSettingsToggle {order:5;}
+.command-canvas-mode #adminSettingsToggle {order:6;}
+.command-canvas-mode #allTeamsLink,.command-canvas-mode #roleLabel {display:none;}
+.command-canvas-mode #adminSettingsToggle span {display:none;}
+.command-canvas-active {overflow:hidden;}
+#commandView.command-canvas {display:block;position:relative;width:100%;height:calc(100dvh - 56px);padding:0;gap:0;isolation:isolate;overflow:hidden;}
+#commandView.command-canvas.hidden {display:none;}
+.command-canvas > .map-panel {position:absolute;inset:0;display:block;border:0;padding:0;min-height:0;}
+.command-canvas #map,.command-canvas #mapCanvas {position:absolute;inset:0;width:100%;height:100%;min-height:0;}
+.command-canvas .map-edit-hint,.command-canvas #mapBounds {display:none;}
+.command-canvas #commandLatestMessages {display:none!important;} /* Already visible in Comms; no duplicated overlays. */
+.command-canvas .map-corners {bottom:8px;left:12px;right:auto;}
+.command-canvas .command-map-toggles {top:14px;left:116px;right:auto;}
+.command-canvas #commandGridReference {top:auto;bottom:32px;left:12px;right:auto;max-width:240px;}
+.command-canvas .maplibregl-ctrl-top-right {top:64px;}
+.command-canvas .command-map-draw-controls {bottom:84px;}
+.command-canvas .workspace-map-tools {position:absolute;left:12px;top:12px;z-index:5;display:flex;gap:4px;}
+.workspace-map-tools .workspace-draw {display:grid;place-items:center;width:44px;height:38px;min-height:38px;margin:0;padding:8px;background:var(--surface-raised);border:1px solid var(--line-strong);border-radius:4px;color:var(--text-muted);}
+.workspace-draw svg {width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;}
+.workspace-map-tools #intelPacksToggle {margin:0;background:var(--surface-raised);border:1px solid var(--line-strong);border-radius:4px;width:44px;height:38px;min-height:38px;}
+.workspace-map-tools .intel-packs-toggle-label,.workspace-map-tools [data-intel-count] {display:none;}
+.command-canvas .workspace-panel {position:absolute;z-index:10;width:336px;max-width:calc(100% - 16px);max-height:calc(100% - 100px);display:flex;flex-direction:column;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface-raised);box-shadow:0 5px 18px #0005;overflow:hidden;}
+.command-canvas .workspace-panel[hidden] {display:none;}
+.workspace-panel svg,.workspace-dock svg {width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;}
+.command-canvas .workspace-panel-head {display:flex;align-items:center;gap:4px;min-height:42px;border-bottom:1px solid var(--line-strong);padding:3px 5px;}
+.command-canvas .workspace-panel-head button {display:flex;align-items:center;gap:8px;width:auto;margin:0;padding:8px;border:0;background:transparent;color:var(--text);font-family:var(--font-body);font-size:.875rem;letter-spacing:0;text-transform:none;min-height:34px;}
+.command-canvas .workspace-panel-head .workspace-grip {flex:1;justify-content:flex-start;text-align:left;cursor:grab;touch-action:none;}
+.workspace-grip svg {color:var(--text-muted);stroke-width:3px;}
+.command-canvas .workspace-panel-head button:hover,.workspace-dock button:hover {background:var(--line);}
+.command-canvas .workspace-panel.is-dragging {border-color:var(--signal-strong);}
+.workspace-panel.is-dragging .workspace-grip {cursor:grabbing;}
+.workspace-panel-content {display:flex;flex-direction:column;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;}
+.command-canvas .workspace-panel .panel {border:0;background:transparent;min-height:0;padding:12px;gap:12px;}
+.command-canvas #workspace-comms {height:min(470px,calc(100% - 100px));}
+.command-canvas #workspace-comms .workspace-panel-content {flex:1;overflow:hidden;}
+.command-canvas #workspace-comms .timeline {flex:1;overflow:hidden;padding:0 14px;gap:0;}
+.command-canvas .timeline-head,.command-canvas .cleanup-scope {display:none;}
+.command-canvas #timeline {max-height:none;min-height:0;overflow:auto;overscroll-behavior:contain;}
+.command-canvas #timeline.empty-copy {padding:18px 0;font:400 .875rem/1.5 var(--font-body);}
+.command-canvas .event {padding:12px 0;background:transparent;border:0;border-bottom:1px solid var(--line);}
+.command-canvas .event-head {font:400 .75rem/1.5 var(--font-body);gap:8px;}
+.command-canvas .event-head>span {overflow-wrap:anywhere;min-width:0;}
+.command-canvas .event-head time {font-size:.6875rem;}
+.command-canvas .event-body {font-size:.875rem;line-height:1.5;margin-top:5px;overflow-wrap:anywhere;}
+.command-canvas .event-meta {font-size:.625rem;line-height:1.5;}
+.command-canvas .event-proof {margin-top:6px;}
+.command-canvas .event-proof summary {font-size:.6875rem;color:var(--text-muted);cursor:pointer;}
+.command-canvas .command-comms {flex:none;display:flex;flex-direction:column;border-top:1px solid var(--line-strong)!important;}
+.command-canvas .command-comms>.module-head {display:none;}
+.command-canvas .command-comms-body {display:flex;flex-direction:column;gap:8px;}
+.command-canvas .command-ptt {order:0;min-height:48px;max-height:none;margin:0;padding:8px;background:color-mix(in oklch,var(--surface-raised),var(--signal) 20%);border-color:var(--line-strong);}
+.command-canvas .command-ptt b {font-size:.875rem;}
+.command-canvas .command-ptt small {font-size:.625rem;}
+.command-canvas .command-text-composer {order:1;grid-template-columns:minmax(0,1fr) auto;}
+.command-canvas .command-text-composer textarea {min-height:40px;height:40px;padding:8px;font:400 .875rem/1.5 var(--font-body);}
+.command-canvas .command-text-composer button {width:64px;min-height:40px;padding:8px;font-size:.75rem;}
+.command-canvas .command-delivery:not(.success):not(.error):not(.queued) {display:none;}
+.command-canvas .command-delivery.success,.command-canvas .command-delivery.error,.command-canvas .command-delivery.queued {display:block;font-size:.6875rem;line-height:1.4;padding:6px;min-height:0;}
+.command-canvas .command-sender {align-self:center;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 .6875rem var(--font-body);}
+.command-canvas .rail {display:flex;gap:12px;overflow:visible;}
+.command-canvas .operator {padding:10px 0;gap:4px;}
+.command-canvas .operator strong {font:500 .9375rem var(--font-body);}
+.command-canvas .operator>span {font:400 .75rem/1.4 var(--font-body);}
+.command-canvas .operator>span:last-child {display:none;}
+.command-canvas .workspace-review {width:100%;margin:0;padding:8px;font:400 .8125rem var(--font-body);}
+.command-canvas #commandTasksModule {display:flex;flex-direction:column;}
+.command-canvas #commandTasksModule.hidden {display:none;}
+.command-canvas #commandTasksModule>.module-head {display:none;}
+.command-canvas .task-create {flex:none;}
+.command-canvas .task-list {overflow:visible;}
+.command-canvas #workspace-layers {width:380px;}
+.command-canvas #intelPacksPanel {position:static;width:auto;max-height:none;overflow:visible;box-shadow:none;border:0;padding:12px;}
+.command-canvas .intel-packs-head {display:none;}
+.command-canvas .workspace-dock {position:absolute;bottom:max(16px,env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:4px;padding:5px;background:var(--surface-raised);border:1px solid var(--line-strong);border-radius:6px;max-width:calc(100% - 16px);}
+.command-canvas .workspace-dock button {display:flex;align-items:center;justify-content:center;gap:8px;width:auto;min-width:0;margin:0;padding:10px 12px;border:0;border-radius:3px;background:transparent;color:var(--text-muted);font:400 .8125rem var(--font-body);letter-spacing:0;text-transform:none;white-space:nowrap;}
+.command-canvas .workspace-dock button[aria-pressed=true] {background:color-mix(in oklch,var(--surface-raised),var(--signal) 22%);color:var(--text);}
+.command-canvas .workspace-dock button[hidden] {display:none;}
+.workspace-team-details {padding:12px 0;border-bottom:1px solid var(--line);}
+.workspace-team-details .rail-footer {padding:0;}
+.command-canvas-mode .settings-panel {z-index:100;top:56px;}
+@media(max-width:700px) {
+ .command-canvas-mode .topbar {gap:4px;padding:0 8px;}
+ .command-canvas-mode #commandTeamsToggle {max-width:140px;padding:8px;}
+ .command-canvas-mode .brand {font-size:1rem;letter-spacing:.04em;}
+ .command-canvas-mode #topbarCallsign {display:none;}
+ .command-canvas .workspace-dock {gap:0;padding:3px;bottom:8px;}
+ .command-canvas .workspace-dock button {flex-direction:column;gap:4px;padding:8px;font-size:.6875rem;}
+ .command-canvas .workspace-panel {max-height:calc(100% - 120px);}
+ .command-canvas #workspace-comms {height:min(440px,calc(100% - 120px));}
+ .command-canvas #commandGridReference {bottom:82px;}
+ .command-canvas .map-corners {bottom:66px;}
+ .command-canvas #mapEmpty {width:220px;}
+}

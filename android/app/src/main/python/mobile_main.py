@@ -12,6 +12,8 @@ from retium.bootstrap import prepare_reticulum_config
 
 _lock = threading.Lock()
 _thread: threading.Thread | None = None
+_server: uvicorn.Server | None = None
+_stopping = threading.Event()
 
 ANDROID_CONFIG = """[reticulum]
   enable_transport = No
@@ -45,6 +47,9 @@ def _prepare(home: Path, relay_host: str = "", relay_port: int = 4242) -> tuple[
 
 
 def _run(config_dir: Path, data_dir: Path) -> None:
+    global _server
+    if _stopping.is_set():
+        return
     app = create_app("field", config_dir, data_dir)
     config = uvicorn.Config(
         app,
@@ -54,13 +59,25 @@ def _run(config_dir: Path, data_dir: Path) -> None:
         ws="wsproto",
         log_level="info",
         access_log=False,
+        timeout_graceful_shutdown=2,
     )
-    uvicorn.Server(config).run()
+    server = uvicorn.Server(config)
+    with _lock:
+        if _stopping.is_set():
+            return
+        _server = server
+    try:
+        server.run()
+    finally:
+        with _lock:
+            _server = None
 
 
 def start(files_dir: str, relay_host: str = "", relay_port: int = 4242) -> bool:
     global _thread
     with _lock:
+        if _stopping.is_set():
+            return False
         if _thread is not None and _thread.is_alive():
             return False
         config_dir, data_dir = _prepare(Path(files_dir), relay_host, relay_port)
@@ -76,3 +93,22 @@ def start(files_dir: str, relay_host: str = "", relay_port: int = 4242) -> bool:
         )
         _thread.start()
         return True
+
+
+def stop(timeout: float = 5.0) -> bool:
+    """Stop the local HTTP app and persist/detach RNS before Android exits.
+
+    This runtime cannot be restarted in-place after RNS.exit_handler; the
+    service ends its own process after this call. All team data stays on disk.
+    """
+    with _lock:
+        _stopping.set()
+        server, thread = _server, _thread
+        if server is not None:
+            server.should_exit = True
+    # Never join while holding _lock: the server thread needs it on exit.
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=max(0.0, timeout))
+    if RNS.Reticulum.get_instance() is not None:
+        RNS.Reticulum.exit_handler()
+    return thread is None or not thread.is_alive()

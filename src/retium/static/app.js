@@ -1,4 +1,18 @@
 import {connectivityState} from "./connectivity.js?v=20260905-1";
+import {createCommandWorkspace} from "./command-workspace.js?v=20260908-2";
+let commandCanvas = null;
+import {calculateDeviceRoute, initOfflineRoutingSettings, ROUTING_MODE_KEY} from "./offline-routing.js?v=20260907-3";
+const offlineRoutingSettings = initOfflineRoutingSettings();
+import {hikingMapStyle, recenterOnFix, roadAndPathLayers, preferredMapStyle, nextMapStyle, satelliteWithTrails} from "./outdoor-map.js?v=20260907-5";
+import {createIntelPacks} from "./intel-packs.js?v=20260908-3";
+import {createSharedNavigation, navigationSharePayload} from "./shared-navigation.js?v=20260906-1";
+import {HeadingTracker, HeadingOverlay, HeadingConnection} from "./live-heading.js?v=20260905-2";
+import {reportDraft, reportComposerHtml} from "./map-reports.js?v=20260905-1";
+import {reportProperties, REPORT_STATUS_LABELS} from "./marker-catalog.js?v=20260905-2";
+import {drawingFeatures, validDrawingArea, addDrawingDecorationLayers, drawingReviewHtml} from "./map-drawings.js?v=20260905-2";
+import {teamApiUrl, teamPageUrl} from "./command-teams.js?v=20260905-1";
+import {initContinuitySettings} from "./continuity-settings.js?v=20260905-1";
+import {initMembershipSettings} from "./membership-settings.js?v=20260907-1";
 import {displayPositionSeries, distanceMeters, MAX_AUTOMATIC_ACCURACY_METERS} from "./location-filter.js?v=20260903-1";
 import {nextWaypointLabel, withDisplayWaypointLabels} from "./map-labels.js?v=20260903-2";
 import {formatMapBytes, packProgress, tileCountForBounds} from "./map-offline.js?v=20260903-1";
@@ -13,20 +27,27 @@ import {
   parseCalculatedRoute,
   routeInstruction,
   routeNeedsRefresh,
-} from "./route-navigation.js?v=20260903-1";
+} from "./route-navigation.js?v=20260907-3";
 import {
   AUTOMATIC_REPORT_POSITION_MAX_AGE_SECONDS,
   activeAutomaticReports,
   buildAutomaticReportFeatures,
   parseAutomaticReport,
-} from "./automatic-reports.js?v=20260903-4";
+} from "./automatic-reports.js?v=20260905-1";
 import {
   TACTICAL_MARKER_TYPES,
   tacticalMarker,
   tacticalMarkerGroups,
-} from "./marker-catalog.js?v=20260903-1";
+} from "./marker-catalog.js?v=20260905-2";
 
 const $ = (id) => document.getElementById(id);
+const apiUrl = (url) => teamApiUrl(url, location.href);
+const fetch = (url, options) => globalThis.fetch(apiUrl(url), options);
+const intelPacks = createIntelPacks({button: $("intelPacksToggle"), panel: $("intelPacksPanel"), fetchImpl: globalThis.fetch.bind(globalThis), getMapStyle: readMapStylePreference, setMapStyle: mode => toggleMapStyle(mode)});
+let commandWorkspace = false;
+const commandDisplay = () => commandWorkspace || role === "gateway";
+const commandOverview = new URL(location.href).searchParams.get("team") === "none";
+const commandAllTeams = new URL(location.href).searchParams.get("team") === "all";
 let role = null;
 let qrStream = null;
 let qrScanTimer = null;
@@ -53,19 +74,23 @@ let selectedUserIcon = "dot";
 let selectedUserColor = "moss";
 let fieldMap = null;
 let fieldMapReady = null;
-let fieldMapMarkerClass = null;
-let fieldMapPopupClass = null;
-const fieldWaypointMarkers = new Map();
+let mapMarkerClass = null;
+let mapPopupClass = null;
+const waypointMarkersByMap = new WeakMap();
 let fieldMapOnline = false;
 let fieldFeedOnline = false;
 let fieldTeamDestination = "";
 let commandEvents = [];
 let fieldEvents = [];
+const pointingTracker = new HeadingTracker();
+let commandPointing = null, fieldPointing = null, pointingSample = null;
+const headingPreference = "reticom-share-facing-direction";
 let fieldOperators = new Map();
 let privateMessages = [];
 let activePrivatePeer = null;
 let privateChatLoading = false;
 let readMapMessageIds = new Set();
+let readMapMessageDestination = null;
 let mapMessageSwipe = null;
 let suppressMapMessageClickUntil = 0;
 let commandMapEditor = null;
@@ -79,6 +104,13 @@ let automaticLocationEnabled = readAutomaticLocationPreference();
 let waypointNavigation = null;
 let waypointNavigationWatchId = null;
 let waypointArrivalReportPending = false;
+const sharedNavigation = createSharedNavigation({
+  fetchImpl: globalThis.fetch.bind(globalThis), urlFor: apiUrl,
+  getIdentity: () => localIdentityHash, getRole: () => role,
+  onFollow: followSharedNavigation,
+  onStopSharing: stopNavigationSharing,
+  onPlans: synchronizeSharedNavigation, toast,
+});
 let lastCompassHeading = null;
 let nativeCompassUpdatedAt = 0;
 let fieldBearingOrigin = null;
@@ -115,6 +147,8 @@ let liveVoiceReconnectTimer = null;
 let incomingLiveVoice = null;
 let incomingFeedInitialized = false;
 let incomingAudioReady = false;
+let incomingAudioUnlock = null;
+let incomingAudioUnlockGeneration = 0;
 let activeIncomingAudio = null;
 let activeIncomingCue = null;
 let incomingCuePlaying = false;
@@ -208,6 +242,7 @@ function saveIncomingAlertPreference(enabled) {
 }
 
 function loadReadMapMessages(destination) {
+  readMapMessageDestination = destination;
   try {
     const stored = JSON.parse(localStorage.getItem(mapMessageReadStorageKey(destination)) || "[]");
     readMapMessageIds = new Set(parseReadMessageIds(stored));
@@ -218,7 +253,7 @@ function loadReadMapMessages(destination) {
 
 function saveReadMapMessages() {
   try {
-    localStorage.setItem(mapMessageReadStorageKey(fieldTeamDestination), JSON.stringify(parseReadMessageIds([...readMapMessageIds])));
+    localStorage.setItem(mapMessageReadStorageKey(readMapMessageDestination), JSON.stringify(parseReadMessageIds([...readMapMessageIds])));
   } catch {
     // The current session still behaves correctly when persistent storage is unavailable.
   }
@@ -226,10 +261,10 @@ function saveReadMapMessages() {
 
 function readMapStylePreference() {
   try {
-    if (!navigator.onLine) return "dark";
-    return localStorage.getItem("retium.mapStyle") === "satellite" ? "satellite" : "dark";
+    const mode = localStorage.getItem("retium.mapStyle");
+    return preferredMapStyle(mode, navigator.onLine);
   } catch {
-    return "dark";
+    return "hiking";
   }
 }
 
@@ -292,13 +327,14 @@ function readFieldEventCache(destination) {
 function saveFieldEventCache(destination, events) {
   if (!destination) return;
   try {
-    localStorage.setItem(`retium.fieldEvents.${destination}`, JSON.stringify(events.slice(0, 60)));
+    localStorage.setItem(`retium.fieldEvents.${destination}`, JSON.stringify(events));
   } catch {
     // Live Reticulum data still works when browser storage is unavailable.
   }
 }
 
 function mapStyleDefinition(mode = mapStyleMode) {
+  if (mode === "hiking") return hikingMapStyle(mapStyleDefinition("dark"));
   if (mode === "dark") {
     return {
       version: 8,
@@ -320,8 +356,7 @@ function mapStyleDefinition(mode = mapStyleMode) {
         {id: "offline-water", type: "fill", source: "offline", "source-layer": "water", paint: {"fill-color": "#0c1719"}},
         {id: "offline-waterway", type: "line", source: "offline", "source-layer": "waterway", paint: {"line-color": "#1b3134", "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.4, 14, 1.5]}},
         {id: "offline-buildings", type: "fill", source: "offline", "source-layer": "building", minzoom: 12, paint: {"fill-color": "#222620", "fill-outline-color": "#30342c", "fill-opacity": 0.9}},
-        {id: "offline-road-casing", type: "line", source: "offline", "source-layer": "transportation", paint: {"line-color": "#080a08", "line-width": ["interpolate", ["linear"], ["zoom"], 5, 0.7, 10, 2.2, 14, 5]}},
-        {id: "offline-roads", type: "line", source: "offline", "source-layer": "transportation", paint: {"line-color": "#45483f", "line-opacity": 0.82, "line-width": ["interpolate", ["linear"], ["zoom"], 5, 0.25, 10, 1, 14, 2.6]}},
+        ...roadAndPathLayers(),
         {id: "offline-boundaries", type: "line", source: "offline", "source-layer": "boundary", paint: {"line-color": "#5f6257", "line-opacity": 0.52, "line-dasharray": [3, 2], "line-width": 0.8}},
         {
           id: "offline-road-labels", type: "symbol", source: "offline", "source-layer": "transportation_name", minzoom: 12,
@@ -336,7 +371,7 @@ function mapStyleDefinition(mode = mapStyleMode) {
       ],
     };
   }
-  return {
+  return satelliteWithTrails({
     version: 8,
     glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
     sources: {
@@ -359,7 +394,7 @@ function mapStyleDefinition(mode = mapStyleMode) {
         "raster-fade-duration": 0,
       },
     }],
-  };
+  }, mapStyleDefinition("hiking"));
 }
 
 function updateMapStyleUi() {
@@ -367,14 +402,14 @@ function updateMapStyleUi() {
   const commandToggle = $("commandMapStyleToggle");
   const fieldToggle = $("fieldMapStyleToggle");
   if (commandToggle) {
-    commandToggle.textContent = satellite ? "DARK MAP" : "SATELLITE";
+    commandToggle.textContent = satellite ? "HIKING MAP" : "SATELLITE";
     commandToggle.setAttribute("aria-pressed", String(satellite));
-    commandToggle.setAttribute("aria-label", satellite ? "Switch to dark map" : "Switch to satellite map");
+    commandToggle.setAttribute("aria-label", satellite ? "Switch to hiking map" : "Switch to satellite map");
   }
   if (fieldToggle) {
     fieldToggle.textContent = satellite ? "MAP" : "SAT";
     fieldToggle.setAttribute("aria-pressed", String(satellite));
-    fieldToggle.setAttribute("aria-label", satellite ? "Switch to dark map" : "Switch to satellite map");
+    fieldToggle.setAttribute("aria-label", satellite ? "Switch to hiking map" : "Switch to satellite map");
   }
   const commandCredit = $("commandMapCredit");
   const fieldCredit = $("fieldMapCredit");
@@ -426,23 +461,48 @@ function updateIncomingAlertsUi() {
   button.title = description;
 }
 
-async function armIncomingAlerts() {
-  incomingAlertsEnabled = true;
-  saveIncomingAlertPreference(true);
-  try {
-    const silent = new Audio("data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAAAAgICA");
-    silent.volume = 0;
-    await silent.play();
-    incomingAudioReady = true;
-    toast("Incoming TTS and voice autoplay enabled");
-  } catch {
-    incomingAudioReady = false;
-    toast("Playback is still blocked · tap ARM ALERTS again", true);
+async function armIncomingAlerts({automatic = false} = {}) {
+  if (automatic && (!incomingAlertsEnabled || incomingAudioReady)) return;
+  if (!automatic) {
+    incomingAlertsEnabled = true;
+    saveIncomingAlertPreference(true);
   }
-  updateIncomingAlertsUi();
+  if (incomingAudioUnlock) return incomingAudioUnlock;
+  const generation = incomingAudioUnlockGeneration;
+  const attempt = (async () => {
+    let silent;
+    // Silent PCM, but NOT volume=0: muted playback can succeed even when the
+    // browser would still block audible incoming transmissions.
+    try {
+      silent = new Audio("data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAAAAgICA");
+      silent.volume = 1;
+      await silent.play();
+      if (!incomingAlertsEnabled || generation !== incomingAudioUnlockGeneration) return;
+      incomingAudioReady = true;
+      if (!automatic) toast("Incoming TTS and voice autoplay enabled");
+    } catch {
+      if (!incomingAlertsEnabled || generation !== incomingAudioUnlockGeneration) return;
+      incomingAudioReady = false;
+      if (!automatic) toast("Playback is still blocked · tap ARM ALERTS again", true);
+    } finally {
+      silent?.pause();
+      updateIncomingAlertsUi();
+    }
+  })();
+  incomingAudioUnlock = attempt;
+  try { await attempt; }
+  finally { if (incomingAudioUnlock === attempt) incomingAudioUnlock = null; }
+}
+
+function automaticallyArmIncomingAlerts(event) {
+  if (!event.isTrusted || event.target?.closest?.("#incomingAlertsToggle")) return;
+  if (event.type === "keydown" && (event.repeat || event.key === "Escape" || event.ctrlKey || event.metaKey || event.altKey)) return;
+  void armIncomingAlerts({automatic: true});
 }
 
 function muteIncomingAlerts() {
+  ++incomingAudioUnlockGeneration;
+  incomingAudioUnlock = null;
   incomingAlertsEnabled = false;
   incomingAudioReady = false;
   saveIncomingAlertPreference(false);
@@ -728,7 +788,7 @@ function waitForIncomingVoiceReady(audio) {
 
 async function playIncomingVoice(event) {
   if (!incomingAlertsEnabled) return;
-  const audio = new Audio(`/api/audio/${encodeURIComponent(event.clip_id)}`);
+  const audio = new Audio(apiUrl(`/api/audio/${encodeURIComponent(event.clip_id)}`));
   audio.preload = "auto";
   activeIncomingAudio = audio;
   const ready = await waitForIncomingVoiceReady(audio);
@@ -972,7 +1032,7 @@ function connectLiveVoice() {
   if (!teamOperational || liveVoiceSocket?.readyState === WebSocket.OPEN || liveVoiceSocket?.readyState === WebSocket.CONNECTING) return;
   if (liveVoiceReconnectTimer) clearTimeout(liveVoiceReconnectTimer);
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${protocol}://${location.host}/api/voice/live`);
+  const socket = new WebSocket(apiUrl(`${protocol}://${location.host}/api/voice/live`));
   liveVoiceSocket = socket;
   socket.binaryType = "arraybuffer";
   socket.addEventListener("message", handleLiveVoiceMessage);
@@ -1109,6 +1169,10 @@ function updateFieldCompassMapTargets(origin, locations, contactFeatures) {
 function renderFieldCompass(value, native = false) {
   const heading = normalizeHeading(value);
   if (heading === null) return;
+  if (native) {
+    nativeCompassUpdatedAt = performance.now();
+    pointingSample = {heading, at: Date.now()};
+  }
   if (lastCompassHeading !== null) {
     const change = Math.abs(((heading - lastCompassHeading + 540) % 360) - 180);
     if (change < 0.35) return;
@@ -1137,13 +1201,36 @@ function renderFieldCompass(value, native = false) {
 }
 
 window.retiumAndroidHeading = (heading) => renderFieldCompass(heading, true);
+window.retiumAndroidHeadingPaused = () => { pointingSample = null; pointingConnection.tick(); };
+
+const sharingHeading = $("shareFacingDirection");
+sharingHeading.checked = localStorage.getItem(headingPreference) === "true" ||
+  (localStorage.getItem(headingPreference) === null && Boolean(window.RetiumAndroid?.isHeadingSharingActive));
+const pointingConnection = new HeadingConnection({
+  clock: pointingTracker.clock,
+  url: () => apiUrl(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/heading/live`),
+  operational: () => teamOperational && window.RetiumAndroid?.isHeadingScreenActive?.() !== false,
+  eligible: () => role === "field" && sharingHeading.checked && (!window.RetiumAndroid || window.RetiumAndroid.isHeadingSharingActive?.() === true),
+  sample: () => pointingSample,
+  receive: frame => {
+    if (frame.type === "heading.clear") pointingTracker.clear();
+    else pointingTracker.accept(frame);
+    commandPointing?.wake(); fieldPointing?.wake();
+  },
+  status: text => { if ($("facingDirectionStatus").textContent !== text) $("facingDirectionStatus").textContent = text; },
+});
+sharingHeading.addEventListener("change", () => {
+  localStorage.setItem(headingPreference, String(sharingHeading.checked));
+  pointingConnection.tick();
+});
 
 function browserCompassHeading(event) {
   if (performance.now() - nativeCompassUpdatedAt < 2000) return;
-  const alpha = Number(event.webkitCompassHeading ?? event.alpha);
+  const alpha = event.webkitCompassHeading ?? event.alpha;
   if (!Number.isFinite(alpha)) return;
   const screenAngle = Number(screen.orientation?.angle ?? window.orientation ?? 0);
   const heading = event.webkitCompassHeading ?? (360 - alpha + screenAngle);
+  if (event.absolute === true || Number.isFinite(event.webkitCompassHeading)) pointingSample = {heading: ((heading % 360) + 360) % 360, at: Date.now()};
   renderFieldCompass(heading);
 }
 
@@ -1226,7 +1313,7 @@ function voicePlayerMarkup(event) {
     ? ` · ${String(transcript.language).toUpperCase()}`
     : "";
   return `<div class="voice-message">
-    <button type="button" class="voice-player" data-audio-src="/api/audio/${encodeURIComponent(event.clip_id)}" data-clip-id="${escapeHtml(event.clip_id)}" data-duration="${duration}" data-callsign="${escapeHtml(event.callsign)}" aria-label="Play voice transmission from ${escapeHtml(event.callsign)}, ${voiceTime(duration, true)}">
+    <button type="button" class="voice-player" data-audio-src="${escapeHtml(apiUrl(`/api/audio/${encodeURIComponent(event.clip_id)}`))}" data-clip-id="${escapeHtml(event.clip_id)}" data-duration="${duration}" data-callsign="${escapeHtml(event.callsign)}" aria-label="Play voice transmission from ${escapeHtml(event.callsign)}, ${voiceTime(duration, true)}">
       <span class="voice-control" aria-hidden="true"></span>
       <span class="voice-waveform" aria-hidden="true">${bars}</span>
       <span class="voice-time">${voiceTime(duration, true)}</span>
@@ -1321,7 +1408,7 @@ function updateTranscriptContactVisuals(clipId) {
       label.textContent = report.action === "cancel-last" ? "MAP CANCEL" : "MAP REPORT";
     }
   });
-  if (role === "gateway" && operationalMap) void renderMap(commandEvents);
+  if (commandDisplay() && operationalMap) void renderMap(commandEvents);
   if (role === "field" && fieldMap) void renderFieldMap(fieldEvents);
 }
 
@@ -1453,6 +1540,8 @@ async function toggleVoicePlayer(button) {
 }
 
 function eventDescription(event) {
+  if (event.type === "navigation.updated") return `Shared route → ${escapeHtml(event.label)}`;
+  if (event.type === "navigation.stopped") return "Stopped sharing navigation";
   if (event.type === "chat.message") return escapeHtml(event.message);
   if (event.type === "private.message") {
     return `<span class="private-route">${escapeHtml(privateRouteLabel(event))}</span><br>${escapeHtml(event.message)}`;
@@ -1461,7 +1550,7 @@ function eventDescription(event) {
     return `<span class="private-route">${escapeHtml(privateRouteLabel(event))}</span>${voicePlayerMarkup(event)}`;
   }
   if (event.type === "task.created") return `New assignment · ${escapeHtml(event.title)}${event.assignee ? ` · ${escapeHtml(event.assignee)}` : " · OPEN TO TEAM"}`;
-  if (event.type === "drawing.created") return event.drawing_type === "arrow" ? "Shared map arrow" : `Shared freehand map trace · ${event.points.length} points`;
+  if (event.type === "drawing.created") return `Shared ${event.drawing_type || "trace"}${event.label ? ` · ${event.label}` : ""}`;
   if (event.type === "position.updated" && event.network?.became_active) {
     const minutes = Math.max(60, Math.round(Number(event.network.position_silence_seconds || 3600) / 60));
     const duration = minutes >= 120 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
@@ -1473,11 +1562,15 @@ function eventDescription(event) {
   if (event.type === "task.completed") return `Completed task · ${shortHash(event.task_id, 8)}`;
   if (event.type === "waypoint.arrived") return `${escapeHtml(event.operator_callsign)} reached ${escapeHtml(event.waypoint_label)} · ${Math.round(event.distance_m)} m from marker`;
   if (event.type === "ptt.broadcast") return voicePlayerMarkup(event);
+  if (event.type === "marker.created" && reportProperties(event).reportStatus) {
+    const report = reportProperties(event);
+    return `${escapeHtml(event.display_label || event.label)} · ${report.reportUrgent ? "URGENT · " : ""}${REPORT_STATUS_LABELS[report.reportStatus]}${event.description && event.description !== event.label ? `<br>${escapeHtml(event.description)}` : ""}`;
+  }
   return `${escapeHtml(event.marker_type.toUpperCase())} · ${escapeHtml(event.display_label || event.label)}<br>${event.lat.toFixed(5)}, ${event.lon.toFixed(5)}`;
 }
 
 function intelEvents(events) {
-  return events.filter((event) => event.type !== "position.updated" || event.network?.became_active === true);
+  return events.filter((event) => !event.type.startsWith("navigation.") && (event.type !== "position.updated" || event.network?.became_active === true));
 }
 
 function intelEventType(event) {
@@ -1635,7 +1728,7 @@ function tacticalMarkerPointLayer(id, source) {
     paint: {
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 5, 11, 15, 15],
       "circle-color": "#090c09",
-      "circle-stroke-width": 2.5,
+      "circle-stroke-width": ["case", ["==", ["get", "reportUrgent"], true], 4, 2.5],
       "circle-stroke-color": ["coalesce", ["get", "markerColor"], "#a48d61"],
     },
   };
@@ -1683,6 +1776,7 @@ function tacticalMarkerCaptionLayer(id, source) {
 
 function renderTimeline(events) {
   const visibleEvents = intelEvents(events);
+  const expandedProofs = new Set([...$("timeline").querySelectorAll(".event-proof[open]")].map(item => item.dataset.eventId));
   if (!visibleEvents.length) {
     $("timeline").className = "timeline-list empty-copy";
     $("timeline").textContent = "No packets received yet. This view does not seed demo data.";
@@ -1693,7 +1787,7 @@ function renderTimeline(events) {
     <article class="event verified">
       <div class="event-head"><span><b class="operator-glyph" style="color:${operatorColor(event.color)}">${operatorGlyph(event.icon)}</b> ${escapeHtml(event.callsign)} · ${escapeHtml(intelEventType(event))}</span><div class="event-head-actions"><time>${timeLabel(event.network.received_at)}</time>${ownMessageRemoveButton(event)}</div></div>
       <div class="event-body">${eventDescription(event)}</div>
-      <div class="event-meta">✓ SIGNATURE · ${shortHash(event.network.sender_hash)}<br>PKT ${shortHash(event.network.packet_hash || "", 8)} · ${escapeHtml(event.network.interface || "Reticulum")}</div>
+      <details class="event-proof" data-event-id="${escapeHtml(event.id)}" ${expandedProofs.has(event.id) ? "open" : ""}><summary>Verified · details</summary><div class="event-meta">✓ SIGNATURE · ${shortHash(event.network.sender_hash)}<br>PKT ${shortHash(event.network.packet_hash || "", 8)} · ${escapeHtml(event.network.interface || "Reticulum")}</div></details>
     </article>`).join("");
 }
 
@@ -1737,6 +1831,7 @@ function updateLocalMapPosition(position) {
   const lon = Number(position?.coords?.longitude);
   const accuracy = Number(position?.coords?.accuracy);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  window.RetiumAndroid?.setCompassLocation?.(lat, lon, Number(position.coords.altitude) || 0);
   const now = Math.floor(Date.now() / 1000);
   localMapPosition = {
     id: "local-device-position",
@@ -1867,6 +1962,7 @@ function contactReportFeatures(events) {
       senderHash: identity,
       createdAt: event.created_at,
       message: reportMessage,
+      removable: role === "gateway" || currentTeamAdmin || identity === localIdentityHash,
     }));
   });
   return {type: "FeatureCollection", features};
@@ -2023,7 +2119,7 @@ function addMgrsGridLayers(map, prefix) {
       "text-allow-overlap": false,
       "text-ignore-placement": false,
     },
-    paint: {"text-color": "#aaa681", "text-halo-color": "#090c09", "text-halo-width": 1.4},
+    paint: {"text-color": "#aaa681", "text-opacity": 0.4, "text-halo-color": "#090c09", "text-halo-width": 1.4},
   });
 }
 
@@ -2216,6 +2312,8 @@ function addOperationalMapLayers(map) {
   map.addSource("verified-contacts", {type: "geojson", data: {type: "FeatureCollection", features: []}});
   map.addSource("verified-drawings", {type: "geojson", data: {type: "FeatureCollection", features: []}});
   map.addSource("verified-draw-preview", {type: "geojson", data: {type: "FeatureCollection", features: []}});
+  addDrawingDecorationLayers(map, "verified-drawings");
+  addDrawingDecorationLayers(map, "verified-draw-preview");
   map.addLayer(automaticReportAreaLayer("verified-automatic-areas", "verified-contacts"));
   map.addLayer(automaticReportAreaOutlineLayer("verified-automatic-area-outlines", "verified-contacts"));
   map.addLayer(movementTrackLayer("verified-tracks", "verified-tracks"));
@@ -2242,7 +2340,7 @@ function addOperationalMapLayers(map) {
     id: "verified-draw-preview",
     type: "line",
     source: "verified-draw-preview",
-    paint: {"line-color": "#a48d61", "line-width": 4, "line-opacity": 0.95, "line-dasharray": [1, 1]},
+    paint: {"line-color": ["get", "color"], "line-width": 3, "line-opacity": 0.95, "line-dasharray": [1, 1]},
     layout: {"line-cap": "round", "line-join": "round"},
   });
   map.addLayer({
@@ -2255,7 +2353,10 @@ function addOperationalMapLayers(map) {
       "circle-stroke-width": 2,
       "circle-stroke-color": "#111711",
     },
-    filter: ["!", ["in", ["get", "markerType"], ["literal", SYMBOL_MARKER_TYPES]]],
+    filter: ["all",
+      ["!", ["in", ["get", "markerType"], ["literal", SYMBOL_MARKER_TYPES]]],
+      ["!=", ["get", "markerType"], "waypoint"],
+    ],
   });
   map.addLayer({
     id: "verified-labels",
@@ -2269,7 +2370,10 @@ function addOperationalMapLayers(map) {
       "text-anchor": "top",
       "text-allow-overlap": false,
     },
-    filter: ["!", ["in", ["get", "markerType"], ["literal", SYMBOL_MARKER_TYPES]]],
+    filter: ["all",
+      ["!", ["in", ["get", "markerType"], ["literal", SYMBOL_MARKER_TYPES]]],
+      ["!=", ["get", "markerType"], "waypoint"],
+    ],
     paint: {"text-color": "#d1d0bf", "text-halo-color": "#111711", "text-halo-width": 1.5},
   });
   map.addLayer(automaticReportPointLayer("verified-automatic-points", "verified-contacts"));
@@ -2285,6 +2389,8 @@ function addFieldMapLayers(map) {
   map.addSource("field-contacts", {type: "geojson", data: {type: "FeatureCollection", features: []}});
   map.addSource("field-drawings", {type: "geojson", data: {type: "FeatureCollection", features: []}});
   map.addSource("field-draw-preview", {type: "geojson", data: {type: "FeatureCollection", features: []}});
+  addDrawingDecorationLayers(map, "field-drawings");
+  addDrawingDecorationLayers(map, "field-draw-preview");
   map.addSource("field-navigation", {type: "geojson", data: {type: "FeatureCollection", features: []}});
   map.addSource("field-bearing", {type: "geojson", data: {type: "FeatureCollection", features: []}});
   map.addLayer(automaticReportAreaLayer("field-automatic-areas", "field-contacts"));
@@ -2356,7 +2462,7 @@ function addFieldMapLayers(map) {
     id: "field-draw-preview",
     type: "line",
     source: "field-draw-preview",
-    paint: {"line-color": "#a48d61", "line-width": 4, "line-opacity": 0.95, "line-dasharray": [1, 1]},
+    paint: {"line-color": ["get", "color"], "line-width": 3, "line-opacity": 0.95, "line-dasharray": [1, 1]},
     layout: {"line-cap": "round", "line-join": "round"},
   });
   map.addLayer({
@@ -2378,7 +2484,10 @@ function addFieldMapLayers(map) {
     id: "field-labels",
     type: "symbol",
     source: "field-events",
-    filter: ["!", ["in", ["get", "markerType"], ["literal", SYMBOL_MARKER_TYPES]]],
+    filter: ["all",
+      ["!", ["in", ["get", "markerType"], ["literal", SYMBOL_MARKER_TYPES]]],
+      ["!=", ["get", "markerType"], "waypoint"],
+    ],
     layout: {"text-field": ["get", "label"], "text-size": 12, "text-font": ["Noto Sans Regular"], "text-offset": [0, 1.7], "text-anchor": "top"},
     paint: {"text-color": "#d1d0bf", "text-halo-color": "#090c09", "text-halo-width": 1.5},
   });
@@ -2414,15 +2523,16 @@ function replaceMapStyle(map, addLayers) {
   });
 }
 
-async function toggleMapStyle() {
+async function toggleMapStyle(requestedMode) {
   if (mapStyleSwitching) return;
   mapStyleSwitching = true;
   const operationalCamera = operationalMap ? captureMapCamera(operationalMap) : null;
   const fieldCamera = fieldMap ? captureMapCamera(fieldMap) : null;
   const buttons = [$("commandMapStyleToggle"), $("fieldMapStyleToggle")].filter(Boolean);
   buttons.forEach((button) => { button.disabled = true; });
-  mapStyleMode = mapStyleMode === "dark" ? "satellite" : "dark";
+  mapStyleMode = nextMapStyle(mapStyleMode, requestedMode);
   saveMapStylePreference(mapStyleMode);
+  window.dispatchEvent(new CustomEvent("reticom-map-style", {detail: mapStyleMode}));
   updateMapStyleUi();
   try {
     const replacements = [];
@@ -2438,7 +2548,7 @@ async function toggleMapStyle() {
     fieldMap?._reticomGridUpdate?.();
     updateDrawPreview(commandMapEditor);
     updateDrawPreview(fieldMapEditor);
-    toast(mapStyleMode === "satellite" ? "Satellite map active" : "Dark map active");
+    toast(mapStyleMode === "satellite" ? "Satellite map active" : mapStyleMode === "hiking" ? "Hiking map active" : "Dark map active");
   } catch {
     toast("Map style could not be loaded", true);
   } finally {
@@ -2451,9 +2561,12 @@ async function ensureMap() {
   if (operationalMap) return operationalMap;
   if (mapReady) return mapReady;
   mapReady = (async () => {
-    const {Map: LibreMap, NavigationControl, Popup} = await import(MAPLIBRE_URL);
+    const {Map: LibreMap, Marker, NavigationControl, Popup} = await import(MAPLIBRE_URL);
+    mapMarkerClass = Marker;
+    mapPopupClass = Popup;
     const map = new LibreMap({
       container: "mapCanvas",
+      transformRequest: (url) => ({url: apiUrl(url)}),
       style: mapStyleDefinition(),
       center: [0, 18],
       zoom: 1.25,
@@ -2467,7 +2580,10 @@ async function ensureMap() {
       map.once("error", (event) => reject(event.error || new Error("Basemap failed to load")));
     });
     addOperationalMapLayers(map);
+    intelPacks.attachMap(map, {Popup});
+    sharedNavigation.attachMap(map, Popup);
     operationalMap = map;
+    commandPointing = new HeadingOverlay(map, pointingTracker, () => localIdentityHash);
     map.on("moveend", updateOfflineMapEstimate);
     installMgrsGrid(map, "verified", "commandGridReference");
     commandMapEditor = createMapEditor(map, {
@@ -2495,6 +2611,8 @@ async function renderMap(events, {preserveView = false} = {}) {
   $("mapBounds").textContent = verifiedCount ? `${verifiedCount} VERIFIED` : "WORLD";
   try {
     const map = await ensureMap();
+    syncWaypointMarkers(map, locations);
+    commandPointing?.setOperators(locations.map(event => ({...event, headingColor: operatorColor(event.color)})));
     const features = locations.map((event) => {
       const marker = tacticalMarker(event.marker_type);
       return {
@@ -2511,7 +2629,8 @@ async function renderMap(events, {preserveView = false} = {}) {
         markerColor: marker?.color || "",
         senderHash: event.network?.sender_hash || "",
         callsign: event.callsign || "",
-        removable: event.type === "marker.created",
+        removable: event.type === "marker.created" && (currentTeamAdmin || event.network?.sender_hash === localIdentityHash),
+        ...reportProperties(event),
         },
       };
     });
@@ -2520,19 +2639,15 @@ async function renderMap(events, {preserveView = false} = {}) {
     map.getSource("verified-contacts").setData(contacts);
     map.getSource("verified-drawings").setData({
       type: "FeatureCollection",
-      features: drawings.map((event) => ({
-        type: "Feature",
-        geometry: drawingGeometry(event),
-        properties: {
+      features: drawings.flatMap((event) => drawingFeatures(event, {
           id: event.id,
           color: operatorColor(event.color),
           kind: "drawing",
           mapKind: "drawing",
           drawingType: event.drawing_type || "trace",
           label: event.drawing_type === "arrow" ? "DIRECTION ARROW" : "FREEHAND TRACE",
-          removable: true,
-        },
-      })),
+          removable: currentTeamAdmin || event.network?.sender_hash === localIdentityHash,
+        }, drawingGeometry(event))),
     });
     const coordinates = [
       ...locations.map((event) => [event.lon, event.lat]),
@@ -2559,10 +2674,11 @@ async function ensureFieldMap() {
   if (fieldMapReady) return fieldMapReady;
   fieldMapReady = (async () => {
     const {Map: LibreMap, Marker, NavigationControl, Popup} = await import(MAPLIBRE_URL);
-    fieldMapMarkerClass = Marker;
-    fieldMapPopupClass = Popup;
+    mapMarkerClass = Marker;
+    mapPopupClass = Popup;
     const createMap = (style) => new LibreMap({
         container: "fieldMapCanvas",
+        transformRequest: (url) => ({url: apiUrl(url)}),
         style,
         center: [4.3, 51.5],
         zoom: 9,
@@ -2594,7 +2710,7 @@ async function ensureFieldMap() {
       await waitForMap(map);
     } catch (error) {
       map.remove();
-      if (mapStyleMode !== "dark") throw error;
+      if (mapStyleMode === "satellite") throw error;
       map = createMap(mapStyleDefinition("satellite"));
       await waitForMap(map);
       mapStyleMode = "satellite";
@@ -2603,7 +2719,10 @@ async function ensureFieldMap() {
     }
     map.addControl(new NavigationControl({showCompass: false}), "top-right");
     addFieldMapLayers(map);
+    intelPacks.attachMap(map, {Popup});
+    sharedNavigation.attachMap(map, Popup);
     fieldMap = map;
+    fieldPointing = new HeadingOverlay(map, pointingTracker, () => localIdentityHash);
     map.on("moveend", updateOfflineMapEstimate);
     map.on("move", scheduleOwnBearingLine);
     map.on("resize", scheduleOwnBearingLine);
@@ -2625,18 +2744,20 @@ async function ensureFieldMap() {
   return fieldMapReady;
 }
 
-function syncFieldWaypointMarkers(map, locations) {
-  if (!fieldMapMarkerClass || !fieldMapPopupClass) return;
+function syncWaypointMarkers(map, locations) {
+  if (!mapMarkerClass || !mapPopupClass) return;
+  if (!waypointMarkersByMap.has(map)) waypointMarkersByMap.set(map, new Map());
+  const markers = waypointMarkersByMap.get(map);
   const waypoints = locations.filter((event) => event.type === "marker.created" && event.marker_type === "waypoint");
   const activeIds = new Set(waypoints.map((event) => event.id));
-  fieldWaypointMarkers.forEach((entry, id) => {
+  markers.forEach((entry, id) => {
     if (activeIds.has(id)) return;
     entry.marker.remove();
-    fieldWaypointMarkers.delete(id);
+    markers.delete(id);
   });
   waypoints.forEach((event) => {
     const label = event.display_label || event.label;
-    let entry = fieldWaypointMarkers.get(event.id);
+    let entry = markers.get(event.id);
     if (!entry) {
       const button = document.createElement("button");
       button.type = "button";
@@ -2646,35 +2767,38 @@ function syncFieldWaypointMarkers(map, locations) {
       button.append(caption);
       button.addEventListener("click", (clickEvent) => {
         clickEvent.stopPropagation();
-        showMapFeaturePopup(map, fieldMapPopupClass, {
+        const current = entry.event;
+        showMapFeaturePopup(map, mapPopupClass, {
           type: "Feature",
-          geometry: {type: "Point", coordinates: [event.lon, event.lat]},
+          geometry: {type: "Point", coordinates: [current.lon, current.lat]},
           properties: {
-            id: event.id,
+            id: current.id,
             kind: "marker",
             mapKind: "marker",
             markerType: "waypoint",
-            label,
-            removable: currentTeamAdmin || event.network?.sender_hash === localIdentityHash,
+            label: current.display_label || current.label,
+            removable: role === "gateway" || currentTeamAdmin || current.network?.sender_hash === localIdentityHash,
           },
-        }, [event.lon, event.lat]);
+        }, [current.lon, current.lat]);
       });
-      entry = {button, caption, marker: new fieldMapMarkerClass({element: button, anchor: "center"}).setLngLat([event.lon, event.lat]).addTo(map)};
-      fieldWaypointMarkers.set(event.id, entry);
+      entry = {button, caption, marker: new mapMarkerClass({element: button, anchor: "center"}).setLngLat([event.lon, event.lat]).addTo(map)};
+      markers.set(event.id, entry);
     }
+    entry.event = event;
     entry.button.setAttribute("aria-label", `Navigate to ${label}`);
     entry.caption.textContent = label;
     entry.marker.setLngLat([event.lon, event.lat]);
   });
 }
 
-async function renderFieldMap(events, {preserveView = false} = {}) {
+async function renderFieldMap(events, {preserveView = localMapPositionHasCentered} = {}) {
   try {
     const map = await ensureFieldMap();
     fieldMapOnline = true;
     $("fieldMapFallback").classList.add("hidden");
     const mapEvents = fieldMapEvents(events);
     const locations = currentLocations(mapEvents);
+    fieldPointing?.setOperators(locations.map(event => ({...event, headingColor: operatorColor(event.color)})));
     const ownLocation = locations.find((event) => (
       event.type === "position.updated"
       && event.network?.sender_hash === localIdentityHash
@@ -2684,9 +2808,9 @@ async function renderFieldMap(events, {preserveView = false} = {}) {
     const drawings = events.filter((event) => event.type === "drawing.created");
     const contacts = contactReportFeatures(events);
     updateFieldCompassMapTargets(fieldBearingOrigin, locations, contacts);
-    syncFieldWaypointMarkers(map, locations);
+    syncWaypointMarkers(map, locations);
     const mapSignature = [
-      ...locations.map((event) => `${event.id}:${event.lat}:${event.lon}:${event.display_label || event.label || event.callsign}`),
+      ...locations.map((event) => `${event.id}:${event.lat}:${event.lon}:${event.display_label || event.label || event.callsign}:${JSON.stringify(reportProperties(event))}`),
       ...drawings.map((event) => `${event.id}:${event.points.length}:${event.points[0]?.join(":")}:${event.points[event.points.length - 1]?.join(":")}`),
       ...contacts.features.map((feature) => `${feature.properties.id}:${feature.properties.kind}:${feature.geometry.coordinates.flat().join(":")}`),
     ].join("|");
@@ -2719,16 +2843,14 @@ async function renderFieldMap(events, {preserveView = false} = {}) {
             callsign: event.callsign || "",
             removable: event.type === "marker.created" && (currentTeamAdmin || event.network?.sender_hash === localIdentityHash),
             queued: event.network?.queued === true,
+            ...reportProperties(event),
             },
           };
         }),
       });
       map.getSource("field-drawings").setData({
         type: "FeatureCollection",
-        features: drawings.map((event) => ({
-          type: "Feature",
-          geometry: drawingGeometry(event),
-          properties: {
+        features: drawings.flatMap((event) => drawingFeatures(event, {
             id: event.id,
             color: operatorColor(event.color),
             kind: "drawing",
@@ -2736,8 +2858,7 @@ async function renderFieldMap(events, {preserveView = false} = {}) {
             drawingType: event.drawing_type || "trace",
             label: event.drawing_type === "arrow" ? "DIRECTION ARROW" : "FREEHAND TRACE",
             removable: currentTeamAdmin || event.network?.sender_hash === localIdentityHash,
-          },
-        })),
+          }, drawingGeometry(event))),
       });
       lastFieldMapSignature = mapSignature;
     }
@@ -2745,6 +2866,10 @@ async function renderFieldMap(events, {preserveView = false} = {}) {
       const latestTarget = latestOperatorMapTarget(locations, waypointNavigation.id);
       if (latestTarget) {
         const targetMoved = distanceMeters(waypointNavigation.target, latestTarget.target) >= 25;
+        if (targetMoved) {
+          waypointNavigation.shareDirty = true;
+          waypointNavigation.shareGeneration = (waypointNavigation.shareGeneration || 0) + 1;
+        }
         waypointNavigation.target = latestTarget.target;
         waypointNavigation.label = latestTarget.label;
         $("waypointNavigationLabel").textContent = latestTarget.label;
@@ -2756,7 +2881,7 @@ async function renderFieldMap(events, {preserveView = false} = {}) {
         }
       }
       renderWaypointNavigationLine();
-    } else if (waypointNavigation && !events.some((event) => event.type === "marker.created" && event.id === waypointNavigation.id)) {
+    } else if (waypointNavigation?.targetKind === "waypoint" && !waypointNavigation.pinnedRoute && !events.some((event) => event.type === "marker.created" && event.id === waypointNavigation.id)) {
       stopWaypointNavigation(false);
       toast("Waypoint was removed · navigation ended", true);
     } else {
@@ -2814,22 +2939,62 @@ function createMapEditor(map, {menuId, contextMenuId, paletteId, controlsId, tex
     longPressPointerId: null,
     activeTouchPointers: new Set(),
     drawMode: false,
+    reviewing: false,
     drawShape: "trace",
     drawing: false,
     points: [],
     lastScreenPoint: null,
     lastPointerType: "mouse",
   };
+  editor.controls.innerHTML = drawingReviewHtml();
+  editor.reportComposer = document.createElement("form");
+  editor.reportComposer.className = "map-report-composer hidden";
+  editor.reportComposer.setAttribute("aria-label", "Report details");
+  editor.reportComposer.innerHTML = reportComposerHtml();
+  editor.palette.after(editor.reportComposer);
+  editor.reportComposer.querySelector("[data-report-cancel]").addEventListener("click", () => closeMapRadial(editor));
+  editor.reportComposer.querySelector("[data-report-back]").addEventListener("click", () => {
+    editor.reportComposer.classList.add("hidden");
+    openMapMarkerPalette(editor);
+  });
+  editor.reportComposer.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (!editor.location) return;
+    const form = editor.reportComposer;
+    let draft;
+    try {
+      draft = reportDraft(editor.reportType, editor.location, form.querySelector("textarea").value,
+        form.querySelector("select").value, form.querySelector("input").checked);
+    } catch (error) { return toast(error.message, true); }
+    const camera = captureMapCamera(editor.map);
+    const result = await send(draft, form.querySelector('[type="submit"]'));
+    if (result) {
+      closeMapRadial(editor);
+      await refreshMapEditor(editor);
+      restoreMapCamera(editor.map, camera);
+    }
+  });
+  editor.controls.querySelectorAll("[data-drawing-color]").forEach(input => { input.name = `${scope}-drawing-color`; });
   editor.sendButton = editor.controls.querySelector("[data-send-map-drawing]");
-  editor.drawLabel = editor.controls.querySelector("span");
+  editor.drawLabel = editor.controls.querySelector("[data-draw-heading]");
+  editor.review = editor.controls.querySelector("[data-drawing-review]");
+  editor.controls.addEventListener("input", () => {
+    const shape = editor.controls.querySelector("[data-drawing-shape]");
+    editor.drawShape = shape.value;
+    const fill = editor.controls.querySelector("[data-drawing-fill]");
+    fill.disabled = editor.drawShape !== "area";
+    if (fill.disabled) fill.value = "none";
+    updateDrawPreview(editor);
+  });
   renderMapMarkerPalette(editor.palette);
   [editor.menu, editor.contextMenu, editor.palette].forEach((menu) => {
     menu.addEventListener("click", (event) => handleMapMenuAction(editor, event));
   });
   editor.contextMenu.addEventListener("keydown", (event) => navigateMapContextMenu(editor, event));
   document.addEventListener("pointerdown", (event) => {
-    if (editor.menu.classList.contains("hidden") && editor.contextMenu.classList.contains("hidden") && editor.palette.classList.contains("hidden") && editor.textComposer.classList.contains("hidden")) return;
-    if (editor.menu.contains(event.target) || editor.contextMenu.contains(event.target) || editor.palette.contains(event.target) || editor.textComposer.contains(event.target)) return;
+    const surfaces = [editor.menu, editor.contextMenu, editor.palette, editor.textComposer, editor.reportComposer];
+    if (surfaces.every(surface => surface.classList.contains("hidden"))) return;
+    if (surfaces.some(surface => surface.contains(event.target))) return;
     closeMapRadial(editor);
   }, true);
   document.addEventListener("keydown", (event) => {
@@ -2837,6 +3002,12 @@ function createMapEditor(map, {menuId, contextMenuId, paletteId, controlsId, tex
   });
   map.on("movestart", () => closeMapRadial(editor));
   editor.controls.querySelector("[data-clear-map-drawing]").addEventListener("click", () => {
+    editor.reviewing = false;
+    editor.review.classList.add("hidden");
+    editor.controls.classList.remove("is-reviewing");
+    editor.map.dragPan.disable();
+    editor.map.getCanvas().classList.add("free-draw-active");
+    editor.drawLabel.textContent = "DRAW ON THE MAP";
     editor.points = [];
     editor.lastScreenPoint = null;
     updateDrawPreview(editor);
@@ -2861,10 +3032,15 @@ function createMapEditor(map, {menuId, contextMenuId, paletteId, controlsId, tex
   editor.sendButton.addEventListener("click", async (event) => {
     const points = sampleDrawing(editor.points);
     if (points.length < 2) return toast("Draw a trace first", true);
-    const result = await send({type: "drawing.created", drawing_type: editor.drawShape, points}, event.currentTarget);
+    const draft = mapDrawingDraft(editor);
+    if (draft.drawing_type === "area" && !validDrawingArea(points)) return toast("Draw an area with at least three corners", true);
+    const camera = captureMapCamera(editor.map);
+    const result = await send({...draft, points}, event.currentTarget);
     if (result) {
-      stopMapDrawing(editor);
+      // Keep drawMode set while refreshing so the first drawing cannot auto-fit.
       await refreshMapEditor(editor);
+      stopMapDrawing(editor);
+      restoreMapCamera(editor.map, camera);
     }
   });
   return editor;
@@ -2896,6 +3072,10 @@ async function handleMapMenuAction(editor, event) {
   if (markerButton && editor.location) {
     const location = editor.location;
     const markerType = markerButton.dataset.quickMarker;
+    if (markerType !== "waypoint") {
+      openMapReportComposer(editor, markerType);
+      return;
+    }
     closeMapRadial(editor, true);
     const labels = {car: "Car", tank: "Tank", helicopter: "Helicopter", airplane: "Airplane"};
     const tactical = tacticalMarker(markerType);
@@ -2957,6 +3137,7 @@ function closeMapRadial(editor, preserveLocation = false) {
   editor.contextMenu.classList.add("hidden");
   editor.palette.classList.add("hidden");
   editor.textComposer.classList.add("hidden");
+  editor.reportComposer?.classList.add("hidden");
   setMapRadialPage(editor, "primary");
   if (!preserveLocation) editor.location = null;
 }
@@ -3019,7 +3200,7 @@ function openMapContextMenu(editor, x, y) {
   closeMapRadial(editor);
   const canvas = editor.map.getCanvas();
   const menuWidth = 204;
-  const menuHeight = 366;
+  const menuHeight = editor.contextMenu.scrollHeight || 410;
   const gutter = 8;
   const safeX = Math.max(gutter, Math.min(canvas.clientWidth - menuWidth - gutter, x));
   const safeY = Math.max(gutter, Math.min(canvas.clientHeight - menuHeight - gutter, y));
@@ -3035,6 +3216,7 @@ function openMapTextComposer(editor) {
   if (!editor.location) return;
   editor.menu.classList.add("hidden");
   editor.contextMenu.classList.add("hidden");
+  editor.palette.classList.add("hidden");
   const canvas = editor.map.getCanvas();
   const point = editor.map.project([editor.location.lon, editor.location.lat]);
   const width = Math.min(320, canvas.clientWidth - 24);
@@ -3047,6 +3229,25 @@ function openMapTextComposer(editor) {
   editor.textComposer.querySelector("input").focus({preventScroll: true});
 }
 
+function openMapReportComposer(editor, type) {
+  if (!editor.location || !tacticalMarker(type)) return;
+  closeMapRadial(editor, true);
+  editor.reportType = type;
+  const form = editor.reportComposer;
+  form.reset();
+  form.querySelector("[data-report-heading]").textContent = tacticalMarker(type).label;
+  const required = ["note", "other"].includes(type);
+  form.querySelector("textarea").required = required;
+  form.querySelector("[data-report-description-hint]").textContent = required ? "required" : "optional";
+  const canvas = editor.map.getCanvas();
+  const point = editor.map.project([editor.location.lon, editor.location.lat]);
+  form.style.left = `${Math.max(12, Math.min(canvas.clientWidth - 348, point.x - 168))}px`;
+  form.style.top = `${Math.max(12, Math.min(canvas.clientHeight - 310, point.y))}px`;
+  form.classList.remove("hidden");
+  // Don't summon the phone keyboard for reports that need no description.
+  form.querySelector(required ? "textarea" : "select").focus({preventScroll: true});
+}
+
 function clearMapLongPress(editor) {
   if (editor.longPressTimer) clearTimeout(editor.longPressTimer);
   editor.longPressTimer = null;
@@ -3054,17 +3255,23 @@ function clearMapLongPress(editor) {
   editor.longPressPointerId = null;
 }
 
+function mapDrawingDraft(editor) {
+  return {type: "drawing.created", drawing_type: editor.drawShape, points: editor.points,
+    label: editor.controls.querySelector("[data-drawing-name]").value.trim(),
+    drawing_color: editor.controls.querySelector("[data-drawing-color]:checked")?.value || "amber",
+    fill_style: editor.drawShape === "area" ? editor.controls.querySelector("[data-drawing-fill]").value : "none"};
+}
+
 function updateDrawPreview(editor) {
   if (!editor?.map.getSource(editor.previewSource)) return;
   editor.map.getSource(editor.previewSource).setData({
     type: "FeatureCollection",
-    features: editor.points.length >= 2 ? [{
-      type: "Feature",
-      geometry: editor.drawShape === "arrow" ? arrowGeometry(editor.points) : {type: "LineString", coordinates: editor.points},
-      properties: {},
-    }] : [],
+    features: editor.points.length >= 2 ? drawingFeatures(mapDrawingDraft(editor), {}, drawingGeometry(mapDrawingDraft(editor))) : [],
   });
-  editor.sendButton.disabled = editor.points.length < 2;
+  const invalidArea = editor.drawShape === "area" && !validDrawingArea(editor.points);
+  editor.sendButton.disabled = !editor.reviewing || editor.points.length < 2 || invalidArea;
+  editor.controls.querySelector("[data-drawing-feedback]").textContent = invalidArea
+    ? "Area needs at least three corners enclosing space" : "Preview only · not shared yet";
 }
 
 function startMapDrawing(editor, shape = "trace") {
@@ -3072,20 +3279,30 @@ function startMapDrawing(editor, shape = "trace") {
   closeMapRadial(editor);
   editor.drawMode = true;
   editor.drawShape = shape;
+  editor.reviewing = false;
+  editor.review.classList.add("hidden");
+  editor.controls.classList.remove("is-reviewing");
+  editor.controls.querySelector("[data-drawing-name]").value = "";
+  editor.controls.querySelector("[data-drawing-shape]").value = shape;
+  editor.controls.querySelector('[data-drawing-color][value="amber"]').checked = true;
+  editor.controls.querySelector("[data-drawing-fill]").value = shape === "area" ? "lines" : "none";
+  editor.controls.querySelector("[data-drawing-fill]").disabled = shape !== "area";
   editor.drawing = false;
   editor.points = [];
   editor.lastScreenPoint = null;
   editor.map.dragPan.disable();
   editor.map.getCanvas().classList.add("free-draw-active");
   editor.controls.classList.remove("hidden");
-  editor.drawLabel.textContent = shape === "arrow" ? "DRAW ARROW" : "DRAW TRACE";
+  editor.drawLabel.textContent = `DRAW ${shape.toUpperCase()}`;
   updateDrawPreview(editor);
-  toast(shape === "arrow" ? "Drag from the arrow start to its point" : "Draw on the map, then send the trace");
+  toast(shape === "arrow" ? "Drag from the arrow start to its point" : "Draw, then lift to name and style it");
 }
 
 function stopMapDrawing(editor) {
   if (!editor) return;
   editor.drawMode = false;
+  editor.reviewing = false;
+  editor.controls.classList.remove("is-reviewing");
   editor.drawShape = "trace";
   editor.drawing = false;
   editor.points = [];
@@ -3101,7 +3318,7 @@ function addMapDrawPoint(editor, canvas, event) {
   const screen = [event.clientX - rect.left, event.clientY - rect.top];
   if (editor.lastScreenPoint && Math.hypot(screen[0] - editor.lastScreenPoint[0], screen[1] - editor.lastScreenPoint[1]) < 5) return;
   const coordinate = editor.map.unproject(screen);
-  const point = [coordinate.lng, coordinate.lat];
+  const point = [((coordinate.lng + 180) % 360 + 360) % 360 - 180, coordinate.lat];
   if (editor.drawShape === "arrow" && editor.points.length) editor.points = [editor.points[0], point];
   else editor.points.push(point);
   editor.lastScreenPoint = screen;
@@ -3112,18 +3329,20 @@ function installMapEditorGestures(editor) {
   const canvas = editor.map.getCanvas();
   canvas.addEventListener("contextmenu", (event) => {
     event.preventDefault();
+    event.stopPropagation();
     if (editor.lastPointerType === "touch") return;
     const rect = canvas.getBoundingClientRect();
     const x = event.clientX ? event.clientX - rect.left : canvas.clientWidth / 2;
     const y = event.clientY ? event.clientY - rect.top : canvas.clientHeight / 2;
     openMapContextMenu(editor, x, y);
-  });
+  }, true);
   canvas.addEventListener("pointerdown", (event) => {
     editor.lastPointerType = event.pointerType;
-    if (editor.drawMode && event.button === 0) {
+    if (editor.drawMode && !editor.reviewing && !editor.drawing && event.button === 0) {
       event.preventDefault();
       event.stopPropagation();
       editor.drawing = true;
+      editor.drawPointerId = event.pointerId;
       editor.points = [];
       editor.lastScreenPoint = null;
       canvas.setPointerCapture(event.pointerId);
@@ -3149,7 +3368,7 @@ function installMapEditorGestures(editor) {
     }, 550);
   }, true);
   canvas.addEventListener("pointermove", (event) => {
-    if (editor.drawMode && editor.drawing) {
+    if (editor.drawMode && editor.drawing && event.pointerId === editor.drawPointerId) {
       event.preventDefault();
       event.stopPropagation();
       addMapDrawPoint(editor, canvas, event);
@@ -3160,12 +3379,21 @@ function installMapEditorGestures(editor) {
         && Math.hypot(event.clientX - editor.longPressStart.x, event.clientY - editor.longPressStart.y) > 10) clearMapLongPress(editor);
   }, true);
   const endPointer = (event) => {
-    if (editor.drawMode && editor.drawing) {
+    if (editor.drawMode && editor.drawing && event.pointerId === editor.drawPointerId) {
       event.preventDefault();
       event.stopPropagation();
-      addMapDrawPoint(editor, canvas, event);
+      if (event.type !== "pointercancel") addMapDrawPoint(editor, canvas, event);
       editor.drawing = false;
+      if (event.type === "pointercancel") editor.points = [];
       editor.points = sampleDrawing(editor.points);
+      if (editor.points.length >= 2) {
+        editor.reviewing = true;
+        editor.review.classList.remove("hidden");
+        editor.controls.classList.add("is-reviewing");
+        editor.drawLabel.textContent = "REVIEW DRAWING";
+        editor.map.dragPan.enable();
+        editor.map.getCanvas().classList.remove("free-draw-active");
+      }
       updateDrawPreview(editor);
     }
     if (event.pointerType === "touch") editor.activeTouchPointers.delete(event.pointerId);
@@ -3198,7 +3426,7 @@ async function deleteMapItem(kind, eventId, button, popup) {
     if (!response.ok) throw new Error(data.detail || "Map item removal failed");
     showDelivery(data.delivery);
     popup.remove();
-    toast(`${kind === "drawing" ? "Drawing" : "Marker"} removed · signed over Reticulum`);
+    toast(`${kind === "drawing" ? "Drawing" : "Marker"} removed${kind === "automatic-report" ? " · original message kept" : " · signed over Reticulum"}`);
     if (role === "gateway") await refresh();
     else await refreshFeed();
   } catch (error) {
@@ -3213,7 +3441,7 @@ function renderWaypointNavigationLine() {
   const calculated = waypointNavigation?.mode === "route"
     && Array.isArray(waypointNavigation.routeCoordinates)
     && waypointNavigation.routeCoordinates.length >= 2;
-  const points = calculated
+  const points = calculated || waypointNavigation?.pinnedRoute
     ? waypointNavigation.routeCoordinates
     : waypointNavigation?.currentPoint
       ? [waypointNavigation.currentPoint, waypointNavigation.target]
@@ -3239,10 +3467,15 @@ function fitCalculatedRoute(coordinates) {
   waypointNavigation.centered = true;
 }
 
-function stopWaypointNavigation(announce = true) {
+function stopWaypointNavigation(announce = true, {unshare = true} = {}) {
   if (waypointNavigationWatchId !== null) navigator.geolocation?.clearWatch(waypointNavigationWatchId);
   const wasActive = Boolean(waypointNavigation);
   const mode = waypointNavigation?.mode;
+  if (unshare && (waypointNavigation?.sharing || waypointNavigation?.sharePending)) {
+    void sharedNavigation.write("DELETE").then(() => renderNavigationSharing()).catch(error => {
+      toast(`Navigation ended locally; sharing could not be stopped: ${error.message}. Retry in Ops → Shared routes.`, true);
+    });
+  }
   waypointNavigation?.routeAbortController?.abort();
   waypointNavigationWatchId = null;
   waypointNavigation = null;
@@ -3250,6 +3483,7 @@ function stopWaypointNavigation(announce = true) {
   $("waypointNavigation").classList.add("hidden");
   $("waypointNavigation").classList.remove("arrived", "calculated");
   renderWaypointNavigationLine();
+  renderNavigationSharing();
   if (wasActive && announce) toast(mode === "route" ? "Road navigation ended" : "Direct navigation ended");
 }
 
@@ -3280,10 +3514,11 @@ async function reportWaypointArrival(position) {
   }
 }
 
+let lastPublicRouteRequest = 0;
 async function requestCalculatedRoute(currentPoint) {
   const navigation = waypointNavigation;
-  if (!navigation || navigation.mode !== "route" || navigation.routeLoading) return;
-  const url = calculatedRouteUrl(currentPoint, navigation.target);
+  if (!navigation || navigation.pinnedRoute || navigation.mode !== "route" || navigation.routeLoading) return;
+  const url = calculatedRouteUrl(currentPoint, navigation.target, undefined, navigation.routeProfile || "driving");
   if (!url) {
     navigation.routeError = "Invalid route coordinates";
     return;
@@ -3295,18 +3530,29 @@ async function requestCalculatedRoute(currentPoint) {
   navigation.routeLoading = true;
   navigation.routeError = "";
   navigation.lastRouteAttempt = Date.now();
-  $("waypointNavigationState").textContent = "CALCULATING ROAD ROUTE";
+  $("waypointNavigationState").textContent = "CALCULATING ROUTE";
   try {
-    const response = await fetch(url, {cache: "no-store", signal: controller.signal, headers: {accept: "application/json"}});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload?.message || "Route service unavailable");
+    // The public walking service permits at most one request/second. Reserve
+    // slots across cancelled/replaced navigations as well as automatic reroutes.
+    const payload = await calculateDeviceRoute(currentPoint, navigation.target, navigation.routeProfile || "driving", {
+      signal: controller.signal,
+      offlineOnly: localStorage.getItem(ROUTING_MODE_KEY) === "offline",
+      beforeOnline: async () => {
+        const requestAt = Math.max(Date.now(), lastPublicRouteRequest + 1100);
+        lastPublicRouteRequest = requestAt;
+        await new Promise(resolve => setTimeout(resolve, Math.max(0, requestAt - Date.now())));
+      },
+    });
     const route = parseCalculatedRoute(payload);
     if (waypointNavigation !== navigation) return;
     navigation.routeCoordinates = route.coordinates;
     navigation.routeDistance = route.distance;
     navigation.routeDuration = route.duration;
     navigation.routeSteps = route.steps;
+    navigation.routeSource = payload.source;
     navigation.routeOrigin = [...currentPoint];
+    navigation.shareDirty = true;
+    navigation.shareGeneration = (navigation.shareGeneration || 0) + 1;
     renderWaypointNavigationLine();
     fitCalculatedRoute(route.coordinates);
   } catch (error) {
@@ -3336,32 +3582,35 @@ function updateWaypointNavigation(position) {
   const accurate = Number.isFinite(accuracy) && accuracy > 0 && accuracy <= WAYPOINT_MAX_ARRIVAL_ACCURACY_METERS;
   const arrived = accurate && directDistance <= Math.max(WAYPOINT_ARRIVAL_RADIUS_METERS, accuracy);
   const calculated = waypointNavigation.mode === "route" && waypointNavigation.routeCoordinates?.length >= 2;
-  $("waypointNavigationMode").textContent = waypointNavigation.mode === "route" ? "ROAD ROUTE" : "STRAIGHT LINE";
+  const routeLabel = waypointNavigation.pinnedRoute ? "SHARED ROUTE" : `${waypointNavigation.routeSource === "offline" ? "OFFLINE · " : ""}${waypointNavigation.routeProfile === "walking" ? "WALKING ROUTE" : "ROAD ROUTE"}`;
+  $("waypointNavigationMode").textContent = waypointNavigation.mode === "route" ? routeLabel : "STRAIGHT LINE";
   $("waypointNavigationDistance").textContent = formatNavigationDistance(calculated ? waypointNavigation.routeDistance : directDistance);
   $("waypointNavigationBearing").textContent = calculated
-    ? `${formatRouteDuration(waypointNavigation.routeDuration)} · ROAD`
+    ? `${formatRouteDuration(waypointNavigation.routeDuration)} · ${waypointNavigation.pinnedRoute ? "PLAN" : waypointNavigation.routeProfile === "walking" ? "WALK" : "ROAD"}`
     : `${Math.round(bearing).toString().padStart(3, "0")}° ${cardinalBearing(bearing)}`;
   $("waypointNavigation").classList.toggle("arrived", arrived);
   if (!arrived) {
     if (waypointNavigation.mode === "route" && waypointNavigation.routeLoading) {
-      $("waypointNavigationState").textContent = "CALCULATING ROAD ROUTE";
+      $("waypointNavigationState").textContent = "CALCULATING ROUTE";
     } else if (waypointNavigation.mode === "route" && waypointNavigation.routeError) {
       $("waypointNavigationState").textContent = `${waypointNavigation.routeError.toUpperCase()} · DIRECT LINE SHOWN`;
     } else if (calculated) {
       const fix = accurate ? ` · ±${Math.round(accuracy)} M` : "";
-      $("waypointNavigationState").textContent = `${routeInstruction(waypointNavigation.routeSteps)}${fix}`;
+      $("waypointNavigationState").textContent = waypointNavigation.pinnedRoute
+        ? `FOLLOW SHARED PATH · ${formatNavigationDistance(directDistance)} TO DESTINATION${fix}`
+        : `${routeInstruction(waypointNavigation.routeSteps)}${fix}`;
     } else {
       $("waypointNavigationState").textContent = accurate ? `LIVE POSITION · ±${Math.round(accuracy)} M` : "WAITING FOR ACCURATE FIX";
     }
   } else if (!waypointNavigation.reportArrival) {
-    $("waypointNavigationState").textContent = "AT LAST VERIFIED POSITION";
+    $("waypointNavigationState").textContent = waypointNavigation.pinnedRoute ? "AT SHARED DESTINATION" : "AT LAST VERIFIED POSITION";
   } else if (waypointNavigation.reported) {
     $("waypointNavigationState").textContent = "ON WAYPOINT · TEAM NOTIFIED";
   } else {
     void reportWaypointArrival(position);
   }
   renderWaypointNavigationLine();
-  if (waypointNavigation.mode === "route" && !arrived && !waypointNavigation.routeLoading
+  if (!waypointNavigation.pinnedRoute && waypointNavigation.mode === "route" && !arrived && !waypointNavigation.routeLoading
       && routeNeedsRefresh(
         waypointNavigation.routeOrigin,
         currentPoint,
@@ -3379,9 +3628,16 @@ function updateWaypointNavigation(position) {
     });
     waypointNavigation.centered = true;
   }
+  renderNavigationSharing();
+  if (waypointNavigation.sharing && !waypointNavigation.sharePending && !waypointNavigation.routeLoading
+      && Date.now() - (waypointNavigation.lastSharedAt || 0) >= 20000
+      && (waypointNavigation.shareDirty || (waypointNavigation.mode === "direct" && !waypointNavigation.pinnedRoute
+        && distanceMeters(waypointNavigation.lastSharedOrigin || currentPoint, currentPoint) >= 25))) {
+    void publishNavigation(waypointNavigation);
+  }
 }
 
-function startNavigation(properties, target, popup, targetKind, mode) {
+function startNavigation(properties, target, popup, targetKind, mode, sharedPlan = null, routeProfile = "driving") {
   if (!navigator.geolocation) return toast("Geolocation unavailable", true);
   stopWaypointNavigation(false);
   waypointNavigation = {
@@ -3392,6 +3648,7 @@ function startNavigation(properties, target, popup, targetKind, mode) {
     targetKind,
     reportArrival: targetKind === "waypoint",
     mode,
+    routeProfile,
     target: target.map(Number),
     currentPoint: null,
     currentAccuracy: null,
@@ -3408,24 +3665,51 @@ function startNavigation(properties, target, popup, targetKind, mode) {
     routeLoading: false,
     routeError: "",
     routeAbortController: null,
+    sharing: false,
+    sharePending: false,
+    shareDirty: false,
+    pinnedRoute: Boolean(sharedPlan),
+    ...(sharedPlan ? {
+      routeOrigin: sharedPlan.origin,
+      routeCoordinates: sharedPlan.coordinates,
+      routeDistance: sharedPlan.distance_m,
+      routeDuration: sharedPlan.duration_s,
+      sharedDirections: sharedPlan.directions || [],
+      following: sharedPlan.sender_hash === localIdentityHash ? sharedPlan.following : {
+        sender_hash: sharedPlan.sender_hash, route_id: sharedPlan.route_id,
+      },
+      sourceRevision: sharedPlan.sender_hash === localIdentityHash && sharedPlan.following ? 0 : sharedPlan.revision,
+    } : {}),
   };
-  $("waypointNavigationMode").textContent = mode === "route" ? "ROAD ROUTE" : "STRAIGHT LINE";
+  $("waypointNavigationMode").textContent = mode === "route" ? routeProfile === "walking" ? "WALKING ROUTE" : "ROAD ROUTE" : "STRAIGHT LINE";
   $("waypointNavigation").classList.toggle("calculated", mode === "route");
   $("waypointNavigationLabel").textContent = waypointNavigation.label;
   $("waypointNavigationDistance").textContent = "—";
   $("waypointNavigationBearing").textContent = "—";
   $("waypointNavigationState").textContent = "ACQUIRING POSITION";
   $("waypointNavigation").classList.remove("hidden", "arrived");
-  popup.remove();
+  popup?.remove();
+  renderNavigationSharing();
+  if (sharedPlan) {
+    $("waypointNavigationMode").textContent = `TEAM · ${mode === "route" ? "SHARED ROUTE" : "STRAIGHT LINE"}`;
+    $("waypointNavigationDistance").textContent = formatNavigationDistance(sharedPlan.distance_m);
+    $("waypointNavigationBearing").textContent = mode === "route" ? `${formatRouteDuration(sharedPlan.duration_s)} · PLAN` : "SHARED PATH";
+    $("waypointNavigationState").textContent = "SHARED PATH · ACQUIRING POSITION";
+    renderWaypointNavigationLine();
+    fitCalculatedRoute(sharedPlan.coordinates);
+    void publishNavigation(waypointNavigation);
+  }
+  const currentNavigation = waypointNavigation;
   waypointNavigationWatchId = navigator.geolocation.watchPosition(
-    updateWaypointNavigation,
+    position => { if (waypointNavigation === currentNavigation) updateWaypointNavigation(position); },
     (error) => {
+      if (waypointNavigation !== currentNavigation) return;
       $("waypointNavigationState").textContent = "POSITION UNAVAILABLE";
       toast(error.message, true);
     },
     {enableHighAccuracy: true, maximumAge: 3000, timeout: 20000},
   );
-  toast(`${mode === "route" ? "In-app road route" : "Straight-line navigation"} · ${waypointNavigation.label}`);
+  toast(`${mode === "route" ? routeProfile === "walking" ? "In-app walking route" : "In-app road route" : "Straight-line navigation"} · ${waypointNavigation.label}`);
 }
 
 function startDirectNavigation(properties, target, popup, targetKind) {
@@ -3436,8 +3720,110 @@ function startCalculatedNavigation(properties, target, popup, targetKind) {
   startNavigation(properties, target, popup, targetKind, "route");
 }
 
+function renderNavigationSharing() {
+  const button = $("shareWaypointNavigation");
+  const navigation = waypointNavigation;
+  button.disabled = !navigation || navigation.sharePending || (!navigation.sharing
+    && (navigation.routeLoading || navigation.routeError || (!navigation.pinnedRoute
+      && (navigation.mode === "route" ? !navigation.routeCoordinates?.length : !navigation.currentPoint))));
+  button.textContent = navigation?.sharePending ? "SHARING…" : navigation?.sharing ? "SHARED" : "SHARE";
+  button.setAttribute("aria-pressed", String(Boolean(navigation?.sharing)));
+  button.setAttribute("aria-label", navigation?.sharing ? "Stop sharing route with team" : "Share route with team");
+  const own = sharedNavigation.own();
+  $("navigationShareState").textContent = navigation?.sharing
+    ? (own?.network?.queued ? "QUEUED · WAITING FOR TEAM" : "SHARED · VISIBLE TO TEAM")
+    : "PRIVATE NAVIGATION";
+}
+
+async function stopNavigationSharing() {
+  const navigation = waypointNavigation;
+  const wasSharing = navigation?.sharing;
+  if (navigation) {
+    navigation.shareEpoch = (navigation.shareEpoch || 0) + 1;
+    navigation.sharing = false;
+    navigation.sharePending = true;
+  }
+  renderNavigationSharing();
+  try {
+    await sharedNavigation.write("DELETE");
+    toast("Sharing stopped · navigation stays private");
+  } catch (error) {
+    if (navigation === waypointNavigation && navigation) navigation.sharing = wasSharing;
+    throw error;
+  } finally {
+    if (navigation) navigation.sharePending = false;
+    renderNavigationSharing();
+  }
+}
+
+async function publishNavigation(navigation) {
+  if (navigation !== waypointNavigation || navigation.sharePending) return;
+  const generation = navigation.shareGeneration || 0;
+  const epoch = navigation.shareEpoch || 0;
+  let succeeded = false;
+  try {
+    const payload = navigationSharePayload(navigation, distanceMeters);
+    navigation.sharePending = true;
+    renderNavigationSharing();
+    await sharedNavigation.write("PUT", payload);
+    if (navigation !== waypointNavigation || epoch !== (navigation.shareEpoch || 0)) return;
+    navigation.sharing = true;
+    navigation.shareDirty = (navigation.shareGeneration || 0) !== generation;
+    navigation.lastSharedAt = Date.now();
+    navigation.lastSharedOrigin = payload.origin;
+    succeeded = true;
+  } catch (error) {
+    if (navigation === waypointNavigation && epoch === (navigation.shareEpoch || 0)) {
+      navigation.lastSharedAt = Date.now();
+      toast(`Route not shared: ${error.message}`, true);
+    }
+  } finally {
+    if (epoch === (navigation.shareEpoch || 0)) navigation.sharePending = false;
+    renderNavigationSharing();
+    if (succeeded && navigation === waypointNavigation && navigation.sharing && navigation.shareDirty) void publishNavigation(navigation);
+  }
+}
+
+function followSharedNavigation(plan) {
+  setFieldPage("map");
+  startNavigation({id: plan.target_id || plan.route_id, label: plan.label}, plan.target, null, "shared", plan.mode, plan);
+}
+
+function synchronizeSharedNavigation(plans) {
+  renderNavigationSharing();
+  const navigation = waypointNavigation;
+  if (!navigation?.following) return;
+  const source = plans.find(plan => plan.sender_hash === navigation.following.sender_hash);
+  if (!source) return; // A missing snapshot is not evidence of a stopped route.
+  if (!source.active || source.route_id !== navigation.following.route_id) {
+    stopWaypointNavigation(false);
+    toast("The shared route ended or was replaced. Choose a current route in Ops.");
+    return;
+  }
+  if (source.revision <= navigation.sourceRevision) return;
+  navigation.sourceRevision = source.revision;
+  navigation.target = source.target;
+  navigation.label = source.label;
+  navigation.mode = source.mode;
+  navigation.routeOrigin = source.origin;
+  navigation.routeCoordinates = source.coordinates;
+  navigation.routeDistance = source.distance_m;
+  navigation.routeDuration = source.duration_s;
+  navigation.sharedDirections = source.directions || [];
+  navigation.shareDirty = true;
+  navigation.shareGeneration = (navigation.shareGeneration || 0) + 1;
+  $("waypointNavigationLabel").textContent = source.label;
+  renderWaypointNavigationLine();
+  if (navigation.lastPosition) updateWaypointNavigation(navigation.lastPosition);
+  if (navigation.sharing) void publishNavigation(navigation);
+}
+
 function showMapFeaturePopup(map, Popup, feature, lngLat) {
   const properties = feature.properties || {};
+  if (String(properties.kind).startsWith("shared-navigation-")) {
+    sharedNavigation.showFeature(map, Popup, feature, lngLat);
+    return;
+  }
   const content = document.createElement("div");
   content.className = "map-popup";
   const title = document.createElement("strong");
@@ -3448,8 +3834,19 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
     ? `${String(properties.markerType || kind).toUpperCase()} · AUTO · SIGNED SOURCE`
     : propertyFlag(properties.queued)
       ? `${String(properties.markerType || kind).toUpperCase()} · LOCAL · QUEUED`
-    : `${String(properties.markerType || kind).toUpperCase()} · VERIFIED`;
+    : `${String(properties.markerType || kind).toUpperCase()} · SIGNED SOURCE`;
   content.append(title, meta);
+  if (properties.reportStatus) {
+    const detail = document.createElement("p");
+    detail.textContent = properties.reportDescription || "";
+    const attribution = document.createElement("small");
+    attribution.textContent = `${properties.callsign || "Reporter"} · ${new Date(Number(properties.reportedAt) * 1000).toLocaleString()}`;
+    const status = document.createElement("small");
+    status.className = "map-report-state";
+    status.textContent = `${propertyFlag(properties.reportUrgent) ? "URGENT · " : ""}${REPORT_STATUS_LABELS[properties.reportStatus] || "Unconfirmed"}${propertyFlag(properties.reportUpdateQueued) ? " · update queued" : ""}`;
+    if (properties.reportUpdatedBy) status.title = `Updated by ${properties.reportUpdatedBy} · ${new Date(Number(properties.reportUpdatedAt) * 1000).toLocaleString()}`;
+    content.append(status, detail, attribution);
+  }
   if (properties.reportMessage) {
     const report = document.createElement("p");
     const projection = properties.approximate
@@ -3458,7 +3855,7 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
     report.textContent = `Reported by ${properties.callsign}: “${properties.reportMessage}” · ${projection}`;
     content.append(report);
   }
-  if (properties.state || properties.landmark || properties.reportedAt) {
+  if (!properties.reportStatus && (properties.state || properties.landmark || properties.reportedAt)) {
     const detail = document.createElement("small");
     const parts = [];
     if (properties.state) parts.push(properties.state);
@@ -3470,7 +3867,43 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
     detail.textContent = parts.join(" · ");
     content.append(detail);
   }
-  const popup = new Popup({closeButton: true, offset: 12}).setLngLat(lngLat).setDOMContent(content).addTo(map);
+  const pixel = map.project(lngLat);
+  const below = pixel.y < map.getCanvas().clientHeight / 2;
+  if (properties.reportStatus) {
+    content.style.maxHeight = `${Math.max(120, (below ? map.getCanvas().clientHeight - pixel.y : pixel.y) - 48)}px`;
+    content.style.overflowY = "auto";
+  }
+  const popup = new Popup({closeButton: true, offset: 12, ...(properties.reportStatus ? {anchor: below ? "top" : "bottom"} : {})}).setLngLat(lngLat).setDOMContent(content).addTo(map);
+  const sharedPlan = kind === "operator" ? sharedNavigation.planFor(properties.senderHash) : null;
+  if (sharedPlan) {
+    const viewRoute = document.createElement("button");
+    viewRoute.type = "button";
+    viewRoute.className = "secondary map-navigation-choice";
+    viewRoute.textContent = `ROUTE → ${sharedPlan.label}`;
+    viewRoute.addEventListener("click", () => { popup.remove(); sharedNavigation.focus(sharedPlan); });
+    content.append(viewRoute);
+  }
+  if (properties.reportStatus && propertyFlag(properties.removable)) {
+    const label = document.createElement("label");
+    label.className = "map-report-status-edit";
+    label.textContent = "REPORT STATUS";
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", "Report status");
+    for (const [value, text] of Object.entries(REPORT_STATUS_LABELS)) select.add(new Option(text, value));
+    select.value = properties.reportStatus;
+    select.addEventListener("change", async () => {
+      select.disabled = true;
+      const result = await send({type: "marker.status", marker_id: properties.id, report_status: select.value,
+        report_revision: Number(properties.reportRevision || 0) + 1}, select);
+      if (result) {
+        popup.remove();
+        if (role === "gateway") await refresh(); else await refreshFeed();
+      } else select.value = properties.reportStatus;
+      select.disabled = false;
+    });
+    label.append(select);
+    content.append(label);
+  }
   const capabilities = mapTargetCapabilities({
     role,
     kind,
@@ -3491,9 +3924,14 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
     const calculated = document.createElement("button");
     calculated.type = "button";
     calculated.className = "map-navigation-choice secondary";
-    calculated.innerHTML = '<b aria-hidden="true">⌁</b><span>CALCULATED ROUTE<small>Road route inside Reticom</small></span>';
+    calculated.innerHTML = '<b aria-hidden="true">⌁</b><span>DRIVING ROUTE<small>Road route inside Reticom</small></span>';
     calculated.addEventListener("click", () => startCalculatedNavigation(properties, feature.geometry.coordinates, popup, capabilities.targetKind));
-    actions.append(prompt, straight, calculated);
+    const walking = document.createElement("button");
+    walking.type = "button";
+    walking.className = "map-navigation-choice secondary";
+    walking.innerHTML = '<b aria-hidden="true">↟</b><span>WALKING ROUTE<small>Footpaths + walkable roads in Reticom</small></span>';
+    walking.addEventListener("click", () => startNavigation(properties, feature.geometry.coordinates, popup, capabilities.targetKind, "route", null, "walking"));
+    actions.append(prompt, straight, walking, calculated);
     if (capabilities.privateChat) {
       const chat = document.createElement("button");
       chat.type = "button";
@@ -3506,12 +3944,6 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
       });
       actions.append(chat);
     }
-    const note = document.createElement("small");
-    note.className = "map-navigation-note";
-    note.textContent = kind === "operator"
-      ? "Direct line follows this operator's latest verified position. Calculated route uses the current fix."
-      : "Reaching a waypoint with an accurate fix is announced to the team.";
-    actions.append(note);
     content.append(actions);
   }
   if (kind !== "operator" && propertyFlag(properties.removable)) {
@@ -3525,8 +3957,9 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
 }
 
 function installMapFeatureInteractions(map, Popup, pointLayers, drawingLayer) {
-  const interactiveLayers = [...pointLayers, drawingLayer];
+  const interactiveLayers = [...pointLayers, drawingLayer, `${drawingLayer}-names`, `${drawingLayer}-pattern`, `${drawingLayer}-fill`, "shared-navigation-targets", "shared-navigation-lines"];
   map.on("click", (event) => {
+    if ((map === operationalMap && commandMapEditor?.drawMode) || (map === fieldMap && fieldMapEditor?.drawMode)) return;
     const radius = matchMedia("(pointer: coarse)").matches ? 18 : 10;
     const feature = map.queryRenderedFeatures(
       [[event.point.x - radius, event.point.y - radius], [event.point.x + radius, event.point.y + radius]],
@@ -3577,6 +4010,23 @@ function renderUser(user) {
   });
 }
 
+function renderJoinedCommand(events) {
+  commandEvents = events;
+  const operators = new Map();
+  for (const event of [...events].reverse()) {
+    const sender = event.network?.sender_hash;
+    if (!sender || event.network?.verified === false || event.type.startsWith("private.")) continue;
+    const previous = operators.get(sender);
+    operators.set(sender, {sender_hash: sender, callsign: event.callsign, icon: event.icon, color: event.color, last_seen: event.network.received_at, event_count: (previous?.event_count || 0) + 1});
+  }
+  primeRecentVoiceTranscripts(events);
+  renderTimeline(events);
+  renderOperators([...operators.values()], events);
+  renderMapMessages(events, "commandLatestMessages");
+  queueIncomingAlerts(events);
+  if (teamOperational) void renderMap(events);
+}
+
 function renderCommandUser(user) {
   if (!user) return;
   currentUser = user;
@@ -3585,6 +4035,7 @@ function renderCommandUser(user) {
 }
 
 function renderTeam(team) {
+  membershipSettings.update(team, localIdentityHash);
   currentTeamModules = Array.isArray(team.modules) ? team.modules : [];
   const previousEveryoneAdmin = currentEveryoneAdmin;
   currentEveryoneAdmin = team.everyone_admin === true;
@@ -3594,19 +4045,51 @@ function renderTeam(team) {
   if (previousEveryoneAdmin !== currentEveryoneAdmin) lastFieldMapSignature = "";
   const tasksEnabled = currentTeamModules.includes("tasks");
   teamOperational = role === "gateway" ? Boolean(team.created) : Boolean(team.joined);
-  if (teamOperational) connectLiveVoice();
+  if (teamOperational && (role === "gateway" || team.membership_status === "approved")) connectLiveVoice();
   else if (liveVoiceSocket) liveVoiceSocket.close(1000, "No active team");
-  if (role === "gateway") {
-    $("commandSetup").classList.toggle("hidden", team.created);
-    $("commandView").classList.toggle("hidden", !team.created);
-    if (team.created) {
-      $("commandTeamName").textContent = team.name;
+  const activeTeam = commandDisplay() ? Boolean(team.created || team.joined) : Boolean(team.joined);
+  const canManageTeam = activeTeam && currentTeamAdmin;
+  $("adminSettingsToggle").classList.toggle("hidden", !canManageTeam);
+  document.querySelectorAll("[data-open-admin-settings]").forEach(button => {
+    button.classList.toggle("hidden", !canManageTeam);
+  });
+  if (!canManageTeam) {
+    $("adminSettingsPanel").classList.add("hidden");
+    $("adminSettingsToggle").setAttribute("aria-expanded", "false");
+  } else {
+    $("adminTeamName").textContent = team.name || "Joined team";
+    $("adminJoinCode").textContent = currentTeamJoinCode || "Unavailable";
+    $("adminHostState").textContent = currentTeamHosted || role === "gateway"
+      ? "This device controls the hosted team directly."
+      : "Admin changes use an identified Reticulum Link to the team host.";
+    $("fieldToggleTasksModule").textContent = tasksEnabled ? "ON" : "OFF";
+    $("fieldToggleTasksModule").setAttribute("aria-pressed", String(tasksEnabled));
+    $("fieldToggleEveryoneAdmin").textContent = currentEveryoneAdmin ? "ON" : "OFF";
+    $("fieldToggleEveryoneAdmin").setAttribute("aria-pressed", String(currentEveryoneAdmin));
+  }
+  if (commandDisplay()) {
+    const active = activeTeam;
+    $("commandSetup").classList.toggle("hidden", active);
+    $("commandView").classList.toggle("hidden", !active);
+    $("fieldSetup").classList.add("hidden");
+    $("fieldView").classList.add("hidden");
+    $("fieldBottomNav").classList.add("hidden");
+    commandCanvas ||= createCommandWorkspace({
+      resizeMap: () => operationalMap?.resize(),
+      openDraw: () => {
+        if (commandMapEditor) openMapContextMenu(commandMapEditor, 60, 60);
+        else toast("Map is still loading", true);
+      },
+      openMembers: () => document.querySelector("[data-open-membership]")?.click(),
+    });
+    commandCanvas.update({active, name: team.name, tasks: tasksEnabled, admin: currentTeamAdmin});
+    if (active) {
+      $("commandTeamName").textContent = team.name || "Joined team · awaiting sync";
       $("commandJoinCode").textContent = team.join_code;
-      $("teamQr").src = `/api/team/qr?v=${team.created_at}`;
-      $("toggleTasksModule").textContent = tasksEnabled ? "DISABLE" : "ENABLE";
-      $("toggleEveryoneAdmin").textContent = currentEveryoneAdmin ? "ON" : "OFF";
-      $("toggleEveryoneAdmin").setAttribute("aria-pressed", String(currentEveryoneAdmin));
+      $("teamQr").src = apiUrl(`/api/team/qr?v=${team.created_at}`);
       $("commandTasksModule").classList.toggle("hidden", !tasksEnabled);
+      $("clearMessageHistory").classList.toggle("hidden", !currentTeamAdmin);
+      $("commandTasksModule").querySelector(".task-create").classList.toggle("hidden", !currentTeamAdmin);
     }
     return;
   }
@@ -3614,26 +4097,12 @@ function renderTeam(team) {
   $("fieldView").classList.toggle("hidden", !team.joined);
   $("fieldBottomNav").classList.toggle("hidden", !team.joined);
   $("teamSessionSettings").classList.toggle("hidden", !team.joined);
-  $("adminSettingsToggle").classList.toggle("hidden", !team.joined || !currentTeamAdmin);
-  if (!team.joined || !currentTeamAdmin) {
-    $("adminSettingsPanel").classList.add("hidden");
-    $("adminSettingsToggle").setAttribute("aria-expanded", "false");
-  }
   if (team.joined) {
     $("fieldTeamName").textContent = team.name || "Joined team";
     $("fieldTeamDestination").textContent = shortHash(team.destination, 12);
     $("settingsTeamName").textContent = team.name || "Joined team";
     $("fieldAdminMode").classList.toggle("hidden", !currentTeamAdmin);
     $("fieldTasksModule").classList.toggle("hidden", !tasksEnabled);
-    $("adminTeamName").textContent = team.name || "Joined team";
-    $("adminJoinCode").textContent = currentTeamJoinCode || "Unavailable";
-    $("adminHostState").textContent = currentTeamHosted
-      ? "HOSTED ON THIS DEVICE · Reticom must keep running for the team destination."
-      : "REMOTE TEAM HOST · Admin changes use an identified Reticulum Link.";
-    $("fieldToggleTasksModule").textContent = tasksEnabled ? "ON" : "OFF";
-    $("fieldToggleTasksModule").setAttribute("aria-pressed", String(tasksEnabled));
-    $("fieldToggleEveryoneAdmin").textContent = currentEveryoneAdmin ? "ON" : "OFF";
-    $("fieldToggleEveryoneAdmin").setAttribute("aria-pressed", String(currentEveryoneAdmin));
   }
 }
 
@@ -3654,7 +4123,7 @@ function renderTasks(tasks, targetId, field = false) {
       <div><strong>${escapeHtml(task.title)}</strong><span>${task.assignee ? `FOR ${escapeHtml(task.assignee)}` : "OPEN TO TEAM"}${task.completed_at ? ` · DONE BY ${escapeHtml(task.completed_by || "FIELD")}` : ""}</span></div>
       ${field && !task.completed_at
         ? `<button class="secondary compact task-complete" data-task-id="${escapeHtml(task.id)}">COMPLETE</button>`
-        : !field
+        : !field && currentTeamAdmin
           ? `<div class="task-actions"><span class="task-status">${task.completed_at ? "✓ DONE" : "OPEN"}</span><button class="text-button task-delete" data-task-id="${escapeHtml(task.id)}" data-confirm="false" aria-label="Delete ${task.completed_at ? "completed" : "open"} task ${escapeHtml(task.title)}">DELETE</button></div>`
           : `<span class="task-status">${task.completed_at ? "✓ DONE" : "OPEN"}</span>`}
     </article>`).join("");
@@ -3667,7 +4136,7 @@ async function refreshTasks() {
     const response = await fetch("/api/tasks", {cache: "no-store"});
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Task sync failed");
-    renderTasks(data.tasks || [], role === "gateway" ? "commandTaskList" : "fieldTaskList", role === "field");
+    renderTasks(data.tasks || [], commandDisplay() ? "commandTaskList" : "fieldTaskList", !commandDisplay());
     if (role === "field") {
       $("taskSyncState").textContent = `RNS · ${Math.round(data.network?.response_ms || 0)} MS`;
       $("taskSyncState").classList.add("synced");
@@ -3689,7 +4158,7 @@ function renderMapMessages(events, containerId) {
   const isFieldOverlay = containerId === "latestMessages";
   const latest = mapOverlayMessages(events, {
     localIdentityHash,
-    readIds: isFieldOverlay ? readMapMessageIds : null,
+    readIds: readMapMessageIds,
   });
   if (!latest.length) {
     container.replaceChildren();
@@ -3702,8 +4171,8 @@ function renderMapMessages(events, containerId) {
     const contact = automaticReport?.type === "contact";
     const typeLabel = event.type === "ptt.broadcast" ? "VOICE" : automaticReport ? (automaticReport.action === "cancel-last" ? "MAP CANCEL" : "MAP REPORT") : "MESSAGE";
     return `
-      <article class="latest-message ${automaticReport ? "contact-message" : ""}"${isFieldOverlay ? ` data-map-message-id="${escapeHtml(event.id)}"` : ""}>
-        <div><span class="map-message-type ${automaticReport ? "contact" : ""}">${typeLabel}</span><b class="operator-glyph" style="color:${operatorColor(event.color)}">${operatorGlyph(event.icon)}</b><strong>${escapeHtml(event.callsign)}</strong><time>${timeLabel(event.network.received_at)}</time>${ownMessageRemoveButton(event)}${isFieldOverlay ? `<button class="map-message-read" type="button" aria-label="Mark message from ${escapeHtml(event.callsign)} as read" title="Mark read">✓</button>` : ""}</div>
+      <article class="latest-message ${automaticReport ? "contact-message" : ""}" data-map-message-id="${escapeHtml(event.id)}" data-map-message-team="${escapeHtml(readMapMessageDestination || "")}">
+        <div><span class="map-message-type ${automaticReport ? "contact" : ""}">${typeLabel}</span><b class="operator-glyph" style="color:${operatorColor(event.color)}">${operatorGlyph(event.icon)}</b><strong>${escapeHtml(event.callsign)}</strong><time>${timeLabel(event.network.received_at)}</time>${ownMessageRemoveButton(event)}<button class="map-message-read" type="button" aria-label="Dismiss message from ${escapeHtml(event.callsign)} from map" title="Dismiss from map · keep in intel feed">${isFieldOverlay ? "✓" : "×"}</button></div>
         ${event.type === "ptt.broadcast" ? eventDescription(event) : `<p>${escapeHtml(event.message)}</p>`}
       </article>`;
   }).join("");
@@ -3714,14 +4183,22 @@ function renderLatestMessages(events) {
 }
 
 function finishMapMessageCard(card, messageId, direction = 1) {
-  if (!card || !messageId) return;
+  if (!card || !messageId || card.dataset.mapMessageTeam !== (readMapMessageDestination || "")) return;
+  const containerId = card.closest(".latest-messages")?.id;
+  if (!["commandLatestMessages", "latestMessages"].includes(containerId)) return;
+  const destination = readMapMessageDestination;
+  const hadFocus = card.contains(document.activeElement);
   readMapMessageIds.add(messageId);
   saveReadMapMessages();
   card.classList.remove("swiping", "settling");
   card.classList.add("dismissing");
   card.style.setProperty("--map-message-swipe-x", `${direction * Math.max(card.offsetWidth * 1.25, window.innerWidth)}px`);
   card.style.setProperty("--map-message-swipe-opacity", "0");
-  window.setTimeout(() => renderLatestMessages(fieldEvents), 190);
+  window.setTimeout(() => {
+    if (destination !== readMapMessageDestination) return;
+    renderMapMessages(containerId === "commandLatestMessages" ? commandEvents : fieldEvents, containerId);
+    if (hadFocus) ($(containerId).querySelector(".map-message-read") || $("intelPacksToggle"))?.focus();
+  }, 190);
 }
 
 function settleMapMessageCard(card) {
@@ -3927,13 +4404,14 @@ function closePrivateChat() {
 
 async function refreshFeed() {
   if (role !== "field" || feedLoading) return;
-  if (!fieldMap && !fieldMapReady) void renderFieldMap(fieldEvents);
+  if (!commandDisplay() && !fieldMap && !fieldMapReady) void renderFieldMap(fieldEvents);
   feedLoading = true;
   try {
     const response = await fetch("/api/feed", {cache: "no-store"});
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Feed sync failed");
     if (data.team) renderTeam(data.team);
+    renderMissionSync(data.mission_sync);
     fieldFeedOnline = data.network?.online !== false;
     fieldQueuedEvents = Number(data.network?.queued || 0);
     connectivityProbe = {at: Date.now(), online: fieldFeedOnline, ms: data.network?.response_ms};
@@ -3948,7 +4426,8 @@ async function refreshFeed() {
     renderFieldOperators(fieldEvents);
     renderFieldFeed(incomingEvents);
     if (activePrivatePeer) renderPrivateChatMessages();
-    renderFieldMap(fieldEvents);
+    if (commandDisplay()) renderJoinedCommand(fieldEvents);
+    else renderFieldMap(fieldEvents);
     $("fieldFeedSync").textContent = fieldFeedOnline
       ? `RNS · ${Math.round(data.network?.response_ms || 0)} MS${fieldQueuedEvents ? ` · ${fieldQueuedEvents} QUEUED` : ""}`
       : fieldQueuedEvents
@@ -3966,6 +4445,30 @@ async function refreshFeed() {
   }
 }
 
+function renderMissionSync(sync) {
+  const label = $("missionSyncStatus");
+  label.textContent = sync?.state === "synced"
+    ? `Mission synced · ${sync.total} items · ${new Date(sync.last_synced_at * 1000).toLocaleTimeString()}`
+    : sync?.state === "syncing" ? `Receiving mission · ${sync.received} / ${sync.total} items`
+    : sync?.state === "retrying" ? "Mission sync interrupted · will retry"
+    : sync?.state === "legacy" ? "Update the team host for full mission sync"
+    : "Waiting for mission sync";
+  label.title = sync?.reason || "";
+}
+
+$("syncMission").addEventListener("click", async () => {
+  const button = $("syncMission");
+  button.disabled = true;
+  $("missionSyncStatus").textContent = "Requesting current mission…";
+  try {
+    const result = await postJson("/api/mission/sync", {});
+    renderMissionSync(result.mission_sync);
+    await refreshFeed();
+  } catch (error) {
+    $("missionSyncStatus").textContent = error.message;
+  } finally { button.disabled = false; }
+});
+
 function renderNearby(teams) {
   const list = $("nearbyTeams");
   if (!teams.length) {
@@ -3982,21 +4485,31 @@ function renderNearby(teams) {
 }
 
 async function refresh() {
+  if (commandWorkspace && (commandOverview || commandAllTeams)) return;
   try {
     const response = await fetch("/api/state", {cache: "no-store"});
     const state = await response.json();
+    if (!response.ok) {
+      if (commandWorkspace && state.team_unavailable) location.replace(teamPageUrl("none", location.href));
+      throw new Error(state.detail || "Unable to load team");
+    }
     role = state.role;
+    $("missionSyncPanel").classList.toggle("hidden", role !== "field" || !state.team.joined || state.team.hosted);
     localIdentityHash = state.network.identity || "";
-    $("roleLabel").textContent = role === "gateway" ? "COMMAND" : "FIELD";
+    const mapMessageDestination = (role === "gateway" ? state.network.destination : state.team.destination) || "";
+    if (mapMessageDestination !== readMapMessageDestination) loadReadMapMessages(mapMessageDestination);
+    sharedNavigation.setContext(`${localIdentityHash}:${state.team.destination || ""}`);
+    $("roleLabel").textContent = commandDisplay() ? "COMMAND" : "FIELD";
     ["commandSetup", "commandView", "fieldSetup", "fieldView"].forEach((id) => $(id).classList.add("hidden"));
     setNetwork(state);
-    $("userSettingsToggle").classList.toggle("hidden", role !== "field");
+    $("userSettingsToggle").classList.toggle("hidden", role !== "field" && !commandDisplay());
     $("incomingAlertsToggle").classList.remove("hidden");
     updateIncomingAlertsUi();
-    if (role === "field") renderUser(state.user);
+    if (role === "field" || commandDisplay()) renderUser(state.user);
     else renderCommandUser(state.user);
+    if (commandDisplay()) renderCommandUser(state.user);
     renderTeam(state.team);
-    if (role === "field") {
+    if (role === "field" && !commandDisplay()) {
       syncLocalMapPosition(Boolean(state.team.joined));
       syncAutomaticLocationSharing(Boolean(state.team.joined));
     }
@@ -4008,6 +4521,12 @@ async function refresh() {
       renderMapMessages(commandEvents, "commandLatestMessages");
       queueIncomingAlerts(commandEvents);
       if (state.team.created) renderMap(commandEvents);
+    } else if (commandDisplay()) {
+      fieldTeamDestination = state.team.destination || "";
+      fieldQueuedEvents = Number(state.network.queued_events || 0);
+      fieldEvents = withDisplayWaypointLabels(state.events || []);
+      $("destinationHash").textContent = state.team.destination || "";
+      renderJoinedCommand(fieldEvents);
     } else {
       $("fieldIdentity").textContent = state.network.identity;
       $("setupFieldIdentity").textContent = state.network.identity;
@@ -4019,7 +4538,6 @@ async function refresh() {
         if (activePrivatePeer) closePrivateChat();
         privateMessages = [];
         fieldTeamDestination = destination;
-        loadReadMapMessages(destination);
         lastFieldMapSignature = "";
         fieldMapMarkerIds = new Set();
         fieldMapHasRendered = false;
@@ -4034,6 +4552,7 @@ async function refresh() {
       }
     }
     if ((state.team.created || state.team.joined) && currentTeamModules.includes("tasks")) refreshTasks();
+    if (state.team.created || state.team.joined) void sharedNavigation.refresh();
     if (role === "field" && state.team.joined) refreshFeed();
     if (role === "field" && state.team.joined && activePrivatePeer) refreshPrivateChat();
   } catch (error) {
@@ -4077,7 +4596,7 @@ async function loadNetworkSettings() {
 }
 
 function activeOfflineMap() {
-  return role === "gateway" ? operationalMap : fieldMap;
+  return commandDisplay() ? operationalMap : fieldMap;
 }
 
 function visibleOfflineBounds() {
@@ -4148,6 +4667,7 @@ function renderOfflineMaps(data) {
 }
 
 async function refreshOfflineMaps() {
+  offlineRoutingSettings.refresh();
   try {
     const response = await fetch("/api/offline-maps", {cache: "no-store"});
     const data = await response.json();
@@ -4271,11 +4791,11 @@ function toast(message, error = false) {
 }
 
 function showDelivery(delivery) {
-  const target = role === "gateway" ? $("commandDeliveryState") : $("deliveryState");
+  const target = commandDisplay() ? $("commandDeliveryState") : $("deliveryState");
   const queued = delivery.status === "queued";
   const published = delivery.status === "published";
   const success = delivery.delivered || published;
-  target.className = `delivery-state${role === "gateway" ? " command-delivery" : ""} ${queued ? "queued" : success ? "success" : "error"}`;
+  target.className = `delivery-state${commandDisplay() ? " command-delivery" : ""} ${queued ? "queued" : success ? "success" : "error"}`;
   target.textContent = queued
     ? `SAVED LOCALLY · ${delivery.queued || 1} QUEUED FOR RETICULUM`
     : published
@@ -4299,6 +4819,8 @@ function applyQueuedFieldEvent(data) {
     },
   };
   fieldQueuedEvents = Number(data.delivery.queued || fieldQueuedEvents || 1);
+  // The local API projects status updates onto their original pin on refresh.
+  if (event.type === "marker.status") return;
   fieldEvents = withDisplayWaypointLabels([
     event,
     ...fieldEvents.filter((existing) => existing.id !== event.id),
@@ -4307,7 +4829,8 @@ function applyQueuedFieldEvent(data) {
   renderLatestMessages(fieldEvents);
   renderFieldOperators(fieldEvents);
   renderFieldFeed(combinedFieldFeedEvents());
-  void renderFieldMap(fieldEvents, {preserveView: true});
+  if (commandDisplay()) renderJoinedCommand(fieldEvents);
+  else void renderFieldMap(fieldEvents, {preserveView: true});
 }
 
 async function send(payload, button) {
@@ -4326,8 +4849,8 @@ async function send(payload, button) {
     return data;
   } catch (error) {
     toast(error.message, true);
-    const target = role === "gateway" ? $("commandDeliveryState") : $("deliveryState");
-    target.className = `delivery-state${role === "gateway" ? " command-delivery" : ""} error`;
+    const target = commandDisplay() ? $("commandDeliveryState") : $("deliveryState");
+    target.className = `delivery-state${commandDisplay() ? " command-delivery" : ""} error`;
     target.textContent = error.message;
   }
   finally { button.disabled = false; }
@@ -4356,18 +4879,57 @@ function enableDesktopEnterToSend(textareaId, buttonId) {
 enableDesktopEnterToSend("commandMessage", "sendCommandMessage");
 enableDesktopEnterToSend("message", "sendMessage");
 
+function cachedLocationPosition() {
+  const local = localMapPosition;
+  if (Number.isFinite(local?.lat) && Number.isFinite(local?.lon) && Date.now() / 1000 - Number(local.created_at) <= 300) {
+    return {coords: {latitude: local.lat, longitude: local.lon, accuracy: local.accuracy, altitude: null}};
+  }
+  // Android's last known fix lets Locate recenter immediately even when the
+  // WebView's high-accuracy request has not produced its next callback yet.
+  try {
+    const native = JSON.parse(window.RetiumAndroid?.getLastKnownLocation?.() || "null");
+    if (!Number.isFinite(native?.latitude) || !Number.isFinite(native?.longitude)) return null;
+    return {coords: {latitude: native.latitude, longitude: native.longitude, accuracy: native.accuracy, altitude: native.altitude}};
+  } catch { return null; }
+}
+
+function recenterCurrentLocation(position) {
+  if (recenterOnFix(fieldMap, position)) return true;
+  // The control is visible only on the Field map. If a user presses it while
+  // MapLibre is still starting, keep the requested fix and pan as soon as the
+  // map is ready instead of silently losing the action.
+  if (!commandDisplay()) void ensureFieldMap().then(map => recenterOnFix(map, position)).catch(() => {});
+  return false;
+}
+
+function recenterKnownLocation() {
+  const position = cachedLocationPosition();
+  if (!position) return false;
+  localMapPositionHasCentered = true;
+  updateLocalMapPosition(position);
+  return recenterCurrentLocation(position);
+}
+
 function transmitPosition(button) {
   if (!navigator.geolocation) return toast("Geolocation unavailable", true);
   const original = button.textContent;
-  button.disabled = true; button.textContent = "ACQUIRING FIX…";
+  // Center first from a recent device fix. A fresher high-accuracy reading is
+  // still requested and transmitted afterwards, without holding up the map.
+  recenterKnownLocation();
+  button.disabled = true;
+  button.setAttribute("aria-label", "Refreshing current location");
   navigator.geolocation.getCurrentPosition(async (position) => {
+    // Explicit locate pans even when delivery is queued/offline. Suppress initial
+    // auto-framing so a first manual fix cannot replace the user's chosen zoom.
+    localMapPositionHasCentered = true;
     updateLocalMapPosition(position);
+    recenterCurrentLocation(position);
     const lat = Number(position.coords.latitude.toFixed(6));
     const lon = Number(position.coords.longitude.toFixed(6));
     const accuracy = Number(position.coords.accuracy.toFixed(1));
-    button.disabled = false; button.textContent = original;
+    button.disabled = false; button.textContent = original; button.setAttribute("aria-label", "Share current position");
     await send({type: "position.updated", lat, lon, accuracy}, button);
-  }, (error) => { button.disabled = false; button.textContent = original; toast(error.message, true); }, {enableHighAccuracy: true, timeout: 12000});
+  }, (error) => { button.disabled = false; button.textContent = original; button.setAttribute("aria-label", "Share current position"); toast(error.message, true); }, {enableHighAccuracy: true, maximumAge: 10_000, timeout: 12000});
 }
 $("mapSharePosition").addEventListener("click", (event) => transmitPosition(event.currentTarget));
 
@@ -4483,11 +5045,18 @@ $("mapMovementToggle").addEventListener("click", () => {
   else stopMovementSharing();
 });
 $("stopWaypointNavigation").addEventListener("click", () => stopWaypointNavigation());
+$("shareWaypointNavigation").addEventListener("click", async () => {
+  const navigation = waypointNavigation;
+  if (!navigation || navigation.sharePending) return;
+  if (!navigation.sharing) { await publishNavigation(navigation); return; }
+  try { await stopNavigationSharing(); } catch (error) { toast(error.message, true); }
+});
 window.addEventListener("pagehide", () => {
   if (localMapWatchId !== null) navigator.geolocation?.clearWatch(localMapWatchId);
   localMapWatchId = null;
   stopMovementSharing({announce: false, persist: false});
-  stopWaypointNavigation(false);
+  // A suspended WebView is not an operator explicitly ending the shared plan.
+  stopWaypointNavigation(false, {unshare: false});
 });
 
 function setPttState(state) {
@@ -4752,12 +5321,14 @@ function clearVoiceUiCaches() {
 
 [$("timeline"), $("commandLatestMessages"), $("latestMessages"), $("fieldFeedList")].forEach((list) => {
   list.addEventListener("click", (event) => {
-    if (list.id === "latestMessages" && performance.now() < suppressMapMessageClickUntil) {
+    if (["latestMessages", "commandLatestMessages"].includes(list.id) && performance.now() < suppressMapMessageClickUntil) {
       event.preventDefault();
       return;
     }
     const readButton = event.target.closest(".map-message-read");
     if (readButton) {
+      event.preventDefault();
+      event.stopPropagation();
       const card = readButton.closest(".latest-message[data-map-message-id]");
       finishMapMessageCard(card, card?.dataset.mapMessageId, 1);
       return;
@@ -4772,10 +5343,12 @@ function clearVoiceUiCaches() {
   });
 });
 
-$("latestMessages").addEventListener("pointerdown", beginMapMessageSwipe);
-$("latestMessages").addEventListener("pointermove", moveMapMessageSwipe);
-$("latestMessages").addEventListener("pointerup", (event) => endMapMessageSwipe(event));
-$("latestMessages").addEventListener("pointercancel", (event) => endMapMessageSwipe(event, true));
+["latestMessages", "commandLatestMessages"].forEach(id => {
+  $(id).addEventListener("pointerdown", beginMapMessageSwipe);
+  $(id).addEventListener("pointermove", moveMapMessageSwipe);
+  $(id).addEventListener("pointerup", (event) => endMapMessageSwipe(event));
+  $(id).addEventListener("pointercancel", (event) => endMapMessageSwipe(event, true));
+});
 
 $("incomingAlertsToggle").addEventListener("click", () => {
   if (incomingAlertsEnabled && incomingAudioReady) muteIncomingAlerts();
@@ -4792,6 +5365,10 @@ $("mapGridSettingsToggle").addEventListener("click", toggleMapGrid);
 updateMapStyleUi();
 updateMapGridUi();
 window.RetiumAndroid?.setIncomingAlertsEnabled?.(incomingAlertsEnabled);
+updateIncomingAlertsUi();
+void armIncomingAlerts({automatic: true});
+document.addEventListener("pointerup", automaticallyArmIncomingAlerts, true);
+document.addEventListener("keydown", automaticallyArmIncomingAlerts, true);
 
 function setFieldPage(page) {
   closeMapRadial(fieldMapEditor);
@@ -4851,6 +5428,15 @@ $("privateChatMessage").addEventListener("keydown", (event) => {
 });
 
 $("leaveTeam").addEventListener("click", async () => {
+  if (commandWorkspace) {
+    $("userSettingsPanel").classList.add("hidden");
+    $("commandTeamsPanel").classList.remove("hidden");
+    $("commandTeamsToggle").setAttribute("aria-expanded", "true");
+    await loadCommandTeams();
+    const selected = new URL(location.href).searchParams.get("team") || "default";
+    document.querySelector(`[data-team-remove="${CSS.escape(selected)}"]`)?.click();
+    return;
+  }
   if (!leaveArmed) {
     leaveArmed = true;
     $("leaveTeam").textContent = "PRESS AGAIN TO LEAVE";
@@ -4859,6 +5445,11 @@ $("leaveTeam").addEventListener("click", async () => {
   }
   try {
     stopMovementSharing({announce: false, persist: false});
+    if (sharedNavigation.own() || waypointNavigation?.sharePending) {
+      await sharedNavigation.write("DELETE");
+      if (waypointNavigation) waypointNavigation.sharing = false;
+    }
+    stopWaypointNavigation(false);
     const data = await postJson("/api/team/leave", {});
     leaveArmed = false;
     $("leaveTeam").textContent = "LEAVE TEAM";
@@ -4876,6 +5467,11 @@ $("createTeam").addEventListener("click", async (event) => {
   button.disabled = true;
   try {
     const modules = $("createTasksModule").checked ? ["tasks"] : [];
+    if (commandWorkspace) {
+      const result = await postJson("/api/command/teams", {name: $("teamNameInput").value, modules});
+      location.assign(teamPageUrl(result.id, location.href));
+      return;
+    }
     const team = await postJson("/api/team/create", {name: $("teamNameInput").value, modules});
     renderTeam(team);
     toast("Team created · announce sent");
@@ -4911,7 +5507,7 @@ $("fieldCreateTeam").addEventListener("click", async (event) => {
   }
 });
 
-$("toggleTasksModule").addEventListener("click", async (event) => {
+$("toggleTasksModule")?.addEventListener("click", async (event) => {
   const button = event.currentTarget;
   button.disabled = true;
   try {
@@ -4927,7 +5523,7 @@ $("toggleTasksModule").addEventListener("click", async (event) => {
   }
 });
 
-$("toggleEveryoneAdmin").addEventListener("click", async (event) => {
+$("toggleEveryoneAdmin")?.addEventListener("click", async (event) => {
   const button = event.currentTarget;
   button.disabled = true;
   try {
@@ -5144,6 +5740,10 @@ $("adminSettingsToggle").addEventListener("click", () => {
   }
 });
 
+document.querySelectorAll("[data-open-admin-settings]").forEach(button => {
+  button.addEventListener("click", () => $("adminSettingsToggle").click());
+});
+
 $("offlineMapDetail").addEventListener("change", updateOfflineMapEstimate);
 
 $("downloadOfflineMap").addEventListener("click", async (event) => {
@@ -5348,9 +5948,9 @@ $("nearbyTeams").addEventListener("click", (event) => {
 });
 
 function connectLiveStream() {
-  if (role !== "gateway") return;
+  if (role !== "gateway" || commandOverview || commandAllTeams) return;
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${protocol}://${location.host}/api/live`);
+  const socket = new WebSocket(apiUrl(`${protocol}://${location.host}/api/live`));
   socket.addEventListener("message", (message) => {
     const payload = JSON.parse(message.data);
     if (payload.type === "event.received") refresh();
@@ -5358,5 +5958,199 @@ function connectLiveStream() {
   socket.addEventListener("close", () => setTimeout(connectLiveStream, 1500));
 }
 
-refresh().then(connectLiveStream);
+async function loadCommandTeams() {
+  const response = await fetch("/api/command/teams", {cache: "no-store"});
+  if (!response.ok) return false; // Field has no Command workspace.
+  commandWorkspace = true;
+  const {teams, removed = []} = await response.json();
+  const selected = new URL(location.href).searchParams.get("team") || "default";
+  $("commandTeamsToggle").classList.remove("hidden");
+  $("allTeamsLink").classList.remove("hidden");
+  $("allTeamsLink").href = teamPageUrl("all", location.href);
+  $("allTeamsPanelLink").href = teamPageUrl("all", location.href);
+  if (commandAllTeams) $("allTeamsLink").setAttribute("aria-current", "page");
+  $("closeTeamView").href = teamPageUrl("none", location.href);
+  $("closeTeamView").classList.toggle("hidden", commandOverview || commandAllTeams);
+  $("commandTeamsList").innerHTML = teams.length ? teams.map((team) => `
+    <article class="command-team-row">
+      <div><strong>${escapeHtml(team.name)}</strong><small>${team.mode === "member" ? (team.hosting ? "JOINED · SYNC ACTIVE" : "JOINED · PAUSED") : team.hosting ? "HOSTING HERE" : "HOST STOPPED"}${team.id === selected ? " · CURRENT VIEW" : ""}</small></div>
+      <div class="command-team-actions">
+        ${team.hosting ? `<a class="team-open-link" href="${escapeHtml(teamPageUrl(team.id, location.href))}">OPEN TEAM →</a>` : ""}
+        ${team.mode !== "member" ? `<button type="button" class="text-button" data-team-rename aria-expanded="false" aria-controls="rename-team-${escapeHtml(team.id)}">RENAME</button>` : ""}
+        <button type="button" class="text-button" data-team-host="${escapeHtml(team.id)}" data-hosting="${!team.hosting}">${team.mode === "member" ? (team.hosting ? "PAUSE SYNC" : "RESUME SYNC") : team.hosting ? "STOP HOSTING" : "START HOSTING"}</button>
+        <button type="button" class="text-button danger-action" data-team-remove="${escapeHtml(team.id)}" aria-expanded="false">REMOVE</button>
+      </div>
+      <form id="rename-team-${escapeHtml(team.id)}" class="command-team-rename hidden" data-rename-team="${escapeHtml(team.id)}">
+        <label for="rename-name-${escapeHtml(team.id)}">Team name</label>
+        <input id="rename-name-${escapeHtml(team.id)}" name="name" value="${escapeHtml(team.name)}" maxlength="40" required autocomplete="off">
+        <div><button type="submit" class="secondary compact">SAVE</button><button type="button" class="text-button" data-cancel-rename>CANCEL</button></div>
+        <small>Same team, join code and history.</small>
+      </form>
+      <div class="command-team-remove hidden"><p>Remove <b>${escapeHtml(team.name)}</b> from this Command workspace? ${team.mode === "member" ? "This device stops syncing it." : "Hosting here stops; members may lose sync unless another host is available."} Other devices keep their copies. Local history is kept under Removed teams.</p><button type="button" class="secondary compact danger-action" data-confirm-team-remove="${escapeHtml(team.id)}">REMOVE FROM COMMAND</button><button type="button" class="text-button" data-cancel-team-remove>CANCEL</button></div>
+    </article>`).join("") : '<p class="empty-copy">No saved teams. Join or create a team below.</p>';
+  $("removedCommandTeams").classList.toggle("hidden", !removed.length);
+  $("removedCommandTeamsList").innerHTML = removed.map(team => `<article class="command-team-row"><strong>${escapeHtml(team.name)}</strong><button type="button" class="text-button" data-team-restore="${escapeHtml(team.id)}">RESTORE</button></article>`).join("");
+  void loadCommandNearby();
+  return true;
+}
+
+async function loadCommandNearby() {
+  if (!commandWorkspace) return;
+  try {
+    const response = await fetch("/api/command/nearby", {cache: "no-store"});
+    if (!response.ok) throw new Error("Discovery unavailable. You can still use a join code.");
+    const {teams = []} = await response.json();
+    $("commandNearbyTeams").innerHTML = teams.length ? teams.map(team => {
+      const state = team.in_workspace ? team.workspace_hosting ? "IN WORKSPACE · SYNC ACTIVE" : "IN WORKSPACE · PAUSED" : `${escapeHtml(team.via || "Reticulum announce")} · ${team.hops < 128 ? `${Number(team.hops)} hops` : "path heard"}`;
+      const action = team.in_workspace
+        ? team.workspace_hosting ? `<a class="team-open-link" href="${escapeHtml(teamPageUrl(team.workspace_team_id, location.href))}">OPEN TEAM →</a>` : '<button type="button" class="secondary compact" disabled>SAVED</button>'
+        : `<button type="button" class="secondary compact" data-command-join="${escapeHtml(team.join_code)}">JOIN</button>`;
+      return `<div class="nearby-team"><div><strong>${escapeHtml(team.name)}</strong><small>${state}</small></div>${action}</div>`;
+    }).join("") : '<p class="empty-copy">No team announces heard recently. Paste its join code above.</p>';
+  } catch (error) { $("commandNearbyTeams").textContent = error.message; }
+}
+
+async function joinCommandTeam(code, button) {
+  button.disabled = true;
+  try {
+    const result = await postJson("/api/command/join", {join_code: code});
+    location.assign(teamPageUrl(result.id, location.href));
+  } catch (error) { toast(error.message, true); button.disabled = false; }
+}
+$("commandTeamJoinForm").addEventListener("submit", event => { event.preventDefault(); void joinCommandTeam($("commandJoinCodeInput").value, $("joinCommandTeam")); });
+$("refreshCommandNearby").addEventListener("click", loadCommandNearby);
+$("commandNearbyTeams").addEventListener("click", event => { const button = event.target.closest("[data-command-join]"); if (button) void joinCommandTeam(button.dataset.commandJoin, button); });
+$("removedCommandTeamsList").addEventListener("click", async event => {
+  const button = event.target.closest("[data-team-restore]");
+  if (!button) return;
+  button.disabled = true;
+  try { await postJson(`/api/command/teams/${encodeURIComponent(button.dataset.teamRestore)}/restore`, {}); await loadCommandTeams(); }
+  catch (error) { toast(error.message, true); button.disabled = false; }
+});
+
+$("commandTeamsToggle").addEventListener("click", async () => {
+  const panel = $("commandTeamsPanel");
+  panel.classList.toggle("hidden");
+  $("commandTeamsToggle").setAttribute("aria-expanded", String(!panel.classList.contains("hidden")));
+  if (!panel.classList.contains("hidden")) {
+    try { await loadCommandTeams(); } catch (error) { toast(error.message, true); }
+  }
+});
+$("closeCommandTeams").addEventListener("click", () => {
+  $("commandTeamsPanel").classList.add("hidden");
+  $("commandTeamsToggle").setAttribute("aria-expanded", "false");
+});
+$("commandTeamCreateForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("createCommandWorkspaceTeam");
+  button.disabled = true;
+  try {
+    const result = await postJson("/api/command/teams", {
+      name: $("newCommandTeamName").value,
+      modules: $("newCommandTeamTasks").checked ? ["tasks"] : [],
+    });
+    location.assign(teamPageUrl(result.id, location.href));
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; }
+});
+$("commandTeamsList").addEventListener("click", async (event) => {
+  const removal = event.target.closest("[data-team-remove], [data-cancel-team-remove], [data-confirm-team-remove]");
+  if (removal) {
+    const row = removal.closest(".command-team-row");
+    const toggle = row.querySelector("[data-team-remove]");
+    if (!removal.dataset.confirmTeamRemove) {
+      const opening = removal === toggle && row.querySelector(".command-team-remove").classList.contains("hidden");
+      row.querySelector(".command-team-remove").classList.toggle("hidden", !opening);
+      toggle.setAttribute("aria-expanded", String(opening));
+      (opening ? row.querySelector("[data-confirm-team-remove]") : toggle).focus();
+      return;
+    }
+    removal.disabled = true;
+    try {
+      await postJson(`/api/command/teams/${encodeURIComponent(removal.dataset.confirmTeamRemove)}/remove`, {confirm: true});
+      const selected = new URL(location.href).searchParams.get("team") || "default";
+      if (selected === removal.dataset.confirmTeamRemove) location.assign(teamPageUrl("none", location.href));
+      else await loadCommandTeams();
+    } catch (error) { toast(error.message, true); removal.disabled = false; }
+    return;
+  }
+  const rename = event.target.closest("[data-team-rename], [data-cancel-rename]");
+  if (rename) {
+    const row = rename.closest(".command-team-row");
+    const form = row.querySelector(".command-team-rename");
+    const toggle = row.querySelector("[data-team-rename]");
+    const opening = rename === toggle && form.classList.contains("hidden");
+    form.classList.toggle("hidden", !opening);
+    toggle.setAttribute("aria-expanded", String(opening));
+    form.reset();
+    if (opening) { form.elements.name.focus(); form.elements.name.select(); }
+    else toggle.focus();
+    return;
+  }
+  const button = event.target.closest("[data-team-host]");
+  if (!button) return;
+  const hosting = button.dataset.hosting === "true";
+  if (!hosting && button.dataset.confirm !== "true") {
+    const label = button.textContent;
+    button.dataset.confirm = "true";
+    button.textContent = "STOP TEAM SYNC? CONFIRM";
+    setTimeout(() => { button.dataset.confirm = "false"; button.textContent = label; }, 6000);
+    return;
+  }
+  button.disabled = true;
+  try {
+    await postJson(`/api/command/teams/${encodeURIComponent(button.dataset.teamHost)}/hosting`, {hosting});
+    const selected = new URL(location.href).searchParams.get("team") || "default";
+    if (!hosting && selected === button.dataset.teamHost) {
+      location.assign(teamPageUrl("none", location.href));
+      return;
+    }
+    await loadCommandTeams();
+    toast(hosting ? "Team connection started" : "Team stopped · history kept");
+  } catch (error) { toast(error.message, true); button.disabled = false; }
+});
+
+$("commandTeamsList").addEventListener("submit", async (event) => {
+  const form = event.target.closest("[data-rename-team]");
+  if (!form) return;
+  event.preventDefault();
+  const teamId = form.dataset.renameTeam;
+  const controls = form.closest(".command-team-row").querySelectorAll("input, button");
+  controls.forEach(control => { control.disabled = true; });
+  try {
+    await postJson(`/api/command/teams/${encodeURIComponent(teamId)}/rename`, {name: form.elements.name.value});
+    await loadCommandTeams();
+    document.querySelector(`[data-rename-team="${CSS.escape(teamId)}"]`)?.closest(".command-team-row").querySelector("[data-team-rename]").focus();
+    toast("Team renamed · join code unchanged");
+    await refresh();
+  } catch (error) { toast(error.message, true); }
+  finally { controls.forEach(control => { control.disabled = false; }); }
+});
+
+async function initializeWorkspace() {
+  try { await loadCommandTeams(); } catch { /* Normal state check reports connection errors. */ }
+  if (commandWorkspace && commandAllTeams) {
+    document.body.classList.add("all-teams-mode");
+    $("roleLabel").textContent = "COMMAND";
+    $("networkToggle").classList.add("hidden");
+    const {startAllTeamsView} = await import("./all-teams-view.js?v=20260907-4");
+    await startAllTeamsView({mapStyle: mapStyleDefinition, initialStyle: mapStyleMode, saveStyle: saveMapStylePreference, onMapReady: (map, Popup) => intelPacks.attachMap(map, {Popup})});
+    return;
+  }
+  if (commandWorkspace && commandOverview) {
+    document.body.classList.add("command-workspace-overview");
+    $("roleLabel").textContent = "COMMAND";
+    $("commandTeamsPanel").classList.remove("hidden");
+    $("commandTeamsToggle").setAttribute("aria-expanded", "true");
+    $("closeCommandTeams").classList.add("hidden");
+    $("commandTeamsToggle").disabled = true;
+    $("networkToggle").classList.add("hidden");
+    return;
+  }
+  await refresh();
+  connectLiveStream();
+}
+initContinuitySettings({apiUrl, escapeHtml, toast});
+const membershipSettings = initMembershipSettings({apiUrl, escapeHtml, toast});
+initializeWorkspace();
 setInterval(refresh, 15000);

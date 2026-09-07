@@ -70,8 +70,9 @@ function extractAgoSeconds(message) {
 export function parseAutomaticReport(message) {
   const normalized = normalize(message);
   if (!normalized) return null;
-  if (/\bcancel\s+(?:my\s+|the\s+)?last\s+(?:contact|report|marker)\b/.test(normalized)) {
-    return {action: "cancel-last", type: "cancel-last"};
+  const cancellation = normalized.match(/\bcancel\s+(?:my\s+|the\s+)?last\s+((?:enemy\s+)?contact|report|marker)\b/);
+  if (cancellation) {
+    return {action: "cancel-last", type: "cancel-last", targetType: cancellation[1].includes("contact") ? "contact" : null};
   }
   const definition = REPORTS.find((item) => item.match.test(normalized));
   if (!definition) return null;
@@ -182,7 +183,7 @@ export function buildAutomaticReportFeatures(report, origin, meta = {}) {
     label: report.label,
     markerType: report.markerType,
     mapKind: "automatic-report",
-    removable: false,
+    removable: Boolean(meta.removable),
     automatic: true,
     reportType: report.type,
     symbol: report.symbol,
@@ -238,11 +239,15 @@ export function activeAutomaticReports(items, nowSeconds = Date.now() / 1000) {
     const key = item.senderHash || item.callsign || "unknown";
     if (!activeBySender.has(key)) activeBySender.set(key, []);
     if (report.action === "cancel-last") {
-      activeBySender.get(key).pop();
+      const reports = activeBySender.get(key);
+      const index = reports.findLastIndex(item => !report.targetType || item.report.type === report.targetType);
+      if (index !== -1) reports.splice(index, 1);
       return;
     }
     const effectiveTime = Number(item.createdAt) - Number(report.occurredAgoSeconds || 0);
     if (nowSeconds - effectiveTime <= report.ttlSeconds) activeBySender.get(key).push({...item, report});
   });
-  return [...activeBySender.values()].flat();
+  // Keep dismissed reports in the cancellation stack, then hide them. Otherwise
+  // an old spoken cancellation could accidentally consume an earlier contact.
+  return [...activeBySender.values()].flat().filter(item => !item.event?.automatic_report_dismissed);
 }

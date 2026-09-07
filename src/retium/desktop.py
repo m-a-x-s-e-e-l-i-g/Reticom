@@ -155,7 +155,7 @@ class DesktopServer:
     def start(self, timeout: float = STARTUP_TIMEOUT_SECONDS) -> None:
         self._thread.start()
         deadline = time.monotonic() + timeout
-        state_url = f"{self.url}api/state"
+        state_url = f"{self.url}api/health"
         while time.monotonic() < deadline:
             if not self._thread.is_alive():
                 raise RuntimeError("Reticom Command stopped during startup")
@@ -206,7 +206,7 @@ def run(smoke_test: bool = False, window_smoke_test: bool = False) -> int:
         server = DesktopServer(config_dir, root / "data")
         server.start()
         if smoke_test:
-            with urllib.request.urlopen(f"{server.url}api/state", timeout=5) as response:
+            with urllib.request.urlopen(f"{server.url}api/health", timeout=5) as response:
                 if response.status != 200:
                     raise RuntimeError("Command API smoke test failed")
             return 0

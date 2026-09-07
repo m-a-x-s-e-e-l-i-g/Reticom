@@ -105,10 +105,39 @@ test("cancel last report only removes that speaker's newest automatic report", (
     {id: "a1", senderHash: "alpha", callsign: "ALPHA", createdAt: now - 30, message: "Casualty at my position"},
     {id: "b1", senderHash: "bravo", callsign: "BRAVO", createdAt: now - 20, message: "Checkpoint established here"},
     {id: "a2", senderHash: "alpha", callsign: "ALPHA", createdAt: now - 10, message: "Road blocked 200 metres east"},
-    {id: "cancel", senderHash: "alpha", callsign: "ALPHA", createdAt: now, message: "Cancel last contact"},
+    {id: "cancel", senderHash: "alpha", callsign: "ALPHA", createdAt: now, message: "Cancel last report"},
   ], now);
 
   assert.deepEqual(active.map((item) => item.id), ["a1", "b1"]);
+});
+
+test("spoken enemy-contact cancellation targets only that speaker's latest contact", () => {
+  for (const phrase of ["cancel last enemy contact", "Cancel my last enemy contact.", "cancel the last contact"]) {
+    const items = [
+      {id: "older", senderHash: "a", createdAt: 100, message: "contact north 100 meters"},
+      {id: "latest", senderHash: "a", createdAt: 110, message: "contact east 200 meters"},
+      {id: "water", senderHash: "a", createdAt: 120, message: "water point here"},
+      {id: "other", senderHash: "b", createdAt: 125, message: "contact south 50 meters"},
+      {id: "cancel", senderHash: "a", createdAt: 130, message: phrase},
+    ];
+    assert.deepEqual(activeAutomaticReports(items, 140).map(item => item.id), ["older", "water", "other"]);
+    items[1].event = {automatic_report_dismissed: true};
+    assert.deepEqual(activeAutomaticReports(items, 140).map(item => item.id), ["older", "water", "other"]);
+    assert.equal(activeAutomaticReports(items.slice(0, -1), 140).some(item => item.id === "latest"), false);
+  }
+});
+
+test("automatic point and arrow share the source ID and explicit removal permission", () => {
+  const report = parseAutomaticReport("contact north 100 meters");
+  for (const removable of [false, true]) {
+    const features = buildAutomaticReportFeatures(report, [4, 51], {id: "source-message", removable});
+    assert.equal(features.length, 2);
+    for (const feature of features) {
+      assert.equal(feature.properties.mapKind, "automatic-report");
+      assert.equal(feature.properties.id, "source-message");
+      assert.equal(feature.properties.removable, removable);
+    }
+  }
 });
 
 test("expired tactical reports disappear automatically", () => {

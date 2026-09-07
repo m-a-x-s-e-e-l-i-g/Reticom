@@ -1,0 +1,84 @@
+name: Build regional routing data
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_date:
+        description: "Dated Geofabrik extract (YYYY-MM-DD, normally yesterday)"
+        required: true
+        type: string
+      regions:
+        description: "Geofabrik region IDs, separated by spaces"
+        default: "noord-brabant zeeland limburg"
+        required: true
+        type: string
+      publish:
+        description: "Publish verified packs and update the public routing catalogue"
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: routing-data
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install graph builder
+        run: python -m pip install pyvalhalla==3.8.3 fastapi==0.141.1
+      - name: Build selected regions
+        env:
+          PYTHONPATH: src
+          DATA_DATE: ${{ inputs.data_date }}
+          REGIONS: ${{ inputs.regions }}
+        run: |
+          set -euo pipefail
+          [[ "$DATA_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          [[ "$REGIONS" =~ ^[a-z0-9\ -]+$ ]]
+          read -r -a regions <<< "$REGIONS"
+          python tools/build-routing-catalogue.py --regions "${regions[@]}" \
+            --date "$DATA_DATE" --tag "routing-data-$DATA_DATE" \
+            --repository "$GITHUB_REPOSITORY" --output routing-output --cache routing-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: routing-data
+          path: routing-output/
+          if-no-files-found: error
+
+  publish:
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: routing-data
+          path: routing-output
+      - name: Publish data (never replace an application release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DATA_DATE: ${{ inputs.data_date }}
+        run: |
+          set -euo pipefail
+          # An existing dated release is immutable: this fails instead of clobbering it.
+          python -c "import json,pathlib; p=pathlib.Path('routing-output/catalogue.json'); d=json.loads(p.read_text()); d['published']=True; p.write_text(json.dumps(d,indent=2))"
+          gh release create "routing-data-$DATA_DATE" routing-output/*.retiroute routing-output/catalogue.json \
+            --title "Offline routing data $DATA_DATE" --latest=false \
+            --notes "Walking and driving graphs. OSM contributors (ODbL); Geofabrik extracts. Not an application update."
+          if ! gh release view routing-catalogue-v1 >/dev/null 2>&1; then
+            gh release create routing-catalogue-v1 --title "Offline routing catalogue" --latest=false \
+              --notes "Index of separately versioned routing packs. Not an application update."
+          fi
+          gh release upload routing-catalogue-v1 routing-output/catalogue.json --clobber

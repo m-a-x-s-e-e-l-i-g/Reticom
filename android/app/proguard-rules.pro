@@ -1,2 +1,3 @@
 -keep class com.chaquo.python.** { *; }
+-keep class com.valhalla.valhalla.ValhallaKotlin { *; }
 -keep class com.google.mlkit.vision.barcode.** { *; }

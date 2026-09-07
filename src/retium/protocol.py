@@ -14,8 +14,12 @@ EVENT_TYPES = {
     "drawing.deleted",
     "position.updated",
     "marker.created",
+    "marker.status",
     "marker.deleted",
     "message.deleted",
+    "report.dismissed",
+    "navigation.updated",
+    "navigation.stopped",
     "profile.updated",
     "private.message",
     "private.ptt",
@@ -45,6 +49,10 @@ MAX_MESSAGE_LENGTH = 160
 MAX_LABEL_LENGTH = 80
 MAX_DRAWING_POINTS = 48
 MARKER_TYPES = {
+    "note",
+    "other",
+    "flooding",
+    "electrical-hazard",
     "waypoint",
     "warning",
     "observation",
@@ -76,8 +84,14 @@ MARKER_TYPES = {
     "supply-cache",
     "water-point",
     "last-seen",
+    "command-post",
+    "base-camp",
+    "objective",
+    "assembly-point",
 }
-DRAWING_TYPES = {"trace", "arrow"}
+DRAWING_TYPES = {"trace", "arrow", "area"}
+DRAWING_COLORS = {"amber", "red", "green", "blue", "purple", "white"}
+DRAWING_FILLS = {"none", "solid", "lines", "crosses"}
 
 
 class ProtocolError(ValueError):
@@ -182,6 +196,29 @@ def validate_event(value: Any) -> dict[str, Any]:
             raise ProtocolError("unsupported marker type")
         event["label"] = label
         event["marker_type"] = marker_type
+        if "description" in value or marker_type in {"note", "other"}:
+            description = value.get("description", "")
+            if not isinstance(description, str) or len(description.strip()) > 160:
+                raise ProtocolError("report description must be at most 160 characters")
+            description = description.strip()
+            if marker_type in {"note", "other"} and not description:
+                raise ProtocolError("Describe what you are reporting")
+            event["description"] = description
+        if "urgent" in value:
+            if type(value["urgent"]) is not bool:
+                raise ProtocolError("urgent must be a boolean")
+            event["urgent"] = value["urgent"]
+
+    if event_type == "marker.status" or (event_type == "marker.created" and "report_status" in value):
+        status = value.get("report_status")
+        if not isinstance(status, str) or status not in {"reported", "confirmed", "cleared"}:
+            raise ProtocolError("report status must be reported, confirmed or cleared")
+        event["report_status"] = status
+        if event_type == "marker.status" and "report_revision" in value:
+            revision = value["report_revision"]
+            if type(revision) is not int or not 1 <= revision <= 1_000_000_000:
+                raise ProtocolError("report revision must be a positive integer")
+            event["report_revision"] = revision
 
     if event_type == "drawing.created":
         drawing_type = str(value.get("drawing_type", "trace")).strip().lower()
@@ -203,8 +240,42 @@ def validate_event(value: Any) -> dict[str, Any]:
         event["points"] = clean_points
         if drawing_type != "trace":
             event["drawing_type"] = drawing_type
+        # Optional fields stay absent on legacy traces: preserve signed payloads.
+        if "label" in value:
+            label = str(value["label"]).strip()
+            if len(label) > MAX_LABEL_LENGTH:
+                raise ProtocolError(f"drawing name must be at most {MAX_LABEL_LENGTH} characters")
+            if label:
+                event["label"] = label
+        if "drawing_color" in value:
+            if not isinstance(value["drawing_color"], str) or value["drawing_color"] not in DRAWING_COLORS:
+                raise ProtocolError("unsupported drawing color")
+            event["drawing_color"] = value["drawing_color"]
+        if "fill_style" in value:
+            if not isinstance(value["fill_style"], str) or value["fill_style"] not in DRAWING_FILLS:
+                raise ProtocolError("unsupported drawing fill")
+            if drawing_type != "area" and value["fill_style"] != "none":
+                raise ProtocolError("only a closed area can have a fill")
+            event["fill_style"] = value["fill_style"]
+        if drawing_type == "area":
+            # Reject collapsed areas after wire precision rounding. Unwrap at the
+            # dateline before measuring; do not mistake a short crossing for 360°.
+            unwrapped = []
+            for lon, lat in clean_points:
+                if unwrapped:
+                    while lon - unwrapped[-1][0] > 180:
+                        lon -= 360
+                    while lon - unwrapped[-1][0] < -180:
+                        lon += 360
+                unwrapped.append((lon, lat))
+            origin_x, origin_y = unwrapped[0]
+            area = sum((x - origin_x) * (unwrapped[(i + 1) % len(unwrapped)][1] - origin_y)
+                       - (unwrapped[(i + 1) % len(unwrapped)][0] - origin_x) * (y - origin_y)
+                       for i, (x, y) in enumerate(unwrapped))
+            if len(set(unwrapped)) < 3 or abs(area) < 1e-12:
+                raise ProtocolError("area must enclose space with at least three distinct points")
 
-    if event_type == "marker.deleted":
+    if event_type in {"marker.deleted", "marker.status"}:
         try:
             event["marker_id"] = str(uuid.UUID(str(value.get("marker_id"))))
         except (ValueError, TypeError, AttributeError) as exc:
@@ -255,7 +326,7 @@ def validate_event(value: Any) -> dict[str, Any]:
             _number(value.get("distance_m"), "distance_m", 0, 1000), 1
         )
 
-    if event_type == "message.deleted":
+    if event_type in {"message.deleted", "report.dismissed"}:
         try:
             event["message_id"] = str(uuid.UUID(str(value.get("message_id"))))
         except (ValueError, TypeError, AttributeError) as exc:
@@ -278,6 +349,15 @@ def validate_event(value: Any) -> dict[str, Any]:
             raise ProtocolError("unsupported voice clip format")
         event["duration_ms"] = duration_ms
         event["mime_type"] = mime_type
+
+    if event_type in {"navigation.updated", "navigation.stopped"}:
+        from .navigation import MAX_EVENT_BYTES, validate_fields
+        try:
+            event.update(validate_fields(value))
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from exc
+        if len(_canonical_json(event)) > MAX_EVENT_BYTES:
+            raise ProtocolError("shared route exceeds 12 KB; route was not shared")
 
     return event
 

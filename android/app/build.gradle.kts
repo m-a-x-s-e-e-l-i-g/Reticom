@@ -3,6 +3,15 @@ plugins {
     id("com.chaquo.python")
 }
 
+// Use only the MIT-licensed native engine from the pinned Maven Central AAR.
+// Our tiny Java JNI adapter avoids pulling its Kotlin/UI/model stack into Reticom.
+val valhallaNative by configurations.creating { isTransitive = false }
+val unpackValhalla by tasks.registering(Sync::class) {
+    from({ zipTree(valhallaNative.singleFile) }) { include("jni/arm64-v8a/*.so") }
+    into(layout.buildDirectory.dir("generated/valhalla"))
+}
+tasks.named("preBuild") { dependsOn(unpackValhalla) }
+
 val reticomTransportHost = providers.gradleProperty("reticomTransportHost").orNull?.trim().orEmpty()
 val reticomTransportPort = providers.gradleProperty("reticomTransportPort").orNull?.toIntOrNull() ?: 4242
 val reticomVersionName = providers.gradleProperty("reticomVersionName").orNull?.trim().orEmpty().ifBlank { "0.1.0" }
@@ -51,6 +60,7 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    sourceSets.getByName("main").jniLibs.srcDir(layout.buildDirectory.dir("generated/valhalla/jni"))
 }
 
 chaquopy {
@@ -66,7 +76,12 @@ chaquopy {
             install("pydantic==1.10.13")
             install("uvicorn==0.23.2")
             install("wsproto==1.2.0")
+            install("websockets==15.0.1")
             install("qrcode==8.2")
+            // Latest Chaquopy cp311 Android wheel (arm64-v8a and x86_64).
+            // Desktop's Pillow pin has no cp311 Android wheel in this index.
+            // https://chaquo.com/pypi-13.1/pillow/
+            install("Pillow==11.0.0")
         }
         pyc {
             src = true
@@ -83,5 +98,6 @@ chaquopy {
 }
 
 dependencies {
+    valhallaNative("io.github.rallista:valhalla-mobile:0.6.3@aar")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 }

@@ -1,0 +1,36 @@
+Valhalla Mobile 0.6.3 and Valhalla routing engine
+https://github.com/Rallista/valhalla-mobile/tree/0.6.3
+https://github.com/valhalla/valhalla/tree/3.8.3
+
+The MIT License (MIT)
+
+Copyright (c) 2024 Adventure Consortium Inc (dba Rallista)
+Copyright (c) 2018 Valhalla contributors
+Copyright (c) 2015-2017 Mapillary AB, Mapzen
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+Reticom's routing-defaults.json is adapted from Valhalla 3.8.3 defaults under
+this license. The Java adapter uses the JNI ABI of valhalla-mobile 0.6.3.
+The engine and its upstream dependencies retain their original licenses;
+Reticom's CC BY-NC-ND license does not relicense them.
+
+Routing graph data: OpenStreetMap contributors, ODbL 1.0.
+https://www.openstreetmap.org/copyright
+Regional extracts must preserve their source, date, and applicable attribution.

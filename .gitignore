@@ -24,6 +24,11 @@ test-results/
 runtime/
 configs/*/storage/
 .device-test/
+intel-packs/
+elevation-cache/
+offline-routing/
+*.retiroute
+*.osm.pbf
 
 # Secrets and machine-local configuration
 .env

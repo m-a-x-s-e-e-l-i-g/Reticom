@@ -67,6 +67,7 @@ def test_union_with_hole_is_not_complete_and_offline_shows_partial_cache(tmp_pat
 
 def test_clipped_trail_fragments_survive_union_without_connecting_gaps(tmp_path):
     store = IntelPackStore(tmp_path, clock=lambda: NOW)
+    store.update({"enabled": ["trails", "military"]})
     left = [[4.7, 51.55], [4.74, 51.55]]
     right = [[4.76, 51.55], [4.8, 51.55]]
     save_area(store, "trails", (4.7, 51.5, 4.76, 51.6), data("route/1", {"type": "LineString", "coordinates": left}))
@@ -109,6 +110,7 @@ def test_truncated_area_does_not_claim_coverage_and_is_refined_without_margin(tm
         calls.append(bounds)
         return data(truncated=len(calls) == 1)
     store = IntelPackStore(tmp_path, loader=loader, clock=lambda: now[0])
+    store.update({"enabled": ["trails", "military"]})
     assert store.load("trails", VIEW, 14)["truncated"]
     now[0] += 31
     assert store.load("trails", VIEW, 14)["status"] == "fresh"
@@ -119,6 +121,7 @@ def test_truncated_area_does_not_claim_coverage_and_is_refined_without_margin(tm
 
 def test_exact_truncated_result_reuses_with_warning_but_not_for_new_view(tmp_path):
     store = IntelPackStore(tmp_path, clock=lambda: NOW)
+    store.update({"enabled": ["trails", "military"]})
     save_area(store, "trails", VIEW, data(truncated=True))
     result = store.load("trails", VIEW, 14)
     assert result["status"] == "cached" and result["truncated"]
@@ -145,6 +148,7 @@ def test_rectangle_union_handles_corner_holes_and_multiple_rows():
 def test_hiking_limit_cannot_exhaust_military_budget(tmp_path, field):
     now = [NOW]
     store = IntelPackStore(tmp_path, loader=lambda *a: data(), clock=lambda: now[0])
+    store.update({"enabled": ["trails", "military"]})
     usage = store._osm_usage()
     usage["packs"]["trails"][field] = OSM_DAILY_LIMITS["trails"][field]
     store._write(store.usage_path, usage)

@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.22)
+project(reticom_whisper LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_CPU_ARM_ARCH armv8-a CACHE STRING "" FORCE)
+include(FetchContent)
+FetchContent_Declare(whisper
+  URL https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/a8d002cfd879315632a579e73f0148d06959de36
+  URL_HASH SHA256=7b17da903114ed45d82f48c030e3be6a5a8a279f884b2f733706dbb4e832fb6b)
+FetchContent_MakeAvailable(whisper)
+add_library(reticom_whisper SHARED whisper_jni.cpp)
+target_link_libraries(reticom_whisper whisper android log)
+target_link_options(reticom_whisper PRIVATE "-Wl,-z,max-page-size=16384")

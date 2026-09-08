@@ -1,6 +1,16 @@
 name: reticom
 
 services:
+  language-model:
+    image: ollama/ollama:0.33.3
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - language-models:/root/.ollama
+    environment:
+      OLLAMA_NO_CLOUD: "1"
+
   command:
     build: .
     image: reticom:local
@@ -12,6 +22,9 @@ services:
     volumes:
       - command-data:/var/lib/reticom
     environment:
+      RETICOM_LOCAL_PORT_FORWARD: "1"
+      RETICOM_AI_URL: http://language-model:11434
+      RETICOM_AI_MODEL: qwen3:4b-instruct
       RETIUM_TRANSCRIPTION_MODEL: ${RETIUM_TRANSCRIPTION_MODEL:-base}
       RETIUM_TRANSCRIPTION_LANGUAGE: ${RETIUM_TRANSCRIPTION_LANGUAGE:-en}
 
@@ -19,6 +32,8 @@ services:
     image: reticom:local
     pull_policy: never
     command: ["field"]
+    environment:
+      RETICOM_LOCAL_PORT_FORWARD: "1"
     init: true
     restart: unless-stopped
     depends_on:
@@ -30,5 +45,6 @@ services:
       - field-data:/var/lib/reticom
 
 volumes:
+  language-models:
   command-data:
   field-data:

@@ -188,6 +188,16 @@ def validate_event(value: Any) -> dict[str, Any]:
             )
 
     if event_type == "marker.created":
+        if "source_report_id" in value:
+            try:
+                event["source_report_id"] = str(uuid.UUID(str(value["source_report_id"])))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ProtocolError("source_report_id must be a UUID") from exc
+        if "expires_at" in value:
+            expiry = value["expires_at"]
+            if type(expiry) is not int or not created_at < expiry <= created_at + 7 * 86400:
+                raise ProtocolError("marker expiry must be within seven days after creation")
+            event["expires_at"] = expiry
         label = str(value.get("label", "")).strip()
         if not label or len(label) > MAX_LABEL_LENGTH:
             raise ProtocolError(f"label must be 1-{MAX_LABEL_LENGTH} characters")

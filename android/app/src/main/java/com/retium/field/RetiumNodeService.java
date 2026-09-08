@@ -34,6 +34,7 @@ public final class RetiumNodeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        WhisperTranscriber.initialize(this);
         if (shuttingDown) return;
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification("Starting Reticulum…"));

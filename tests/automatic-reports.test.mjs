@@ -3,11 +3,15 @@ import test from "node:test";
 
 import {
   activeAutomaticReports,
+  automaticReportOrigin,
   buildAutomaticReportFeatures,
   parseAutomaticReport,
 } from "../src/retium/static/automatic-reports.js";
 
 const reports = [
+  ["heat signature spotted 200 meters north of your position", "heat-signature", "point"],
+  ["rally 100m north", "rally-point", "point"],
+  ["rally at church", "rally-point", "point"],
   ["Road blocked 200 metres east", "road-blocked", "road-block"],
   ["Casualty at my position", "casualty", "point"],
   ["Need evacuation here", "medevac", "point"],
@@ -29,6 +33,36 @@ const reports = [
   ["Hold north of this road", "hold-line", "phase-line"],
   ["Contact north 100 meters", "contact", "contact"],
 ];
+
+test("all report types share compact, spaced, decimal and click distances", () => {
+  for (const phrase of ["rally", "heat signature spotted", "checkpoint", "contact", "search this area", "casualty", "water point"]) {
+    for (const [unit, distance] of [["100m", 100], ["100 m", 100], ["100 meters", 100], ["100 metres", 100], ["0.1km", 100], ["0.1 km", 100], ["0.1 clicks", 100], ["0.1 klicks", 100], ["one click", 1000], ["half a click", 500]]) {
+      const report = parseAutomaticReport(`${phrase} ${unit} north`);
+      assert.equal(report?.distance, distance, `${phrase} ${unit}`);
+      assert.equal(report.bearing, 0);
+      const point = buildAutomaticReportFeatures(report, [4, 50]).find(f => f.geometry.type === "Point");
+      assert.ok(point.geometry.coordinates[1] > 50);
+      assert.ok(Math.abs(point.geometry.coordinates[0] - 4) < 0.000001);
+    }
+  }
+});
+
+test("landmarks resolve to map coordinates, never silently to the reporter", () => {
+  const report = parseAutomaticReport("rally at church");
+  assert.equal(report.landmark, "CHURCH");
+  assert.deepEqual(buildAutomaticReportFeatures(report, [4, 50]), []);
+  const features = buildAutomaticReportFeatures(report, [4, 50], {landmarkLocation: {coordinates: [4.01, 50.01], name: "Nearest church"}});
+  assert.deepEqual(features[0].geometry.coordinates, [4.01, 50.01]);
+  assert.equal(features[0].properties.landmarkResolved, true);
+  assert.equal(parseAutomaticReport("casualty at my position").landmark, "");
+});
+
+test("invalid distances cannot silently fall back to the sender or due north", () => {
+  for (const message of ["rally 100m", "rally 99999m north", "rally 0m north", "rally 6 clicks north", "rally -100m north"]) {
+    assert.equal(parseAutomaticReport(message), null, message);
+  }
+  assert.equal(parseAutomaticReport("I am moving north").distance, 180);
+});
 
 for (const [message, type, shape] of reports) {
   test(`parses automatic report: ${message}`, () => {
@@ -165,4 +199,26 @@ test("last-known expiry starts at the stated observation time", () => {
     {id: "old-lkp", senderHash: "alpha", createdAt: now - 1, message: "Last seen here thirty minutes ago"},
   ], now);
   assert.equal(active.length, 0);
+});
+
+
+test("landmark commands without sender GPS use a recent fix from their own team", () => {
+  const message = {created_at: 1000, network: {sender_hash: "command"}};
+  const fix = {lat: 50, lon: 4, created_at: 876};
+  const positions = new Map([["field", [fix]]]);
+  const report = parseAutomaticReport("rally at church");
+  assert.equal(automaticReportOrigin(report, message, positions), fix);
+  assert.equal(automaticReportOrigin(parseAutomaticReport("rally 100m north"), message, positions), null);
+  assert.equal(automaticReportOrigin(report, message, new Map()), undefined);
+  assert.equal(automaticReportOrigin(report, {...message, created_at: 2000}, positions), undefined);
+  const own = {...fix, created_at: 850};
+  positions.set("command", [own]);
+  assert.equal(automaticReportOrigin(report, message, positions), own);
+});
+
+
+test("speech does not fall back to regex markers while local AI is processing", () => {
+  const reports = activeAutomaticReports([{id: "speech", createdAt: 1000, senderHash: "sender",
+    message: "contact 100m north", event: {type: "ptt.broadcast"}}], 1001);
+  assert.deepEqual(reports, []);
 });

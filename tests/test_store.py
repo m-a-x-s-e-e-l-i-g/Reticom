@@ -3,6 +3,18 @@ from retium.store import EventStore
 import time
 
 
+def test_expired_marker_is_hidden_without_deleting_history(tmp_path, monkeypatch):
+    store = EventStore(tmp_path / "expiry.sqlite3")
+    now = int(time.time())
+    event = new_event("marker.created", "Command", lat=52, lon=5,
+                      marker_type="observation", label="Heat signature", expires_at=now + 30)
+    store.insert(event, "command")
+    assert any(item["id"] == event["id"] for item in store.mission_events())
+    monkeypatch.setattr("retium.store.time.time", lambda: now + 31)
+    assert not any(item["id"] == event["id"] for item in store.mission_events())
+    assert store.event_exists(event["id"], "marker.created")
+
+
 def test_store_is_idempotent_and_preserves_network_evidence(tmp_path):
     store = EventStore(tmp_path / "events.sqlite3")
     event = new_event("chat.message", "BRAVO", message="Network check")

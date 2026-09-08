@@ -85,6 +85,7 @@
 .workspace-team-details {padding:12px 0;border-bottom:1px solid var(--line);}
 .workspace-team-details .rail-footer {padding:0;}
 .command-canvas-mode .settings-panel {z-index:100;top:56px;}
+.command-canvas-mode .settings-panel.membership-panel {z-index:120;}
 @media(max-width:700px) {
  .command-canvas-mode .topbar {gap:4px;padding:0 8px;}
  .command-canvas-mode #commandTeamsToggle {max-width:140px;padding:8px;}

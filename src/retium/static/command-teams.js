@@ -3,7 +3,8 @@ export function teamApiUrl(input, pageUrl) {
   const page = new URL(pageUrl);
   const url = new URL(input, page);
   const selected = page.searchParams.get("team");
-  if (selected && url.host === page.host && url.pathname.startsWith("/api/") && !url.pathname.startsWith("/api/command/")) {
+  const workspaceAction = url.pathname.startsWith("/api/command/") && url.pathname !== "/api/command/position";
+  if (selected && url.host === page.host && url.pathname.startsWith("/api/") && !workspaceAction) {
     url.searchParams.set("team", selected);
   }
   return url.href;

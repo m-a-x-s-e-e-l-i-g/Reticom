@@ -19,7 +19,8 @@ const REPORTS = [
   {type: "medevac", match: /\b(?:need\s+(?:an\s+)?evacuation|request(?:ing)?\s+(?:an\s+)?evacuation|medevac)\b/, label: "MEDEVAC", markerType: "medical evacuation", symbol: "EVAC", color: "#d5d1bd", ttl: 2 * 3600, state: "PICKUP REQUESTED"},
   {type: "evac-point", match: /\b(?:(?:evac(?:uation)?|extract(?:ion)?)\s+(?:point|zone)|pickup\s+(?:point|zone))\b|^evac$/, label: "EVAC POINT", markerType: "evacuation point", symbol: "EVAC", color: "#d5d1bd", ttl: 4 * 3600, state: "DESIGNATED"},
   {type: "medical-point", match: /\b(?:medical|medic|aid)\s+(?:point|station)\b/, label: "MEDICAL POINT", markerType: "medical point", symbol: "MED", color: "#d5d1bd", ttl: 8 * 3600, state: "DESIGNATED"},
-  {type: "rally-point", match: /\brally\s+point\b/, label: "RALLY POINT", markerType: "rally point", symbol: "RP", color: "#a79669", ttl: 4 * 3600},
+  {type: "rally-point", match: /\brally(?:\s+point)?\b/, label: "RALLY POINT", markerType: "rally point", symbol: "RP", color: "#a79669", ttl: 4 * 3600},
+  {type: "heat-signature", match: /\b(?:heat|thermal)\s+signatures?\b/, label: "HEAT SIGNATURE", markerType: "thermal observation", symbol: "THM", color: "#c79558", ttl: 30 * 60},
   {type: "checkpoint", match: /\bcheckpoint(?:\s+(?:established|set|active))?\b/, label: "CHECKPOINT", markerType: "checkpoint", symbol: "CP", color: "#899a78", ttl: 8 * 3600, state: "ESTABLISHED"},
   {type: "landing-zone", match: /\b(?:landing\s+zone|lz)\b.*\bclear\b|\bclear\b.*\b(?:landing\s+zone|lz)\b/, label: "LANDING ZONE", markerType: "landing zone", symbol: "LZ", color: "#899a78", ttl: 2 * 3600, state: "CLEAR"},
   {type: "landing-zone", match: /\b(?:landing\s+zone|lz)\b/, label: "LANDING ZONE", markerType: "landing zone", symbol: "LZ", color: "#899a78", ttl: 2 * 3600, state: "REPORTED"},
@@ -42,7 +43,7 @@ const REPORTS = [
 ];
 
 function normalize(message) {
-  return String(message || "").trim().toLowerCase().replace(/[.,!?;:]+/g, " ").replace(/\s+/g, " ");
+  return String(message || "").trim().toLowerCase().replace(/(?<!\d)[.,]|[.,](?!\d)|[!?;:]+/g, " ").replace(/(\d),(\d)/g, "$1.$2").replace(/\s+/g, " ");
 }
 
 function extractDirection(message) {
@@ -53,11 +54,12 @@ function extractDirection(message) {
 }
 
 function extractDistance(message) {
-  const match = message.match(/\b(\d{1,4}(?:\.\d+)?)\s*(kilometers?|kilometres?|kms?|meters?|metres?|m)\b/i);
+  const match = message.match(/\b(\d+(?:\.\d+)?|(?:one|two|three|four|five|half(?: a)?|a)(?=\s))\s*(kilometers?|kilometres?|kms?|klicks?|clicks?|meters?|metres?|m)\b/i);
   if (!match) return null;
-  let distance = Number(match[1]);
-  if (match[2].toLowerCase().startsWith("k")) distance *= 1000;
-  return Number.isFinite(distance) && distance >= 1 && distance <= AUTOMATIC_REPORT_MAX_DISTANCE_METERS ? distance : null;
+  if (match.index > 0 && /[-.]/.test(message[match.index - 1])) return NaN;
+  let distance = match[1].startsWith("half") ? 0.5 : match[1] === "a" ? 1 : NUMBER_WORDS[match[1]] || Number(match[1]);
+  if (/^(k|click)/i.test(match[2])) distance *= 1000;
+  return Number.isFinite(distance) && distance >= 1 && distance <= AUTOMATIC_REPORT_MAX_DISTANCE_METERS ? distance : NaN;
 }
 
 function extractAgoSeconds(message) {
@@ -78,11 +80,13 @@ export function parseAutomaticReport(message) {
   if (!definition) return null;
   const {direction, bearing} = extractDirection(normalized);
   const explicitDistance = extractDistance(normalized);
+  if (Number.isNaN(explicitDistance) || (explicitDistance !== null && !Number.isFinite(bearing))) return null;
   if (definition.type === "contact" && (!Number.isFinite(bearing) || explicitDistance === null)) return null;
   if (["unit-moving", "possible-movement", "drone-spotted", "hold-line"].includes(definition.type) && !Number.isFinite(bearing)) return null;
   const match = normalized.match(definition.match);
   const routeName = definition.type === "route-compromised" ? String(match?.[1] || "").trim().toUpperCase() : "";
-  const landmarkMatch = normalized.match(/\b(?:at|by)\s+the\s+([a-z][a-z0-9 -]{1,32})$/);
+  const landmarkMatch = normalized.match(/\b(?:at|by|near)\s+(?:(?:the|a|nearest)\s+)?([a-z][a-z0-9 -]{1,32})$/);
+  const landmark = landmarkMatch && !/^(?:(?:my|your|our|this|current)\s+)?(?:position|location|here)$/.test(landmarkMatch[1]) ? landmarkMatch[1].toUpperCase() : "";
   const distance = explicitDistance ?? definition.defaultDistance ?? 0;
   const directionLabel = direction ? direction.toUpperCase() : "";
   const distanceLabel = distance >= 1000 ? `${distance / 1000} KM` : distance ? `${distance} M` : "";
@@ -104,13 +108,27 @@ export function parseAutomaticReport(message) {
     distance,
     approximate: Boolean(
       (distance && explicitDistance === null)
-      || landmarkMatch
+      || landmark
       || ["road-blocked", "route-compromised", "bridge-damaged"].includes(definition.type),
     ),
-    landmark: landmarkMatch ? landmarkMatch[1].toUpperCase() : "",
+    landmark,
     routeName,
     occurredAgoSeconds: definition.type === "last-seen" ? extractAgoSeconds(normalized) : 0,
   };
+}
+
+// Positions must already be filtered and belong to this report's team.
+export function automaticReportOrigin(report, event, positions) {
+  const recent = items => [...items].filter(fix =>
+    Number.isFinite(fix.lat) && Number.isFinite(fix.lon)
+    && fix.created_at <= event.created_at + 5
+    && event.created_at - fix.created_at <= AUTOMATIC_REPORT_POSITION_MAX_AGE_SECONDS
+  ).sort((a, b) => b.created_at - a.created_at)[0];
+  const identity = event.network?.sender_hash || event.callsign;
+  const own = recent(positions.get(identity) || []);
+  // Command often has no GPS. Landmark names can use the team's latest fix;
+  // distance/bearing reports still require the reporting operator's position.
+  return own || (report.landmark ? recent([...positions.values()].flat()) : null);
 }
 
 export function projectPoint(origin, bearing, distance) {
@@ -165,8 +183,9 @@ function arrowGeometry(points) {
 }
 
 export function buildAutomaticReportFeatures(report, origin, meta = {}) {
+  if (report.landmark && !meta.landmarkLocation) return [];
   const bearing = Number.isFinite(report.bearing) ? report.bearing : 0;
-  const target = report.distance ? projectPoint(origin, bearing, report.distance) : origin;
+  const target = meta.landmarkLocation?.coordinates || (report.distance ? projectPoint(origin, bearing, report.distance) : origin);
   const observedAt = Number(meta.createdAt || 0) - Number(report.occurredAgoSeconds || 0);
   const observationAge = Math.max(0, Number(meta.nowSeconds ?? Date.now() / 1000) - observedAt);
   const fadeOpacity = report.type === "last-seen"
@@ -191,6 +210,8 @@ export function buildAutomaticReportFeatures(report, origin, meta = {}) {
     state: report.state,
     approximate: report.approximate,
     landmark: report.landmark,
+    landmarkResolved: Boolean(meta.landmarkLocation),
+    landmarkName: meta.landmarkLocation?.name || "",
     routeName: report.routeName,
     fadeOpacity,
   };
@@ -215,11 +236,11 @@ export function buildAutomaticReportFeatures(report, origin, meta = {}) {
   } else if (report.shape === "route-warning") {
     add("auto-line", {type: "LineString", coordinates: lineAcross(origin, 0, 250)}, {lineStyle: "blocked"});
   } else if (report.shape === "search-area") {
-    const north = projectPoint(origin, 0, 180);
-    const east = projectPoint(origin, 90, 180);
-    const south = projectPoint(origin, 180, 180);
-    const west = projectPoint(origin, 270, 180);
-    add("auto-area", circle(origin, 180, 4), {areaStyle: "search"});
+    const north = projectPoint(target, 0, 180);
+    const east = projectPoint(target, 90, 180);
+    const south = projectPoint(target, 180, 180);
+    const west = projectPoint(target, 270, 180);
+    add("auto-area", circle(target, 180, 4), {areaStyle: "search"});
     add("auto-line", {type: "MultiLineString", coordinates: [[north, south], [east, west]]}, {lineStyle: "sector"});
   } else if (report.shape === "phase-line") {
     add("auto-line", {type: "LineString", coordinates: lineAcross(target, bearing, 250)}, {lineStyle: "phase"});
@@ -234,7 +255,7 @@ export function buildAutomaticReportFeatures(report, origin, meta = {}) {
 export function activeAutomaticReports(items, nowSeconds = Date.now() / 1000) {
   const activeBySender = new Map();
   [...items].sort((a, b) => Number(a.createdAt) - Number(b.createdAt)).forEach((item) => {
-    const report = item.report || parseAutomaticReport(item.message);
+    const report = item.report || (item.event?.type === "ptt.broadcast" ? null : parseAutomaticReport(item.message));
     if (!report) return;
     const key = item.senderHash || item.callsign || "unknown";
     if (!activeBySender.has(key)) activeBySender.set(key, []);

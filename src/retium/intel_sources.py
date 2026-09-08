@@ -75,7 +75,7 @@ PACKS = [
     },
     {
         "id": "firms", "title": "Satellite heat detections", "source": "NASA FIRMS",
-        "description": "VIIRS NOAA-20 thermal anomalies from the last 3 days. A detection is not a confirmed fire or attack.",
+        "description": "VIIRS NOAA-20 thermal anomalies in the selected detection window. A detection is not a confirmed fire or attack.",
         "source_url": "https://firms.modaps.eosdis.nasa.gov/",
         "attribution": "NASA FIRMS · VIIRS NOAA-20 NRT",
         # A regional heat picture is intentionally a daily device-local
@@ -727,26 +727,41 @@ def _load_gdacs(bbox, fetch, selected, *, cache_enabled=False):
     return result
 
 
-def _load_firms(bbox, credentials, fetch):
+def _load_firms(bbox, credentials, fetch, days=3):
     key = str(credentials.get("firms_key") or "").strip()
     if not key:
         raise IntelSourceError("Add your free NASA FIRMS MAP_KEY in Intel pack settings.")
     if not re.fullmatch(r"[A-Za-z0-9_-]{10,128}", key):
         raise IntelSourceError("The NASA FIRMS MAP_KEY format is invalid.")
     extent = ",".join(f"{v:.6f}" for v in bbox)
-    raw = fetch(f"{FIRMS_ROOT}{key}/VIIRS_NOAA20_NRT/{extent}/3")
+    if type(days) is not int or days not in (1, 3, 7):
+        raise IntelSourceError("Choose 24 hours, 3 days or 7 days for NASA FIRMS.")
+    now = datetime.fromtimestamp(time.time(), timezone.utc)
+    cutoff = now - timedelta(days=days)
+    # The API returns calendar days, max five per request. Include the cutoff
+    # date, then trim to the exact rolling window (including yesterday for 24h).
+    chunks = []
+    start = cutoff.date()
+    while start <= now.date():
+        count = min(5, (now.date() - start).days + 1)
+        chunks.append(fetch(f"{FIRMS_ROOT}{key}/VIIRS_NOAA20_NRT/{extent}/{count}/{start.isoformat()}"))
+        start += timedelta(days=count)
     try:
-        reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig")))
-        if not reader.fieldnames or not {"latitude", "longitude", "acq_date", "acq_time"}.issubset(reader.fieldnames):
-            raise IntelSourceError("NASA FIRMS did not return detection data. Check your MAP_KEY and quota.")
-        features, truncated = [], False
-        for row in reader:
+        readers = [csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))) for raw in chunks]
+        for reader in readers:
+            if not reader.fieldnames or not {"latitude", "longitude", "acq_date", "acq_time"}.issubset(reader.fieldnames):
+                raise IntelSourceError("NASA FIRMS did not return detection data. Check your MAP_KEY and quota.")
+        features, truncated, seen = [], False, set()
+        for row in (row for reader in readers for row in reader):
             point = _coord([row.get("longitude"), row.get("latitude")])
             if not point or not _inside(point, bbox):
                 continue
             day, minute = row.get("acq_date", ""), row.get("acq_time", "").zfill(4)
             try:
-                observed = datetime.strptime(day + minute, "%Y-%m-%d%H%M").replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+                acquired = datetime.strptime(day + minute, "%Y-%m-%d%H%M").replace(tzinfo=timezone.utc)
+                if not cutoff <= acquired <= now:
+                    continue
+                observed = acquired.isoformat().replace("+00:00", "Z")
             except ValueError:
                 continue
             if len(features) >= MAX_FEATURES:
@@ -754,11 +769,14 @@ def _load_firms(bbox, credentials, fetch):
                 break
             confidence = {"l": "low", "n": "nominal", "h": "high"}.get(row.get("confidence", "").lower(), "unknown")
             identifier = hashlib.sha256(f"{observed}|{point}|{row.get('satellite', '')}".encode()).hexdigest()[:24]
+            if identifier in seen:
+                continue
+            seen.add(identifier)
             detail = f"VIIRS NOAA-20 thermal anomaly · Nominal resolution: 375 m · Confidence: {confidence}. Satellite heat detection, not a confirmed fire or attack."
             features.append(_feature("firms", identifier, {"type": "Point", "coordinates": point}, "Satellite heat detection", detail, "thermal_anomaly", observed, confidence=confidence))
     except (UnicodeDecodeError, csv.Error):
         raise IntelSourceError("NASA FIRMS returned unreadable detection data.") from None
-    return _collection("firms", features, truncated=truncated, note="Last 3 days · NOAA-20 NRT only. Overpass timing, clouds and sensor resolution limit coverage.")
+    return _collection("firms", features, truncated=truncated, note=f"Last {'24 hours' if days == 1 else str(days) + ' days'} · NOAA-20 NRT only. Overpass timing, clouds and sensor resolution limit coverage.")
 
 
 def _load_acled(bbox, credentials, fetch):
@@ -801,7 +819,7 @@ def _load_acled(bbox, credentials, fetch):
 
 
 def load_pack(pack_id: str, bbox, credentials: dict | None = None, *, fetch: Callable | None = None,
-              gdacs_types=None) -> dict:
+              gdacs_types=None, firms_days=3) -> dict:
     """Load a bounded GeoJSON view. ``fetch`` is injectable for offline tests."""
     if pack_id not in _PACK_BY_ID:
         raise IntelSourceError("Unknown Intel pack.")
@@ -837,7 +855,8 @@ def load_pack(pack_id: str, bbox, credentials: dict | None = None, *, fetch: Cal
                 selected = tuple(dict.fromkeys(gdacs_types))
             result = _load_gdacs(bbox, fetch, selected, cache_enabled=transport is fetch_bytes)
         elif pack_id == "firms":
-            result = _load_firms(bbox, credentials, fetch)
+            result = _load_firms(bbox, credentials, fetch, firms_days)
+            result["firms_days"] = firms_days
         else:
             result = _load_acled(bbox, credentials, fetch)
         result["source_bytes"] = source_bytes

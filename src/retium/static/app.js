@@ -4,15 +4,15 @@ let commandCanvas = null;
 import {calculateDeviceRoute, initOfflineRoutingSettings, ROUTING_MODE_KEY} from "./offline-routing.js?v=20260907-3";
 const offlineRoutingSettings = initOfflineRoutingSettings();
 import {hikingMapStyle, recenterOnFix, roadAndPathLayers, preferredMapStyle, nextMapStyle, satelliteWithTrails} from "./outdoor-map.js?v=20260907-5";
-import {createIntelPacks} from "./intel-packs.js?v=20260908-3";
+import {createIntelPacks} from "./intel-packs.js?v=20260908-7";
 import {createSharedNavigation, navigationSharePayload} from "./shared-navigation.js?v=20260906-1";
 import {HeadingTracker, HeadingOverlay, HeadingConnection} from "./live-heading.js?v=20260905-2";
 import {reportDraft, reportComposerHtml} from "./map-reports.js?v=20260905-1";
 import {reportProperties, REPORT_STATUS_LABELS} from "./marker-catalog.js?v=20260905-2";
 import {drawingFeatures, validDrawingArea, addDrawingDecorationLayers, drawingReviewHtml} from "./map-drawings.js?v=20260905-2";
-import {teamApiUrl, teamPageUrl} from "./command-teams.js?v=20260905-1";
+import {teamApiUrl, teamPageUrl} from "./command-teams.js?v=20260908-2";
 import {initContinuitySettings} from "./continuity-settings.js?v=20260905-1";
-import {initMembershipSettings} from "./membership-settings.js?v=20260907-1";
+import {initMembershipSettings} from "./membership-settings.js?v=20260908-2";
 import {displayPositionSeries, distanceMeters, MAX_AUTOMATIC_ACCURACY_METERS} from "./location-filter.js?v=20260903-1";
 import {nextWaypointLabel, withDisplayWaypointLabels} from "./map-labels.js?v=20260903-2";
 import {formatMapBytes, packProgress, tileCountForBounds} from "./map-offline.js?v=20260903-1";
@@ -29,11 +29,12 @@ import {
   routeNeedsRefresh,
 } from "./route-navigation.js?v=20260907-3";
 import {
-  AUTOMATIC_REPORT_POSITION_MAX_AGE_SECONDS,
+  automaticReportOrigin,
   activeAutomaticReports,
   buildAutomaticReportFeatures,
   parseAutomaticReport,
-} from "./automatic-reports.js?v=20260905-1";
+} from "./automatic-reports.js?v=20260908-3";
+import {resolveReportLandmark, onLandmarkResolved} from "./report-landmarks.js?v=20260908-2";
 import {
   TACTICAL_MARKER_TYPES,
   tacticalMarker,
@@ -1308,7 +1309,7 @@ function voicePlayerMarkup(event) {
       ? "No speech detected."
       : transcript?.status === "processing"
         ? "Transcribing locally…"
-        : "Loads with audio.";
+        : transcript?.error ? `Transcription failed: ${transcript.error}` : "Loads with audio.";
   const transcriptLanguage = transcript?.status === "ready" && transcript.language
     ? ` · ${String(transcript.language).toUpperCase()}`
     : "";
@@ -1388,15 +1389,23 @@ function updateTranscriptDisplays(clipId, transcript) {
         ? "No speech detected."
         : transcript.status === "processing"
           ? "Transcribing locally…"
-          : "Transcript unavailable. Tap audio to retry.";
+          : transcript.error ? `Transcription failed: ${transcript.error}` : "Transcript unavailable. Tap audio to retry.";
   });
+  if (transcript.interpretation) {
+    document.querySelectorAll(`[data-transcript-id="${CSS.escape(clipId)}"]`).forEach(element => {
+      const interpretation = transcript.interpretation;
+      if (interpretation.state === "created") element.querySelector("b").textContent += " · AI MARKERS ADDED";
+      if (interpretation.state === "needs_clarification") element.querySelector("span").textContent += ` — ${interpretation.reason}`;
+    });
+  }
   if (transcript.status === "ready") updateTranscriptContactVisuals(clipId);
 }
 
 function updateTranscriptContactVisuals(clipId) {
   const events = role === "gateway" ? commandEvents : fieldEvents;
   const voiceEvent = events.find((event) => event.type === "ptt.broadcast" && event.clip_id === clipId);
-  const report = voiceEvent && parseAutomaticReport(contactReportText(voiceEvent));
+  const interpretation = voiceTranscriptCache.get(clipId)?.interpretation;
+  const report = voiceEvent && ["created", "cancelled"].includes(interpretation?.state) ? {action: interpretation.state === "cancelled" ? "cancel-last" : "create"} : null;
   if (!report) return;
   document.querySelectorAll(`[data-clip-id="${CSS.escape(clipId)}"]`).forEach((player) => {
     const card = player.closest(".latest-message");
@@ -1416,7 +1425,12 @@ function primeRecentVoiceTranscripts(events) {
   const cutoff = Date.now() / 1000 - AUTOMATIC_REPORT_TRANSCRIPT_LOOKBACK_SECONDS;
   events
     .filter((event) => ["ptt.broadcast", "private.ptt"].includes(event.type) && event.created_at >= cutoff)
-    .filter((event) => !voiceTranscriptCache.has(event.clip_id) && !voiceTranscriptRequests.has(event.clip_id))
+     .filter((event) => {
+      if (voiceTranscriptRequests.has(event.clip_id)) return false;
+      const cached = voiceTranscriptCache.get(event.clip_id);
+      return !cached || (commandDisplay() && event.type === "ptt.broadcast" &&
+        !["created", "cancelled", "no_marker", "needs_clarification"].includes(cached.interpretation?.state));
+    })
     .slice(0, 12)
     .forEach((event, index) => setTimeout(() => requestVoiceTranscript(event.clip_id, false), index * 250));
 }
@@ -1432,11 +1446,11 @@ async function requestVoiceTranscript(clipId, start = false, attempt = 0) {
     const transcript = await response.json();
     if (!response.ok) throw new Error(transcript.detail || "Transcript unavailable");
     updateTranscriptDisplays(clipId, transcript);
-    if (transcript.status === "processing" && attempt < 40) {
+    if ((transcript.status === "processing" || ["interpreting", "publishing"].includes(transcript.interpretation?.state)) && attempt < 40) {
       setTimeout(() => requestVoiceTranscript(clipId, false, attempt + 1), role === "field" ? 4000 : 2000);
     }
-  } catch {
-    updateTranscriptDisplays(clipId, {status: "unavailable", clip_id: clipId});
+  } catch (error) {
+    updateTranscriptDisplays(clipId, {status: "error", clip_id: clipId, error: error.message});
   } finally {
     voiceTranscriptRequests.delete(clipId);
   }
@@ -1774,6 +1788,17 @@ function tacticalMarkerCaptionLayer(id, source) {
   };
 }
 
+let commandAiEnabled = false;
+let commandAiReports = {};
+let privateAiMarkers = [];
+function aiReportLabel(id) {
+  const report = commandAiReports[id];
+  if (!report) return "";
+  if (report.state === "created") return "AI · Marker added";
+  if (report.state === "no_marker") return "";
+  return `AI · ${report.reason || report.state}`;
+}
+
 function renderTimeline(events) {
   const visibleEvents = intelEvents(events);
   const expandedProofs = new Set([...$("timeline").querySelectorAll(".event-proof[open]")].map(item => item.dataset.eventId));
@@ -1787,11 +1812,13 @@ function renderTimeline(events) {
     <article class="event verified">
       <div class="event-head"><span><b class="operator-glyph" style="color:${operatorColor(event.color)}">${operatorGlyph(event.icon)}</b> ${escapeHtml(event.callsign)} · ${escapeHtml(intelEventType(event))}</span><div class="event-head-actions"><time>${timeLabel(event.network.received_at)}</time>${ownMessageRemoveButton(event)}</div></div>
       <div class="event-body">${eventDescription(event)}</div>
+      <div class="event-meta" data-ai-report-id="${escapeHtml(event.id)}">${escapeHtml(aiReportLabel(event.id))}</div>
       <details class="event-proof" data-event-id="${escapeHtml(event.id)}" ${expandedProofs.has(event.id) ? "open" : ""}><summary>Verified · details</summary><div class="event-meta">✓ SIGNATURE · ${shortHash(event.network.sender_hash)}<br>PKT ${shortHash(event.network.packet_hash || "", 8)} · ${escapeHtml(event.network.interface || "Reticulum")}</div></details>
     </article>`).join("");
 }
 
 function currentLocations(events) {
+  if (commandDisplay() && activePrivatePeer) events = [...events, ...privateAiMarkers.filter(marker => marker.private_peer === activePrivatePeer.hash).map(marker => ({...marker, display_label: `DM · ${marker.label}`}))];
   const positions = new Map();
   const profiles = new Map();
   const markers = [];
@@ -1930,6 +1957,9 @@ function contactReportText(event) {
 }
 
 function contactReportFeatures(events) {
+  if (commandDisplay() && commandAiEnabled) return {type: "FeatureCollection", features: []};
+  const interpretedSources = new Set(events.filter(event => event.type === "marker.created").map(event => event.source_report_id).filter(Boolean));
+  events = events.filter(event => !interpretedSources.has(event.id));
   const positions = new Map();
   events.forEach((event) => {
     if (event.type !== "position.updated" || !Number.isFinite(event.lat) || !Number.isFinite(event.lon)) return;
@@ -1952,11 +1982,11 @@ function contactReportFeatures(events) {
   reports.forEach((item) => {
     const {event, report, message: reportMessage} = item;
     const identity = event.network?.sender_hash || event.callsign;
-    const candidates = positions.get(identity) || [];
-    const originEvent = [...candidates].reverse().find((position) => position.created_at <= event.created_at + 5);
-    if (!originEvent || event.created_at - originEvent.created_at > AUTOMATIC_REPORT_POSITION_MAX_AGE_SECONDS) return;
+    const originEvent = automaticReportOrigin(report, event, positions);
+    if (!originEvent) return;
     const origin = [originEvent.lon, originEvent.lat];
     features.push(...buildAutomaticReportFeatures(report, origin, {
+      landmarkLocation: resolveReportLandmark(report, origin),
       id: event.id,
       callsign: event.callsign,
       senderHash: identity,
@@ -2629,7 +2659,7 @@ async function renderMap(events, {preserveView = false} = {}) {
         markerColor: marker?.color || "",
         senderHash: event.network?.sender_hash || "",
         callsign: event.callsign || "",
-        removable: event.type === "marker.created" && (currentTeamAdmin || event.network?.sender_hash === localIdentityHash),
+        removable: event.type === "marker.created" && !event.private_ai && (currentTeamAdmin || event.network?.sender_hash === localIdentityHash),
         ...reportProperties(event),
         },
       };
@@ -2841,7 +2871,7 @@ async function renderFieldMap(events, {preserveView = localMapPositionHasCentere
             markerColor: marker?.color || "",
             senderHash: event.network?.sender_hash || "",
             callsign: event.callsign || "",
-            removable: event.type === "marker.created" && (currentTeamAdmin || event.network?.sender_hash === localIdentityHash),
+            removable: event.type === "marker.created" && !event.private_ai && (currentTeamAdmin || event.network?.sender_hash === localIdentityHash),
             queued: event.network?.queued === true,
             ...reportProperties(event),
             },
@@ -2947,6 +2977,15 @@ function createMapEditor(map, {menuId, contextMenuId, paletteId, controlsId, tex
     lastPointerType: "mouse",
   };
   editor.controls.innerHTML = drawingReviewHtml();
+  editor.contextMenu.querySelector("[data-command-position]")?.addEventListener("click", async () => {
+    if (!editor.location) return;
+    try {
+      const response = await fetch(apiUrl("/api/command/position"), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(editor.location)});
+      if (!response.ok) throw new Error((await response.json()).detail || "Could not set Command position");
+      closeMapRadial(editor);
+      toast("Command position saved. Relative Command reports use this point.");
+    } catch (error) { toast(error.message, true); }
+  });
   editor.reportComposer = document.createElement("form");
   editor.reportComposer.className = "map-report-composer hidden";
   editor.reportComposer.setAttribute("aria-label", "Report details");
@@ -3859,7 +3898,7 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
     const detail = document.createElement("small");
     const parts = [];
     if (properties.state) parts.push(properties.state);
-    if (properties.landmark) parts.push(`LANDMARK: ${properties.landmark} (NOT MAP-RESOLVED)`);
+    if (properties.landmark) parts.push(`LANDMARK: ${properties.landmarkName || properties.landmark}${properties.landmarkResolved ? " · OPENSTREETMAP" : " (NOT MAP-RESOLVED)"}`);
     if (properties.reportType === "last-seen" && properties.observedAt) {
       parts.push(`LAST SEEN ${new Date(Number(properties.observedAt) * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}`);
     }
@@ -4034,7 +4073,26 @@ function renderCommandUser(user) {
   $("commandSenderBadge").style.color = operatorColor(user.color);
 }
 
+function refreshAiMarkerStatus() {
+  if (!commandDisplay()) return;
+  fetch(apiUrl("/api/ai/markers"), {cache: "no-store"}).then(response => response.ok ? response.json() : null).then(state => {
+    const label = $("commandAiStatus");
+    if (!label || !state) return;
+    commandAiEnabled = state.enabled;
+    commandAiReports = state.reports || {};
+    privateAiMarkers = state.private_markers || [];
+    document.querySelectorAll("[data-ai-report-id]").forEach(element => {
+      element.textContent = aiReportLabel(element.dataset.aiReportId);
+    });
+    label.hidden = !state.enabled;
+    const names = {waiting: "Listening", transcribing: "Transcribing speech", interpreting: "Interpreting speech", publishing: "Adding markers", created: "Markers added", cancelled: "Marker cancelled", no_marker: "No map action", needs_clarification: "Needs clarification", error: "Unavailable"};
+    label.textContent = `LOCAL AI · ${names[state.state] || state.state}${state.reason ? " · " + state.reason : ""}`;
+    label.title = state.model || "";
+  }).catch(() => {});
+}
+
 function renderTeam(team) {
+  refreshAiMarkerStatus();
   membershipSettings.update(team, localIdentityHash);
   currentTeamModules = Array.isArray(team.modules) ? team.modules : [];
   const previousEveryoneAdmin = currentEveryoneAdmin;
@@ -4167,7 +4225,7 @@ function renderMapMessages(events, containerId) {
   }
   container.classList.remove("hidden");
   container.innerHTML = latest.map((event) => {
-    const automaticReport = parseAutomaticReport(contactReportText(event));
+    const automaticReport = event.type === "ptt.broadcast" ? null : parseAutomaticReport(contactReportText(event));
     const contact = automaticReport?.type === "contact";
     const typeLabel = event.type === "ptt.broadcast" ? "VOICE" : automaticReport ? (automaticReport.action === "cancel-last" ? "MAP CANCEL" : "MAP REPORT") : "MESSAGE";
     return `
@@ -6133,7 +6191,7 @@ async function initializeWorkspace() {
     document.body.classList.add("all-teams-mode");
     $("roleLabel").textContent = "COMMAND";
     $("networkToggle").classList.add("hidden");
-    const {startAllTeamsView} = await import("./all-teams-view.js?v=20260907-4");
+    const {startAllTeamsView} = await import("./all-teams-view.js?v=20260908-3");
     await startAllTeamsView({mapStyle: mapStyleDefinition, initialStyle: mapStyleMode, saveStyle: saveMapStylePreference, onMapReady: (map, Popup) => intelPacks.attachMap(map, {Popup})});
     return;
   }
@@ -6151,6 +6209,12 @@ async function initializeWorkspace() {
   connectLiveStream();
 }
 initContinuitySettings({apiUrl, escapeHtml, toast});
-const membershipSettings = initMembershipSettings({apiUrl, escapeHtml, toast});
+const membershipSettings = initMembershipSettings({apiUrl, escapeHtml, toast, onChange: async () => { await refresh(); if (role === "field") await refreshFeed(); }});
 initializeWorkspace();
 setInterval(refresh, 15000);
+
+// Resolve asynchronous landmarks into the currently displayed team immediately.
+onLandmarkResolved(() => {
+  if (operationalMap) void renderMap(commandEvents, {preserveView: true});
+  if (fieldMap) void renderFieldMap(fieldEvents, {preserveView: true});
+});

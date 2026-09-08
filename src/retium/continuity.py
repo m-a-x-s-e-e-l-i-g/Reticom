@@ -341,6 +341,7 @@ class TeamContinuity:
             for _ in range(8):
                 page = json_rpc(self.gateway.identity, peer["destination"], "/continuity/page", {**common, "table": name, "after": table.cursor(peer["destination"])}, public_key=peer["public_key"])
                 table.merge(peer["destination"], page, {h["destination"] for h in policy["policy"]["hosts"]})
+                self.gateway.enforce_membership()
                 heads[name] = page["cursor"]
                 if page["cursor"] == page["head"] or self.stop_event.is_set():
                     break

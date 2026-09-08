@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#101712">
   <title>Reticom</title>
+  <link rel="icon" href="/favicon.ico?v=20260908-1" sizes="any">
   <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css?v=6.6.0">
   <link rel="stylesheet" href="/styles.css?v=20260907-10">
-  <link rel="stylesheet" href="/intel-packs.css?v=20260908-2">
-  <link rel="stylesheet" href="/command-workspace.css?v=20260908-2">
+  <link rel="stylesheet" href="/intel-packs.css?v=20260908-6">
+  <link rel="stylesheet" href="/command-workspace.css?v=20260908-3">
 </head>
 <body>
   <div class="noise"></div>
@@ -231,8 +232,8 @@
     <div class="settings-head"><div><span class="eyebrow">TEAM ADMIN</span><h2 id="adminTeamName">Team controls</h2></div><button id="closeAdminSettings" class="text-button">CLOSE</button></div>
     <section class="admin-membership-entry">
       <span class="data-label">MEMBERSHIP</span>
-      <p>Review new devices before they can receive team intel or communications.</p>
-      <button type="button" class="secondary" data-open-membership>REVIEW &amp; APPROVE MEMBERS</button>
+      <p>Approve new devices, revoke access, or remove an operator and their history.</p>
+      <button type="button" class="secondary" data-open-membership>MANAGE OPERATORS</button>
     </section>
     <section class="admin-team-summary">
       <div><span class="data-label">JOIN CODE</span><code id="adminJoinCode">—</code></div>
@@ -347,6 +348,7 @@
           <button type="button" class="radial-close" data-close-map-radial aria-label="Close map actions"><span aria-hidden="true">×</span><small>CLOSE</small></button>
         </div>
         <div id="commandMapContextMenu" class="map-context-menu hidden" role="menu" aria-label="Command map actions">
+          <button type="button" data-command-position role="menuitem"><span class="context-menu-icon">◉</span><span>Set Command position here</span></button>
           <button type="button" data-quick-marker="casualty" role="menuitem"><span class="context-menu-icon">+</span><span>Report casualty</span></button>
           <button type="button" data-quick-marker="waypoint" role="menuitem"><span class="context-menu-icon">◇</span><span>Add waypoint</span></button>
           <button type="button" data-quick-marker="note" role="menuitem"><span class="context-menu-icon">▤</span><span>Add note</span></button>
@@ -382,6 +384,7 @@
           <div><h2>Transmit</h2></div>
           <span id="commandSenderBadge" class="command-sender">◉ COMMAND</span>
         </div>
+        <div id="commandAiStatus" class="delivery-state" hidden aria-live="polite"></div>
         <div class="command-comms-body">
           <div class="command-text-composer">
             <textarea id="commandMessage" maxlength="160" rows="2" placeholder="Message the team"></textarea>
@@ -572,6 +575,6 @@
   </nav>
 
   <div id="toast" class="toast"></div>
-  <script type="module" src="/app.js?v=20260908-5"></script>
+  <script type="module" src="/app.js?v=20260908-16"></script>
 </body>
 </html>

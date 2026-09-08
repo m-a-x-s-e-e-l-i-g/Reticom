@@ -415,3 +415,47 @@ def test_endpoints_work_without_any_team_or_rns(setup_store, tmp_path):
         assert response.json()["status"] == "fresh"
         assert client.get("/api/intel-packs/elevation/tiles/0/0/0.png").status_code == 404
         assert client.patch("/api/intel-packs/settings", json={"enabled": []}, headers={"origin": "https://evil.example"}).status_code == 403
+
+
+def test_firms_window_persists_and_caches_are_separate(tmp_path):
+    calls = []
+    def loader(pack, bounds, credentials, **options):
+        calls.append(options["firms_days"])
+        return collection()
+    store = IntelPackStore(tmp_path, loader=loader)
+    store.update({"enabled": ["firms"], "credentials": {"firms_key": "fixture-key"}})
+    for days in (3, 1, 7, 3):
+        store.update({"firms_days": days})
+        store.load("firms", BBOX, 14)
+    assert calls == [3, 1, 7]
+    store.update({"firms_days": 7})
+    assert IntelPackStore(tmp_path).catalogue()["settings"]["firms_days"] == 7
+    for bad in (True, 0, 2, 8, "7", None):
+        with pytest.raises(ValueError): store.update({"firms_days": bad})
+    assert store.firms_days == 7
+
+
+def test_cached_firms_detections_age_out_of_selected_window(tmp_path):
+    now = [1788868800]
+    def loader(*args, **kwargs):
+        return {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [4.85, 52.05]}, "properties": {"observed_at": "2026-09-07T12:30:00Z"}}]}
+    store = IntelPackStore(tmp_path, loader=loader, clock=lambda: now[0])
+    store.update({"enabled": ["firms"], "credentials": {"firms_key": "fixture-key"}, "firms_days": 1})
+    assert len(store.load("firms", (4.8, 52, 4.9, 52.1), 14)["features"]) == 1
+    now[0] += 3600
+    result = store.load("firms", (4.8, 52, 4.9, 52.1), 14)
+    assert result["status"] == "cached"
+    assert result["features"] == []
+
+
+def test_credential_previews_only_expose_four_suffix_characters(tmp_path):
+    store = IntelPackStore(tmp_path)
+    state = store.update({"credentials": {"firms_key": "private-prefix-abcd", "acled_token": "short", "aisstream_key": "private-vessel-wxyz"}})
+    assert state["credential_previews"] == {"firms_key": "••••••••abcd", "acled_token": "••••••••", "aisstream_key": "••••••••wxyz"}
+    assert "private-prefix" not in json.dumps(state)
+    assert "private-vessel" not in json.dumps(state)
+    assert "short" not in json.dumps(state)
+    assert IntelPackStore(tmp_path).catalogue()["credential_previews"] == state["credential_previews"]
+    state = store.update({"credentials": {"firms_key": ""}})
+    assert "firms_key" not in state["credential_previews"]
+    assert state["credentials"]["firms_key"] is False

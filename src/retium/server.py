@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -23,6 +24,7 @@ from .live_heading import HeadingClient, clock_ms, interval as heading_interval,
 from .offline_maps import OfflineMapError, OfflineMapStore
 from .offline_routing import offline_routing_router
 from .intel_packs import intel_router
+from .landmarks import landmark_router
 from .outbox import FieldOutbox
 from .protocol import ProtocolError, new_event
 from .ptt import PTT_MAX_BYTES, PTTError, PTTStore
@@ -36,6 +38,21 @@ from .user import UserProfile
 from .waypoints import WaypointArrivalDetector
 
 
+def local_membership_request(request: Request) -> bool:
+    """Recognize the explicitly configured localhost-only Docker port forward."""
+    origin = request.headers.get("origin")
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        return False
+    if origin and urlsplit(origin).netloc != request.url.netloc:
+        return False
+    if not request.client:
+        return False
+    if request.client.host in {"127.0.0.1", "::1"}:
+        return True
+    return (os.environ.get("RETICOM_LOCAL_PORT_FORWARD") == "1"
+            and request.url.hostname in {"localhost", "127.0.0.1", "::1"})
+
+
 def create_app(
     role: str,
     config_dir: Path,
@@ -45,7 +62,8 @@ def create_app(
     if role == "gateway":
         from .command import create_command_app
 
-        return create_command_app(config_dir, data_dir, create_node_app)
+        from functools import partial
+        return create_command_app(config_dir, data_dir, partial(create_node_app, command_ai=True))
     return create_node_app(role, config_dir, data_dir, gateway_hash)
 
 
@@ -54,7 +72,22 @@ def create_node_app(
     config_dir: Path,
     data_dir: Path,
     gateway_hash: str | None = None,
+    *, command_ai: bool = False,
 ) -> FastAPI:
+    from .speech_markers import SpeechMarkerProcessor, MAX_AGE
+    speech_ai = SpeechMarkerProcessor(data_dir / "speech-markers") if command_ai and os.getenv("RETICOM_AI_ENABLED", "1") != "0" else None
+    speech_ai_task = None
+    speech_ai_stopping = False
+    speech_ai_clips = {}
+    speech_ai_sources = {}
+    private_ai_dir = data_dir / "private-ai-markers"
+    private_ai_dir.mkdir(parents=True, exist_ok=True)
+    def private_ai_markers():
+        return [item for path in private_ai_dir.glob("*.json")
+                if (item := json.loads(path.read_text())).get("expires_at", 0) > time.time()]
+    command_position_path = data_dir / "command-position.json"
+    def command_position():
+        return json.loads(command_position_path.read_text()) if command_position_path.exists() else None
     service: GatewayReceiver | FieldSender | None = None
     hosted_service: GatewayReceiver | None = None
     store: EventStore | None = None
@@ -65,6 +98,7 @@ def create_node_app(
     user_profile: UserProfile | None = None
     ptt_store: PTTStore | None = None
     field_ptt_store: PTTStore | None = None
+    field_transcriber: LocalTranscriber | None = None
     transcriber: LocalTranscriber | None = None
     field_event_stores: dict[str, EventStore] = {}
     field_mission_lock = asyncio.Lock()
@@ -349,6 +383,10 @@ def create_node_app(
                 separators=(",", ":"),
             ).encode("utf-8")
 
+        def remove_operator_media(clip_id: str) -> None:
+            ptt_store.delete(clip_id)
+            transcriber.delete(clip_id)
+
         def save_and_transcribe(clip_id: str, audio: bytes, mime_type: str) -> None:
             assert ptt_store is not None and transcriber is not None
             ptt_store.save(clip_id, audio, mime_type)
@@ -357,7 +395,7 @@ def create_node_app(
         def transcription_response(clip_id: str, start: bool) -> dict[str, Any]:
             assert ptt_store is not None and transcriber is not None
             result = transcriber.status(clip_id)
-            if result["status"] == "unavailable" and start:
+            if result["status"] in {"unavailable", "error"} and start:
                 audio, mime_type = ptt_store.read(clip_id)
                 transcriber.schedule(clip_id, audio, mime_type)
                 return {"status": "processing", "clip_id": clip_id}
@@ -379,6 +417,7 @@ def create_node_app(
             event_callback=publish_from_reticulum,
             live_callback=publish_live_from_reticulum,
             private_store=private_store,
+            remove_operator_media=remove_operator_media,
             team_created_at=team_profile.created_at,
             everyone_admin=team_profile.everyone_admin,
         )
@@ -387,6 +426,7 @@ def create_node_app(
             local_identity = _load_or_create_identity(data_dir / "field.identity")
             if not gateway.membership.approved(local_identity.hash.hex()):
                 gateway.membership.decide(local_identity.hash.hex(), "approved", user_profile.callsign if user_profile else "Owner")
+        gateway.enforce_membership()
         # A newly approved replica must finish its initial data/audio sync before
         # it serves application requests. Replication endpoints remain available.
         if replication_root:
@@ -591,11 +631,103 @@ def create_node_app(
                     active_gateway().continuity.last_error = str(exc)
             await asyncio.sleep(3)
 
+    async def process_incoming_speech():
+        while not speech_ai_stopping:
+            try:
+                if role == "gateway":
+                    events = store.mission_events(since=team_profile.created_at) if store and team_profile and team_profile.name else []
+                elif team_membership and team_membership.joined:
+                    response = await feed()
+                    events = json.loads(response.body).get("events", [])
+                else:
+                    events = []
+                public_events = events
+                private_events = []
+                if events:
+                    try:
+                        private_events = json.loads((await private_messages()).body).get("messages", [])
+                    except (HTTPException, RuntimeError):
+                        pass
+                events = [*events, *private_events]
+                for source in sorted(events, key=lambda event: event["created_at"]):
+                    if speech_ai_stopping:
+                        return
+                    if source["type"] not in {"ptt.broadcast", "chat.message", "private.message", "private.ptt"} or source.get("automatic_report_dismissed"):
+                        continue
+                    if not 0 <= time.time() - source["created_at"] <= MAX_AGE:
+                        continue
+                    speech_ai_sources[source["id"]] = True
+                    if len(speech_ai_sources) > 200:
+                        speech_ai_sources.pop(next(iter(speech_ai_sources)))
+                    if source["type"] in {"ptt.broadcast", "private.ptt"}:
+                        speech_ai_clips[source["clip_id"]] = source["id"]
+                    saved = speech_ai.read(source["id"])
+                    if saved and (saved.get("state") in {"created", "cancelled", "no_marker", "needs_clarification"}
+                        or saved.get("state") == "error" and time.time() - saved["updated_at"] < 60):
+                        continue
+                    if source["type"] in {"chat.message", "private.message"}:
+                        transcript = {"status": "ready", "text": source["message"]}
+                    else:
+                        current_transcriber = transcriber if role == "gateway" or field_hosts_team() else field_transcriber
+                        if current_transcriber is None:
+                            continue
+                        transcript = current_transcriber.status(source["clip_id"])
+                        if transcript["status"] == "error" and saved and saved.get("state") == "transcribing":
+                            speech_ai.write(source, {"state": "error", "reason": transcript.get("error", "Transcription failed")})
+                            continue
+                        if transcript["status"] in {"unavailable", "error"}:
+                            recording = await read_audio(source["clip_id"])
+                            current_transcriber.schedule(source["clip_id"], recording.body, recording.media_type)
+                            speech_ai.write(source, {"state": "transcribing"})
+                            continue
+                        if transcript["status"] == "processing":
+                            continue
+                        if transcript["status"] == "no_speech":
+                            speech_ai.write(source, {"state": "no_marker", "reason": "No speech detected"})
+                            continue
+                        if transcript["status"] != "ready":
+                            continue
+                    is_private = source["type"].startswith("private.")
+                    participants = {source.get("recipient_hash"), source.get("network", {}).get("sender_hash")}
+                    peer = next((identity for identity in participants if identity != service.identity.hash.hex()), None)
+                    context_events = [*public_events]
+                    if is_private:
+                        context_events = [e for e in public_events if e["type"] == "position.updated"]
+                        context_events += [e for e in private_events if {e.get("recipient_hash"), e.get("network", {}).get("sender_hash")} == participants]
+                        context_events += [e for e in private_ai_markers() if e.get("private_peer") == peer]
+                    def publish_ai(event):
+                        if speech_ai_stopping:
+                            raise RuntimeError("Command is stopping")
+                        if is_private:
+                            if event["type"] == "marker.deleted":
+                                (private_ai_dir / (str(uuid.UUID(event["marker_id"])) + ".json")).unlink(missing_ok=True)
+                            else:
+                                atomic_json(private_ai_dir / (event["id"] + ".json"), {**event, "private_ai": True, "private_peer": peer,
+                                    "network": {"sender_hash": service.identity.hash.hex(), "verified": False, "received_at": int(time.time())}})
+                            return
+                        current_store = store if role == "gateway" or field_hosts_team() else field_event_store()
+                        current_events = current_store.mission_events() if current_store else []
+                        if not any(e["id"] == source["id"] and not e.get("automatic_report_dismissed") for e in current_events):
+                            raise RuntimeError("The source report was removed while AI was processing")
+                        if time.time() - source["created_at"] > MAX_AGE:
+                            raise RuntimeError("The source report is too old to map automatically")
+                        if role == "gateway":
+                            return service.publish_event(event)
+                        return publish_field_event_sync(event, linked=True)
+                    await asyncio.to_thread(speech_ai.process, source, transcript["text"], context_events,
+                        service.identity.hash.hex(), user_profile.callsign, publish_ai, command_position=command_position())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if speech_ai:
+                    speech_ai.status = {"state": "error", "model": speech_ai.interpreter.model, "reason": str(exc)}
+            await asyncio.sleep(5)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         nonlocal service, hosted_service, team_membership, user_profile, event_loop
-        nonlocal field_outbox, field_flush_task, field_ptt_store
-        nonlocal continuity_task, continuity_stopping
+        nonlocal field_outbox, field_flush_task, field_ptt_store, field_transcriber
+        nonlocal continuity_task, continuity_stopping, speech_ai_task, speech_ai_stopping
         event_loop = asyncio.get_running_loop()
         if role == "gateway":
             user_path = data_dir / "user.json"
@@ -609,6 +741,7 @@ def create_node_app(
             user_profile = UserProfile(data_dir / "user.json")
             field_outbox = FieldOutbox(data_dir / "field-outbox.sqlite3")
             field_ptt_store = PTTStore(data_dir / "field-ptt")
+            field_transcriber = LocalTranscriber(data_dir / "field-transcripts")
             hosted_dir = data_dir / "hosted"
             hosted_meta_path = hosted_dir / "gateway.json"
             if team_membership.joined and hosted_meta_path.exists():
@@ -633,7 +766,16 @@ def create_node_app(
                 live_callback=publish_live_from_reticulum,
             )
             continuity_task = asyncio.create_task(maintain_field_continuity())
+        if speech_ai:
+            speech_ai_task = asyncio.create_task(process_incoming_speech())
         yield
+        speech_ai_stopping = True
+        if speech_ai_task:
+            speech_ai_task.cancel()
+            try:
+                await speech_ai_task
+            except asyncio.CancelledError:
+                pass
         await public_intel.traffic.close()
         await offline_routes.downloads.close()
         await asyncio.to_thread(offline_routes.store.close)
@@ -650,6 +792,8 @@ def create_node_app(
             service.stop()
         if hosted_service is not None:
             hosted_service.stop()
+        if field_transcriber is not None:
+            field_transcriber.close()
         if transcriber is not None:
             transcriber.close()
         if task_store is not None:
@@ -666,15 +810,13 @@ def create_node_app(
     app = FastAPI(title="Reticom", version="0.1.0", lifespan=lifespan)
     public_intel = intel_router(data_dir)
     app.include_router(public_intel)
+    app.include_router(landmark_router())
     offline_routes = offline_routing_router(data_dir)
     app.include_router(offline_routes)
 
     def membership_owner(request: Request):
         # These are privileged local-device controls, not remote team-admin RPCs.
-        origin = request.headers.get("origin")
-        if (not request.client or request.client.host not in {"127.0.0.1", "::1"}
-            or request.headers.get("sec-fetch-site") == "cross-site"
-            or (origin and urlsplit(origin).netloc != request.url.netloc)):
+        if not local_membership_request(request):
             raise HTTPException(403, "Manage membership on the team owner's device")
         gateway = active_gateway()
         if gateway is None or not gateway.membership.owner or not team_profile or not team_profile.name:
@@ -683,10 +825,7 @@ def create_node_app(
 
     def field_membership_admin(request: Request) -> FieldSender:
         """Authorize a local Field UI to delegate a roster decision to its host."""
-        origin = request.headers.get("origin")
-        if (not request.client or request.client.host not in {"127.0.0.1", "::1"}
-            or request.headers.get("sec-fetch-site") == "cross-site"
-            or (origin and urlsplit(origin).netloc != request.url.netloc)):
+        if not local_membership_request(request):
             raise HTTPException(403, "Manage membership from the local Reticom app")
         if (
             role != "field" or not isinstance(service, FieldSender)
@@ -743,7 +882,15 @@ def create_node_app(
                 if owner_error.status_code != 403:
                     raise
                 sender = field_membership_admin(request)
-                state = await asyncio.to_thread(sender.request_membership_admin, body)
+                try:
+                    state = await asyncio.to_thread(sender.request_membership_admin, body)
+                except PermissionError as exc:
+                    detail = str(exc)
+                    if body.get("status") == "removed" and "Choose approve, reject or revoke" in detail:
+                        raise HTTPException(409, "The team host is running an older version that cannot remove operators. Update Reticom on the team owner's device, then retry removal.") from exc
+                    raise HTTPException(403, detail) from exc
+                except (RuntimeError, TimeoutError) as exc:
+                    raise HTTPException(503, str(exc)) from exc
                 return JSONResponse(state, headers={"Cache-Control": "no-store"})
             if isinstance(service, FieldSender) and body.get("identity") == service.identity.hash.hex():
                 raise ValueError("The hosting device cannot revoke itself")
@@ -1192,7 +1339,7 @@ def create_node_app(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/api/audio/{clip_id}")
-    async def audio(clip_id: str) -> Response:
+    async def read_audio(clip_id: str) -> Response:
         try:
             if role == "gateway":
                 if ptt_store is None:
@@ -1230,6 +1377,40 @@ def create_node_app(
         except (TimeoutError, PermissionError, ValueError) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    @app.get("/api/ai/markers")
+    async def ai_marker_status():
+        return {"enabled": speech_ai is not None, **(speech_ai.status if speech_ai else {"state": "disabled"}),
+                "private_markers": private_ai_markers() if speech_ai else [],
+                "reports": {source_id: speech_ai.read(source_id) for source_id in speech_ai_sources} if speech_ai else {}}
+
+    @app.post("/api/command/position")
+    async def set_command_position(request: Request):
+        if not command_ai or not local_membership_request(request):
+            raise HTTPException(403, "Command position must be set locally")
+        if service is None or user_profile is None:
+            raise HTTPException(503, "Command is not ready")
+        try:
+            body = await request.json()
+            if not isinstance(body, dict) or set(body) != {"lat", "lon"}:
+                raise ProtocolError("Provide latitude and longitude")
+            marker = new_event("marker.created", user_profile.callsign, marker_type="command-post",
+                               label="Command position", **body)
+            previous = command_position()
+            publish = service.publish_event if role == "gateway" else publish_field_event_sync
+            await asyncio.to_thread(publish, marker)
+            position = {"lat": marker["lat"], "lon": marker["lon"], "marker_id": marker["id"]}
+            atomic_json(command_position_path, position)
+            if previous and previous.get("marker_id"):
+                await asyncio.to_thread(publish, new_event("marker.deleted", user_profile.callsign, marker_id=previous["marker_id"]))
+            if speech_ai:
+                for source_id in speech_ai_sources:
+                    saved = speech_ai.read(source_id)
+                    if saved and saved.get("state") == "needs_clarification" and saved.get("reason") in {"No recent shared position for the referenced operator", "Set Command position on the map first"}:
+                        speech_ai.write({"id": source_id}, {**saved, "state": "pending"})
+            return position
+        except (ProtocolError, ValueError, TypeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/transcriptions/{clip_id}")
     async def transcription(
         clip_id: str,
@@ -1240,7 +1421,7 @@ def create_node_app(
                 if ptt_store is None or transcriber is None:
                     raise FileNotFoundError("transcription unavailable")
                 result = transcriber.status(clip_id)
-                if result["status"] == "unavailable" and start:
+                if result["status"] in {"unavailable", "error"} and start:
                     audio, mime_type = ptt_store.read(clip_id)
                     transcriber.schedule(clip_id, audio, mime_type)
                     result = {"status": "processing", "clip_id": clip_id}
@@ -1255,14 +1436,23 @@ def create_node_app(
                     if ptt_store is None or transcriber is None:
                         raise FileNotFoundError("transcription unavailable")
                     result = transcriber.status(clip_id)
-                    if result["status"] == "unavailable" and start:
+                    if result["status"] in {"unavailable", "error"} and start:
                         audio, mime_type = ptt_store.read(clip_id)
                         transcriber.schedule(clip_id, audio, mime_type)
                         result = {"status": "processing", "clip_id": clip_id}
                 else:
-                    result = await asyncio.to_thread(
-                        service.request_transcription, clip_id, start
-                    )
+                    if field_transcriber is None:
+                        raise FileNotFoundError("transcription unavailable")
+                    result = field_transcriber.status(clip_id)
+                    if result["status"] in {"unavailable", "error"} and start:
+                        # Use this device's engine even when the team owner is a phone.
+                        # The audio endpoint already implements local/outbound and
+                        # authenticated team-host audio retrieval.
+                        recording = await read_audio(clip_id)
+                        field_transcriber.schedule(clip_id, recording.body, recording.media_type)
+                        result = {"status": "processing", "clip_id": clip_id}
+            if speech_ai and clip_id in speech_ai_clips:
+                result = {**result, "interpretation": speech_ai.read(speech_ai_clips[clip_id])}
             return JSONResponse(result)
         except (FileNotFoundError, PTTError):
             raise HTTPException(status_code=404, detail="Voice clip not found")
@@ -1935,6 +2125,9 @@ def create_node_app(
                 delivery = await asyncio.to_thread(
                     publish_field_event_sync, event, linked=True
                 )
+            fixed = command_position() if command_ai else None
+            if kind == "marker" and fixed and fixed.get("marker_id") == map_event_id:
+                command_position_path.unlink(missing_ok=True)
             return JSONResponse({"event": event, "delivery": delivery})
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

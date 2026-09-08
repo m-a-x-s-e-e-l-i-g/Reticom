@@ -72,7 +72,7 @@ def test_all_application_rpcs_fail_closed_even_for_identified_or_historical_oper
     gateway = receiver(tmp_path)
     outsider = RNS.Identity()
     gateway.everyone_admin = True
-    for status in ("pending", "rejected", "revoked"):
+    for status in ("pending", "rejected", "revoked", "removed"):
         if status != "pending": gateway.membership.decide(outsider.hash.hex(), status, "Phone")
         response = json.loads(getattr(gateway, method)("/"+path, {}, b"x", b"l", outsider, 0))
         assert response["membership_status"] == status
@@ -191,3 +191,71 @@ def test_sending_an_event_requires_application_acknowledgment():
     sender.send_link_event = deny
     with pytest.raises(PermissionError):
         sender.send_event(new_event("chat.message", "Phone", message="Keep this queued"))
+
+
+def test_removal_is_signed_durable_hidden_and_cannot_requeue(tmp_path):
+    owner, member, backup = RNS.Identity(), RNS.Identity(), RNS.Identity()
+    access = Membership(tmp_path / "owner", owner)
+    key = member.hash.hex()
+    access.request(key, "Phone")
+    access.decide(key, "approved")
+    old = json.loads(json.dumps(access.envelope))
+    access.decide(key, "removed")
+    restored = Membership(tmp_path / "owner", owner)
+    assert restored.status(key) == "removed"
+    assert restored.request(key, "Phone")["status"] == "removed"
+    assert restored.listing()["members"] == []
+    assert restored.listing()["requests"] == []
+    replica = Membership(tmp_path / "backup", backup, access.root)
+    assert replica.accept(restored.envelope)
+    assert not replica.accept(old)
+    assert not replica.approved(key)
+    with pytest.raises(ValueError):
+        restored.decide(owner.hash.hex(), "removed")
+
+
+def test_removal_deletes_only_selected_operator_history_and_closes_links(tmp_path):
+    from retium.store import EventStore, PrivateMessageStore
+    from retium.replication import ReplicatedTable
+    from retium.mission import MissionPublisher
+    gateway = receiver(tmp_path)
+    member, other = RNS.Identity(), RNS.Identity()
+    key = member.hash.hex()
+    gateway.store = EventStore(tmp_path / "events.sqlite3")
+    gateway.private_store = PrivateMessageStore(tmp_path / "private.sqlite3")
+    replica = ReplicatedTable(gateway.store, "events", "event_id", "host")
+    event = new_event("chat.message", "Phone", message="Remove me")
+    kept = new_event("chat.message", "Other", message="Keep me")
+    gateway.store.insert(event, key)
+    gateway.store.insert(kept, other.hash.hex())
+    gateway.private_store.insert({**event, "type": "private.ptt", "recipient_hash": other.hash.hex(), "clip_id": "12345678-1234-1234-1234-123456789abc"}, key)
+    media_removed = []
+    gateway.remove_operator_media = media_removed.append
+    gateway.missions = MissionPublisher()
+    from retium.mission import MissionInbox
+    cache = EventStore(tmp_path / "cache.sqlite3")
+    inbox = MissionInbox(cache)
+    build = lambda: {"events": gateway.store.mission_events(), "tasks": [], "private_events": [], "team": {}}
+    inbox.accept(gateway.missions.page("viewer", inbox.request(), build))
+    assert any(e["id"] == event["id"] for e in cache.recent())
+    torn = []
+    gateway.destination = SimpleNamespace(links=[SimpleNamespace(get_remote_identity=lambda: member, teardown=lambda: torn.append(True))])
+    gateway.membership.decide(key, "removed", "Phone")
+    gateway.enforce_membership()
+    assert torn
+    assert [e["id"] for e in gateway.store.recent()] == [kept["id"]]
+    assert not gateway.private_store.recent(other.hash.hex())
+    assert media_removed == ["12345678-1234-1234-1234-123456789abc"]
+    assert [o["sender_hash"] for o in gateway.store.operators()] == [other.hash.hex()]
+    assert not gateway.missions.snapshots
+    inbox.accept(gateway.missions.page("viewer", inbox.request(), build))
+    assert [e["id"] for e in cache.recent()] == [kept["id"]]
+    cache.close()
+    gateway.missions.snapshots.clear()
+    assert any(row["key"] == event["id"] and row["payload"] is None for row in replica.page()["rows"])
+    assert not gateway.store.insert(event, key)  # A stale replay cannot resurrect deleted IDs.
+    gateway.missions.snapshots["fresh"] = "current"
+    gateway.enforce_membership()
+    assert gateway.missions.snapshots == {"fresh": "current"}
+    gateway.store.close()
+    gateway.private_store.close()

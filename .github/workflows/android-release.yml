@@ -94,7 +94,7 @@ jobs:
             exit 127
           fi
           yes | "$sdkmanager" --licenses >/dev/null || true
-          "$sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+          "$sdkmanager" "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Run browser logic tests
         run: node --test tests/*.test.mjs
@@ -228,4 +228,12 @@ jobs:
               --title "Reticom $VERSION" \
               --generate-notes
           fi
-          gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+          # Preserve already verified/signed release assets uploaded by the maintainer.
+          existing_assets="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          for asset in release/*; do
+            if printf '%s\n' "$existing_assets" | grep -Fxq "$(basename "$asset")"; then
+              echo "Preserving existing release asset: $(basename "$asset")"
+            else
+              gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+            fi
+          done

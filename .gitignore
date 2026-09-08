@@ -46,6 +46,7 @@ android/transport.properties
 android/.gradle/
 android/.idea/
 android/app/build/
+android/app/.cxx/
 android/build/
 build/
 dist/

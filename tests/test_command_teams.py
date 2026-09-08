@@ -183,6 +183,33 @@ def exercise(root):
         assert remote_state['team']['joined'] and not remote_state['team']['admin']
         assert remote_state['team']['destination'] == '11' * 16
         assert remote_state['user']['callsign'] == 'COMMAND'
+        # A joined Command team must transcribe with its own engine, not
+        # delegate inference to an Android host that may lack the engine.
+        import time
+        from types import SimpleNamespace
+        from retium.ptt import PTTStore
+        from retium.transcription import LocalTranscriber
+        from retium.transport import FieldSender
+        clip = '00112233-4455-6677-8899-aabbccddeeff'
+        PTTStore(data / 'teams' / remote_id / 'field-ptt').save(clip, b'voice', 'audio/webm')
+        original_model, original_remote = LocalTranscriber._get_model, FieldSender.request_transcription
+        def reject_remote(*args, **kwargs):
+            raise AssertionError('Command must not delegate transcription to the host')
+        LocalTranscriber._get_model = lambda self: SimpleNamespace(transcribe=lambda *args, **kwargs: (
+            [SimpleNamespace(text='Local engine result')], SimpleNamespace(language='en', language_probability=1)))
+        FieldSender.request_transcription = reject_remote
+        try:
+            url = f'/api/transcriptions/{clip}?team={remote_id}'
+            assert client.get(url + '&start=true').json()['status'] == 'processing'
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                transcript = client.get(url).json()
+                if transcript['status'] != 'processing': break
+                time.sleep(.01)
+            assert transcript['text'] == 'Local engine result', transcript
+        finally:
+            LocalTranscriber._get_model, FieldSender.request_transcription = original_model, original_remote
+
         assert client.post(f'/api/command/teams/{remote_id}/rename', json={'name': 'No'}).status_code == 409
         assert client.post(f'/api/command/teams/{remote_id}/remove', json={'confirm': True}).status_code == 200
         assert client.get('/api/state?team=' + remote_id).status_code == 409

@@ -104,12 +104,14 @@ class GatewayReceiver:
         private_store: PrivateMessageStore | None = None,
         team_created_at: int | None = None,
         everyone_admin: bool = False,
+        remove_operator_media: Callable[[str], Any] | None = None,
     ):
         self.data_dir = data_dir
         self.store = store
         self.event_callback = event_callback
         self.live_callback = live_callback
         self.private_store = private_store
+        self.remove_operator_media = remove_operator_media
         self.team_created_at = team_created_at
         self.team_name = team_name
         self.team_modules = sorted(team_modules or [])
@@ -532,6 +534,8 @@ class GatewayReceiver:
             return False
         if self.membership.approved(identity.hash.hex()):
             return True
+        if self.membership.status(identity.hash.hex()) == "removed":
+            return False
         # Explicitly approved replica hosts already hold the complete team data.
         return bool(continuity and continuity.directory.envelope and any(
             h["public_key"] == identity.get_public_key().hex() for h in continuity.directory.envelope["policy"]["hosts"]))
@@ -825,9 +829,25 @@ class GatewayReceiver:
 
     def enforce_membership(self):
         """End already-established subscriptions/transfers after a revocation."""
+        removed = self.membership.removed_identities()
+        changed = removed != getattr(self, "_enforced_removed", set())
+        for sender in removed:
+            results = [self.store.remove_operator(sender)]
+            if self.private_store is not None:
+                results.append(self.private_store.remove_operator(sender))
+            for result in results:
+                changed = bool(result["events"]) or changed
+                if getattr(self, "remove_operator_media", None):
+                    for clip_id in result["clip_ids"]:
+                        self.remove_operator_media(clip_id)
+        self._enforced_removed = removed
+        # Discard in-flight snapshots that still contain the deleted operator.
+        if changed and hasattr(self, "missions"):
+            with self.missions.lock:
+                self.missions.snapshots.clear()
         for link in list(self.destination.links):
             identity = link.get_remote_identity()
-            if identity is not None and self.membership.status(identity.hash.hex()) in {"revoked", "rejected"}:
+            if identity is not None and self.membership.status(identity.hash.hex()) in {"revoked", "rejected", "removed"}:
                 link.teardown()
 
     def _private_messages_request(
@@ -1612,7 +1632,7 @@ class FieldSender:
         with self._send_lock:
             response, _ = self._identified_request("/membership", {"callsign": callsign}, timeout=timeout, max_response_size=4096)
             result = self._json_response(response, "membership")
-            if result.get("identity") != self.identity.hash.hex() or result.get("status") not in {"pending", "approved", "rejected", "revoked"}:
+            if result.get("identity") != self.identity.hash.hex() or result.get("status") not in {"pending", "approved", "rejected", "revoked", "removed"}:
                 raise ValueError("Invalid membership status")
             self.membership_status = result["status"]
             return result

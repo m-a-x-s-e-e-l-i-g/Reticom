@@ -101,6 +101,9 @@ class IntelPackStore:
         credentials = stored.get("credentials", {})
         self.enabled = {key for key in enabled if isinstance(key, str) and key in CATALOGUE} if isinstance(enabled, list) else set()
         self.credentials = {key: value for key, value in credentials.items() if key in SECRET_FIELDS and isinstance(value, str)} if isinstance(credentials, dict) else {}
+        self.firms_days = stored.get("firms_days", 3)
+        if type(self.firms_days) is not int or self.firms_days not in (1, 3, 7):
+            self.firms_days = 3
         try:
             self.gdacs_types = validate_gdacs_types(stored.get("gdacs_types", list(DEFAULT_GDACS_TYPES)))
         except ValueError:
@@ -135,12 +138,14 @@ class IntelPackStore:
         with self.lock:
             return {
                 "packs": [{**pack, "enabled": key in self.enabled, "configured": self._configured(pack)} for key, pack in CATALOGUE.items()],
-                "settings": {"enabled": sorted(self.enabled), "gdacs_types": list(self.gdacs_types), "traffic_filters": self.traffic_filters},
+                "settings": {"enabled": sorted(self.enabled), "gdacs_types": list(self.gdacs_types), "traffic_filters": self.traffic_filters, "firms_days": self.firms_days},
                 "credentials": {key: bool(self.credentials.get(key)) for key in sorted(SECRET_FIELDS)},
+                "credential_previews": {key: ("••••••••" + value[-4:] if len(value) > 8 else "••••••••")
+                                        for key in sorted(SECRET_FIELDS) if (value := self.credentials.get(key))},
             }
 
     def update(self, body):
-        if not isinstance(body, dict) or set(body) - {"enabled", "credentials", "gdacs_types", "traffic_filters"}:
+        if not isinstance(body, dict) or set(body) - {"enabled", "credentials", "gdacs_types", "traffic_filters", "firms_days"}:
             raise ValueError("Use enabled packs, disaster filters and provider credentials only")
         with self.lock:
             enabled = body.get("enabled", sorted(self.enabled))
@@ -151,13 +156,19 @@ class IntelPackStore:
                 raise ValueError("Unknown provider credential")
             if any(not isinstance(value, str) or len(value) > 8192 or any(ord(char) < 32 for char in value) for value in supplied.values()):
                 raise ValueError("Enter a valid provider key or token")
+            firms_days = body.get("firms_days", self.firms_days)
+            if type(firms_days) is not int or firms_days not in (1, 3, 7):
+                raise ValueError("Choose 24 hours, 3 days or 7 days for NASA FIRMS")
             gdacs_types = validate_gdacs_types(body.get("gdacs_types", list(self.gdacs_types)))
             traffic_filters = validate_traffic_filters(body.get("traffic_filters", self.traffic_filters))
             credentials = {**self.credentials, **{key: value.strip() for key, value in supplied.items()}}
-            self._write(self.settings_path, {"enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "traffic_filters": traffic_filters})
+            self._write(self.settings_path, {"enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "traffic_filters": traffic_filters, "firms_days": firms_days})
             if gdacs_types != self.gdacs_types:
                 self.next_fetch = {key: until for key, until in self.next_fetch.items()
                                    if not (key == "gdacs" or isinstance(key, tuple) and key[0] == "gdacs")}
+            if firms_days != self.firms_days:
+                self.next_fetch.pop("firms", None)
+            self.firms_days = firms_days
             self.enabled, self.credentials = set(enabled), credentials
             self.gdacs_types = gdacs_types
             self.traffic_filters = traffic_filters
@@ -171,6 +182,8 @@ class IntelPackStore:
 
     def _credential_hash(self, pack_id):
         selected = {key: self.credentials.get(key, "") for key in CATALOGUE[pack_id].get("credential_fields", [])}
+        if pack_id == "firms":
+            selected.update(firms_days=self.firms_days, cache_version=2)
         if pack_id == "gdacs":
             selected.update(gdacs_types=self.gdacs_types, cache_version=GDACS_CACHE_VERSION)
         return hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest()
@@ -262,6 +275,10 @@ class IntelPackStore:
             if pack_id not in self.enabled or entry.get("credential_hash") != self._cache_hash(pack_id, bbox):
                 return self._empty(pack_id, "disabled")
             features = [feature for feature in entry["data"].get("features", []) if feature_intersects(feature, bbox)]
+            if pack_id == "firms":
+                cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.clock() - self.firms_days * 86400))
+                features = [feature for feature in features if
+                            (feature.get("properties", {}).get("observed_at") or cutoff) >= cutoff]
             if pack_id == "gdacs":
                 features = [feature for feature in features if
                             (feature.get("properties", {}).get("disaster_code") or feature.get("properties", {}).get("event_type")) in self.gdacs_types]
@@ -340,6 +357,7 @@ class IntelPackStore:
                 credential_hash = self._cache_hash(pack_id, bbox)
                 credentials = dict(self.credentials)
                 gdacs_types = self.gdacs_types
+                firms_days = self.firms_days
                 cached = self._cached(pack_id, bbox, credential_hash)
                 if cached and (cached.get("pinned") or self.clock() < cached["fetched_at"] + pack["ttl_seconds"]) and (cached["data"].get("coverage_complete", True) or cached.get("reuse_limited")):
                     return self._response(pack_id, cached, bbox, "cached")
@@ -363,6 +381,8 @@ class IntelPackStore:
                     return self._response(pack_id, cached, bbox, "stale", error) if cached else self._empty(pack_id, "error", error)
                 try:
                     options = {"gdacs_types": list(gdacs_types)} if pack_id == "gdacs" else {}
+                    if pack_id == "firms":
+                        options["firms_days"] = firms_days
                     data = self.loader(pack_id, fetch_bounds, credentials, **options)
                     if data.get("type") != "FeatureCollection" or not isinstance(data.get("features"), list):
                         raise ValueError("Invalid provider response")

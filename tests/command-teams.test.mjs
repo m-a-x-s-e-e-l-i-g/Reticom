@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {teamApiUrl, teamPageUrl} from '../src/retium/static/command-teams.js';
 
+test('Command position is scoped to the selected team, including when default is stopped', () => {
+  assert.equal(teamApiUrl('/api/command/position', 'http://localhost:8780/?team=alpha'),
+    'http://localhost:8780/api/command/position?team=alpha');
+});
+
 test('each tab scopes HTTP, audio, QR and websocket traffic to its selected team', () => {
   for (const path of ['/api/state', '/api/send', '/api/audio/clip', '/api/team/qr?v=1', 'ws://localhost:8780/api/voice/live', 'ws://localhost:8780/api/live']) {
     assert.equal(new URL(teamApiUrl(path, 'http://localhost:8780/?team=alpha')).searchParams.get('team'), 'alpha');
@@ -30,7 +35,7 @@ test('Command exposes code entry, real discovery and recoverable local removal',
   assert.ok(js.includes('if (commandDisplay()) renderJoinedCommand(fieldEvents)'));
   assert.ok(js.includes('IN WORKSPACE · SYNC ACTIVE'));
   assert.ok(js.includes('OPEN TEAM →'));
-  assert.ok(html.includes('REVIEW &amp; APPROVE MEMBERS'));
+  assert.ok(html.includes('MANAGE OPERATORS'));
   assert.ok(html.includes('With <em>Everyone is admin</em> enabled'));
   assert.ok(server.includes('request_membership_admin'));
 });

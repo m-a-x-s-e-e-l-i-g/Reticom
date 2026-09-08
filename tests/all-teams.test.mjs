@@ -41,9 +41,13 @@ test('automatic reports use only the reporting team positions and cancellations'
   assert.ok(point.geometry.coordinates[1] > 50 && point.geometry.coordinates[1] < 50.002);
   assert.equal(allTeamsModel([team('a', [report, position(50, 4)])], new Set(), now + 86400).features.features.filter((f) => f.properties.kind === 'automatic').length, 0);
 });
-test('cached speech transcripts also generate team-scoped map reports', () => {
+test('cached speech waits for a published AI marker instead of creating a regex marker', () => {
   const model = allTeamsModel([team('a', [event('clip', 'ptt.broadcast', {transcript: 'evac point here'}), position(50, 4)])], new Set(), now);
-  assert.ok(model.features.features.some((f) => f.properties.kind === 'automatic'));
+  assert.ok(!model.features.features.some((f) => f.properties.kind === 'automatic'));
+  const interpreted = allTeamsModel([team('a', [event('ai-marker', 'marker.created', {
+    source_report_id: 'clip', marker_type: 'evac-point', label: 'Evac point', lat: 50, lon: 4,
+  }), position(50, 4)])], new Set(), now);
+  assert.ok(interpreted.features.features.some((f) => f.properties.label === 'Evac point' && f.properties.teamId === 'a'));
 });
 test('invalid coordinates and inaccurate GPS do not create map positions', () => {
   const model = allTeamsModel([team('a', [position(500, 4), {...position(50, 4), accuracy: 500}])], new Set(), now);

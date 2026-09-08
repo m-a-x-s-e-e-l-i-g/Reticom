@@ -46,6 +46,15 @@ class EventStore:
                 "(sender_hash TEXT PRIMARY KEY, revision INTEGER NOT NULL)"
             )
 
+    def remove_operator(self, sender_hash: str) -> dict[str, Any]:
+        """Delete this operator's public history; replication journals deletions."""
+        from .membership import identity_hash
+        identity_hash(sender_hash)
+        with self._lock, self._connection:
+            rows = self._connection.execute("SELECT payload_json FROM events WHERE sender_hash=?", (sender_hash,)).fetchall()
+            count = self._connection.execute("DELETE FROM events WHERE sender_hash=?", (sender_hash,)).rowcount
+            return {"events": count, "clip_ids": [item["clip_id"] for row in rows if (item := json.loads(row[0])).get("clip_id")]}
+
     def next_navigation_revision(self, sender_hash: str) -> int:
         """Reserve a device-local sequence, surviving restarts and snapshot pruning."""
         from .navigation import MAX_REVISION
@@ -331,6 +340,8 @@ class EventStore:
             not in {"message.deleted", "marker.deleted", "drawing.deleted", "marker.status", "report.dismissed"}
             and item["id"] not in deleted
             and item["id"] not in deleted_map
+            and not (item["type"] == "marker.created" and type(item.get("expires_at")) is int
+                     and item["expires_at"] <= time.time())
             and (item["type"] not in NAVIGATION_TYPES
                  or navigation[item["network"]["sender_hash"]]["id"] == item["id"])
         ]
@@ -491,6 +502,18 @@ class PrivateMessageStore:
             }
             messages.append(event)
         return messages
+
+    def remove_operator(self, sender_hash: str) -> dict[str, Any]:
+        from .membership import identity_hash
+        identity_hash(sender_hash)
+        with self._lock, self._connection:
+            rows = self._connection.execute(
+                "SELECT payload_json FROM private_messages WHERE sender_hash=? OR recipient_hash=?", (sender_hash, sender_hash),
+            ).fetchall()
+            count = self._connection.execute(
+                "DELETE FROM private_messages WHERE sender_hash=? OR recipient_hash=?", (sender_hash, sender_hash),
+            ).rowcount
+            return {"events": count, "clip_ids": [item["clip_id"] for row in rows if (item := json.loads(row[0])).get("clip_id")]}
 
     def clip_visibility(self, clip_id: str, identity_hash: str) -> bool | None:
         """Return access for a private clip, or None when the clip is not private."""

@@ -141,7 +141,8 @@ def test_keyed_providers_are_not_silently_called_without_credentials(pack):
     assert not calls
 
 
-def test_firms_csv_dates_confidence_and_no_key_leaks():
+def test_firms_csv_dates_confidence_and_no_key_leaks(monkeypatch):
+    monkeypatch.setattr(source.time, "time", lambda: 1788868800)
     rows = b"latitude,longitude,acq_date,acq_time,confidence,satellite\n52.05,4.85,2026-09-06,0935,h,N20\n60,4.85,2026-09-06,0100,n,N20\n52.05,4.85,bad,0100,l,N20\n"
     calls = []
     result = source.load_pack("firms", AREA, {"firms_key": "ExampleSecret123"}, fetch=transport(rows, calls))
@@ -152,7 +153,7 @@ def test_firms_csv_dates_confidence_and_no_key_leaks():
     assert props["kind"] == "thermal_anomaly"
     assert "not a confirmed fire" in props["detail"]
     assert "ExampleSecret123" not in json.dumps(result)
-    assert calls[0][0].endswith("/VIIRS_NOAA20_NRT/4.800000,52.000000,4.900000,52.100000/3")
+    assert calls[0][0].endswith("/VIIRS_NOAA20_NRT/4.800000,52.000000,4.900000,52.100000/4/2026-09-05")
 
 
 def test_firms_bad_key_response_is_safe():
@@ -207,3 +208,19 @@ def test_transport_refuses_arbitrary_urls_before_network():
 def test_unknown_pack_rejected():
     with pytest.raises(source.ProviderError, match="Unknown"):
         source.load_pack("custom-url", AREA)
+
+
+@pytest.mark.parametrize("days,expected", [(1, 2), (3, 3), (7, 4)])
+def test_firms_rolling_windows_split_requests_and_deduplicate(monkeypatch, days, expected):
+    from datetime import datetime, timezone
+    monkeypatch.setattr(source.time, "time", lambda: datetime(2026, 9, 8, 12, tzinfo=timezone.utc).timestamp())
+    rows = b"latitude,longitude,acq_date,acq_time,confidence,satellite\n52.05,4.85,2026-09-08,1100,h,N20\n52.05,4.85,2026-09-07,1200,h,N20\n52.05,4.85,2026-09-07,1159,h,N20\n52.05,4.85,2026-09-02,1200,h,N20\n52.05,4.85,2026-09-01,1159,h,N20\n52.05,4.85,2026-09-08,1300,h,N20\n"
+    calls = []
+    result = source.load_pack("firms", AREA, {"firms_key": "ExampleSecret123"}, fetch=transport(rows, calls), firms_days=days)
+    assert len(result["features"]) == expected
+    assert result["firms_days"] == days
+    assert len(calls) == (2 if days == 7 else 1)
+    assert all(int(call[0].split("/")[-2]) <= 5 for call in calls)
+    if days == 7:
+        assert calls[0][0].endswith("/5/2026-09-01")
+        assert calls[1][0].endswith("/3/2026-09-06")

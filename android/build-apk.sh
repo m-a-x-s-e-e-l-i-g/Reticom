@@ -71,7 +71,7 @@ export PATH="$SDK_ROOT/platform-tools:$SDK_ROOT/cmdline-tools/latest/bin:$PATH"
 
 yes | "$SDK_MANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
 "$SDK_MANAGER" --sdk_root="$SDK_ROOT" \
-    'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+    'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.0.12077973' 'cmake;3.22.1'
 
 GRADLE_BIN="$GRADLE_ROOT/gradle-8.9/bin/gradle"
 if [ ! -x "$GRADLE_BIN" ]; then
@@ -107,5 +107,5 @@ fi
 APK_SOURCE="$SCRIPT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 APK_TARGET="$PROJECT_ROOT/Reticom-Field-${RETICOM_VERSION_NAME}-debug.apk"
 cp "$APK_SOURCE" "$APK_TARGET"
-sha256sum "$APK_TARGET" > "$APK_TARGET.sha256"
+(cd "$PROJECT_ROOT" && sha256sum "$(basename "$APK_TARGET")") > "$APK_TARGET.sha256"
 echo "APK: $APK_TARGET"

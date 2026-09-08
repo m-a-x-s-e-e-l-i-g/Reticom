@@ -1,3 +1,7 @@
+import java.io.File
+import java.security.MessageDigest
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("com.chaquo.python")
@@ -11,6 +15,35 @@ val unpackValhalla by tasks.registering(Sync::class) {
     into(layout.buildDirectory.dir("generated/valhalla"))
 }
 tasks.named("preBuild") { dependsOn(unpackValhalla) }
+
+// Build-time download only: recognition works offline after installation.
+val whisperAssets = layout.buildDirectory.dir("generated/whisperAssets")
+val prepareWhisperModel by tasks.registering {
+    val model = whisperAssets.map { it.file("whisper/ggml-base.bin") }
+    outputs.file(model)
+    doLast {
+        val output = model.get().asFile
+        val expected = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
+        fun digest(file: File): String {
+            val hash = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { stream ->
+                val buffer = ByteArray(65536)
+                while (true) { val count = stream.read(buffer); if (count < 0) break; hash.update(buffer, 0, count) }
+            }
+            return hash.digest().joinToString("") { "%02x".format(it) }
+        }
+        if (!output.isFile || digest(output) != expected) {
+            output.parentFile.mkdirs()
+            val staging = File(output.parentFile, "model.download")
+            URI("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin").toURL().openStream().use { input ->
+                staging.outputStream().use { input.copyTo(it) }
+            }
+            check(digest(staging) == expected) { "Whisper model checksum mismatch" }
+            check(staging.renameTo(output)) { "Cannot store verified Whisper model" }
+        }
+    }
+}
+tasks.named("preBuild") { dependsOn(prepareWhisperModel) }
 
 val reticomTransportHost = providers.gradleProperty("reticomTransportHost").orNull?.trim().orEmpty()
 val reticomTransportPort = providers.gradleProperty("reticomTransportPort").orNull?.toIntOrNull() ?: 4242
@@ -27,6 +60,10 @@ require(reticomVersionCode in 1..2_100_000_000) {
 android {
     namespace = "com.retium.field"
     compileSdk = 35
+    ndkVersion = "27.0.12077973"
+    externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt"); version = "3.22.1" } }
+    sourceSets.getByName("main").assets.srcDir(whisperAssets)
+    androidResources { noCompress += "bin" }
 
     defaultConfig {
         applicationId = "com.retium.field"
@@ -37,6 +74,7 @@ android {
         buildConfigField("String", "RETICOM_TRANSPORT_HOST", "\"${reticomTransportHost.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
         buildConfigField("int", "RETICOM_TRANSPORT_PORT", reticomTransportPort.toString())
 
+        externalNativeBuild { cmake { arguments += "-DCMAKE_BUILD_TYPE=Release" } }
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

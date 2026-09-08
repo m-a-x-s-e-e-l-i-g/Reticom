@@ -33,6 +33,7 @@ ANDROID_CONFIG = """[reticulum]
 
 def _prepare(home: Path, relay_host: str = "", relay_port: int = 4242) -> tuple[Path, Path]:
     os.environ["HOME"] = str(home)
+    os.environ["RETICOM_ANDROID"] = "1"
     root = home / "retium"
     config_dir = root / "config"
     data_dir = root / "data"

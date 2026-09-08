@@ -192,10 +192,10 @@ export function removeIntelLayers(map, id) {
 }
 
 export function createIntelPacks({button = null, panel = null, fetchImpl = globalThis.fetch?.bind(globalThis), getMapStyle = () => "hiking", setMapStyle = null, prepareContours = prepareContourTiles} = {}) {
-  let catalogue = {packs: [], credentials: {}}, enabled = new Set(), gdacsTypes = normalizeGdacsTypes(), saving = false, destroyed = false, catalogueGeneration = 0, notice = "";
+  let catalogue = {packs: [], credentials: {}}, enabled = new Set(), gdacsTypes = normalizeGdacsTypes(), firmsDays = 3, saving = false, destroyed = false, catalogueGeneration = 0, notice = "";
   let contourUrl = null, contourPending = null, contourFailed = false;
   let trafficFilters = normalizeTrafficFilters();
-  const maps = new Map(), results = new Map();
+  const maps = new Map(), results = new Map(), credentialDrafts = new Map(), trafficDrafts = new Map(), autosaveTimers = new Map();
   const listeners = [];
   const listen = (target, event, handler) => { target?.addEventListener(event, handler); listeners.push(() => target?.removeEventListener(event, handler)); };
   const packById = id => catalogue.packs.find(pack => pack.id === id);
@@ -268,11 +268,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   function buildPanel() {
     if (!panel) return;
     panel.setAttribute("aria-label", "Public intel packs");
-    panel.innerHTML = `<header class="intel-packs-head"><div><span class="intel-packs-eyebrow">MAP CONTEXT</span><h2>Intel packs</h2></div><button type="button" data-intel-close aria-label="Close intel packs">×</button></header><p class="intel-packs-intro">Optional public layers. Separate from your team's reports.</p><p class="intel-packs-privacy">Enabling a pack sends the viewed map area to its provider over the Internet. Choices and access keys stay on this device.</p><div class="intel-pack-list"></div><p class="intel-packs-notice" role="status" aria-live="polite"></p><details class="intel-source-access"><summary>Source access <span data-intel-access-summary></span></summary><form data-intel-access-form><p>NASA FIRMS needs a free map key. ACLED needs an account and an access token; tokens expire and may need replacing.</p>${Object.entries(ACCESS).map(([key, field]) => `<div class="intel-access-field"><label for="intel-${key}">${field.title} <small data-intel-credential="${key}"></small></label><input id="intel-${key}" name="${key}" type="password" autocomplete="off" spellcheck="false" maxlength="8192" placeholder="Paste ${key === "firms_key" ? "map key" : "access token"}"/><div><a href="${field.url}" target="_blank" rel="noopener noreferrer">${field.link} ↗</a><button type="button" data-intel-clear="${key}">Remove saved key</button></div></div>`).join("")}<button type="submit">Save source access</button><small>Saved values are never shown here or shared over Reticulum.</small></form></details><div class="intel-packs-actions"><button type="button" data-intel-refresh>Refresh this view</button></div><p class="intel-packs-footnote">Recently viewed data is cached locally, not included in offline map downloads. Public coverage and freshness vary. Never rely on these layers alone for safety or access.</p>`;
+    panel.innerHTML = `<header class="intel-packs-head"><div><span class="intel-packs-eyebrow">MAP CONTEXT</span><h2>Intel packs</h2></div><button type="button" data-intel-close aria-label="Close intel packs">×</button></header><p class="intel-packs-intro">Optional public layers. Separate from your team's reports.</p><p class="intel-packs-privacy">Enabling a pack sends the viewed map area to its provider over the Internet. Choices and access keys stay on this device.</p><div class="intel-pack-list"></div><p class="intel-packs-notice" role="status" aria-live="polite"></p><div class="intel-packs-actions"><button type="button" data-intel-refresh>Refresh this view</button></div><p class="intel-packs-footnote">Recently viewed data is cached locally, not included in offline map downloads. Public coverage and freshness vary. Never rely on these layers alone for safety or access.</p>`;
     panel.setAttribute("aria-label", "Map layers and intel packs");
-    panel.querySelector("#intel-aisstream_key").placeholder = "Paste AISStream API key";
     panel.querySelector(".intel-packs-footnote").textContent = "Public layers are cached locally, separate from offline maps. Traffic motion is estimated between reports, then pauses if updates stop. Live traffic stays in memory and expires without fresh reports. Coverage varies; never rely on these layers alone for safety or access.";
-    panel.querySelector("[data-intel-access-form] > p").textContent = "NASA FIRMS needs a map key; ACLED needs an access token. Boats & ships needs your own AISStream API key and permission for your use. Keys stay in this device’s local backend, never in team messages or map JavaScript.";
     panel.querySelector("h2").textContent = "Map layers";
     panel.querySelector(".intel-packs-intro").textContent = "Choose your map, terrain and public context.";
     panel.querySelector(".intel-pack-list").insertAdjacentHTML("beforebegin", `<section class="map-layer-options"><h3>Map & terrain</h3>${setMapStyle ? '<label class="map-style-select">Base map<select data-map-style aria-label="Base map"><option value="hiking">Hiking map</option><option value="satellite">Satellite</option></select></label><p>Trails are always shown as dashed lines. Mapped access and conditions can change.</p>' : ''}<div data-map-features></div></section><h3 class="intel-section-title">Intel packs</h3>`);
@@ -286,30 +284,42 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     listen(panel, "change", event => {
       const id = event.target?.dataset?.intelPack;
       if (id) void setEnabled(id, event.target.checked);
+      if (event.target?.matches?.("[data-firms-days]")) void setFirmsDays(Number(event.target.value));
       const type = event.target?.dataset?.gdacsType;
       if (type) void setGdacsTypes(event.target.checked ? [...gdacsTypes, type] : gdacsTypes.filter(id => id !== type));
     });
     listen(panel.querySelector("[data-intel-refresh]"), "click", () => void refresh());
-    listen(panel, "submit", event => {
-      const id = event.target?.dataset?.trafficForm;
-      if (!TRAFFIC_IDS.includes(id)) return;
-      event.preventDefault();
-      const form = event.target;
-      void setTrafficFilters(id, {affiliation: form.elements.affiliation.value, type: form.elements.type.value, query: form.elements.query.value});
-    });
-    listen(panel.querySelector("[data-intel-access-form]"), "submit", event => {
-      event.preventDefault();
-      const credentials = {};
-      for (const key of Object.keys(ACCESS)) {
-        const input = panel.querySelector(`[name="${key}"]`);
-        if (input.value.trim()) credentials[key] = input.value.trim();
+    const saveField = (target, delay) => {
+      const key = target?.name;
+      if (ACCESS[key]) {
+        const value = target.value;
+        credentialDrafts.set(key, value);
+        scheduleAutosave(`credential:${key}`, () => updateCredentials({[key]: value.trim()}), delay);
       }
-      if (!Object.keys(credentials).length) { notice = "Paste a map key or access token first."; renderStatus(); return; }
-      void updateCredentials(credentials).then(ok => { if (ok) for (const key of Object.keys(credentials)) panel.querySelector(`[name="${key}"]`).value = ""; });
+      const form = target?.closest?.("[data-traffic-form]");
+      const id = form?.dataset?.trafficForm;
+      if (TRAFFIC_IDS.includes(id)) {
+        const value = {affiliation: form.elements.affiliation.value, type: form.elements.type.value, query: form.elements.query.value};
+        trafficDrafts.set(id, value);
+        scheduleAutosave(`traffic:${id}`, async () => {
+          const saved = await setTrafficFilters(id, value);
+          if (saved && trafficDrafts.get(id) === value) trafficDrafts.delete(id);
+        }, delay);
+      }
+    };
+    listen(panel, "input", event => saveField(event.target, 500));
+    listen(panel, "change", event => saveField(event.target, 0));
+    listen(panel, "submit", event => {
+      if (!event.target?.matches?.("[data-traffic-form], [data-intel-access-form]")) return;
+      event.preventDefault();
+      saveField(event.target.querySelector("input"), 0);
     });
     listen(panel, "click", event => {
       const key = event.target?.closest?.("[data-intel-clear]")?.dataset?.intelClear;
-      if (ACCESS[key]) void updateCredentials({[key]: ""});
+      if (ACCESS[key]) {
+        credentialDrafts.set(key, "");
+        scheduleAutosave(`credential:${key}`, () => updateCredentials({[key]: ""}), 0);
+      }
       const selection = event.target?.closest?.("[data-gdacs-select]")?.dataset?.gdacsSelect;
       if (selection) void setGdacsTypes(selection === "all" ? disasterTypes().map(type => type.id) : []);
       const download = event.target?.closest?.("[data-intel-download]")?.dataset?.intelDownload;
@@ -317,14 +327,35 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     });
   }
 
+  // Coalesce typing and defer saves while another setting is being persisted.
+  function scheduleAutosave(key, action, delay) {
+    clearTimeout(autosaveTimers.get(key));
+    const run = () => {
+      if (destroyed) return;
+      if (saving) { autosaveTimers.set(key, setTimeout(run, 50)); return; }
+      autosaveTimers.delete(key);
+      void action();
+    };
+    autosaveTimers.set(key, setTimeout(run, delay));
+  }
+
   function renderCatalogue() {
+    const active = panel?.ownerDocument?.activeElement;
+    const focusedTraffic = active?.closest?.("[data-traffic-form]")?.dataset?.trafficForm;
+    const focusedName = active?.name;
+    const selectionStart = active?.selectionStart, selectionEnd = active?.selectionEnd;
+    const focusedCredential = active?.name;
     const focusedPack = panel?.ownerDocument?.activeElement?.dataset?.intelPack;
     const focusedType = panel?.ownerDocument?.activeElement?.dataset?.gdacsType;
     const filtersOpen = Boolean(panel?.querySelector(".intel-disaster-filter")?.open);
+    const accessOpen = Object.keys(ACCESS).filter(key => panel?.querySelector(`[data-intel-access="${key}"]`)?.open);
     const trafficOpen = TRAFFIC_IDS.filter(id => panel?.querySelector(`[data-traffic-filter="${id}"]`)?.open);
     if (panel) panel.querySelector(".intel-pack-list").innerHTML = currentPacks().map(pack => `<section class="intel-pack-row" data-pack-row="${escape(pack.id)}"><label class="intel-pack-switch"><span><strong>${escape(pack.title)}</strong><small>${escape(pack.description)}</small></span><input type="checkbox" role="switch" data-intel-pack="${escape(pack.id)}" aria-describedby="intel-status-${escape(pack.id)}" ${pack.enabled ? "checked" : ""}/><i aria-hidden="true"></i></label><div class="intel-pack-meta"><span id="intel-status-${escape(pack.id)}" data-intel-status="${escape(pack.id)}"></span>${safeLink(pack.source_url) ? `<a href="${escape(safeLink(pack.source_url))}" target="_blank" rel="noopener noreferrer">${escape(pack.source || "Source")} ↗</a>` : ""}</div><p class="intel-pack-note" data-intel-note="${escape(pack.id)}"></p>${pack.offline_downloadable ? `<button type="button" class="intel-pack-download" data-intel-download="${escape(pack.id)}">SAVE THIS VIEW OFFLINE</button><small class="intel-pack-download-note">Keeps this visible map area on this device without an expiry.</small>` : ""}</section>`).join("");
+    panel?.querySelector('[data-pack-row="firms"]')?.insertAdjacentHTML("beforeend", `<label class="intel-firms-window">Detection window<select data-firms-days aria-label="NASA FIRMS detection window">${[[1, "24 hours"], [3, "3 days"], [7, "7 days"]].map(([days, label]) => `<option value="${days}" ${days === firmsDays ? "selected" : ""}>${label}</option>`).join("")}</select></label>`);
     const gdacsRow = panel?.querySelector('[data-pack-row="gdacs"]');
-    panel?.querySelector('[data-pack-row="firms"]')?.insertAdjacentHTML("beforeend", `<a class="intel-pack-key-link" href="${ACCESS.firms_key.url}" target="_blank" rel="noopener noreferrer">${ACCESS.firms_key.link} ↗</a>`);
+    for (const [key, field] of Object.entries(ACCESS)) {
+      panel?.querySelector(`[data-pack-row="${field.pack}"]`)?.insertAdjacentHTML("beforeend", `<details class="intel-access-section" data-intel-access="${key}" ${accessOpen.includes(key) ? "open" : ""}><summary>${field.title}</summary><form class="intel-access-field" data-intel-access-form="${key}"><label for="intel-${key}">${field.title}</label><div class="intel-access-input"><input id="intel-${key}" name="${key}" type="password" autocomplete="off" spellcheck="false" maxlength="8192" value="${escape(credentialDrafts.get(key) || "")}" placeholder="Paste ${escape(field.title)}"/></div><div class="intel-access-links"><a href="${field.url}" target="_blank" rel="noopener noreferrer">${field.link} ↗</a><button type="button" data-intel-clear="${key}">Remove saved key</button></div></form></details>`);
+    }
     const mapFeatures = panel?.querySelector("[data-map-features]");
     if (mapFeatures) {
       mapFeatures.replaceChildren();
@@ -335,16 +366,21 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     }
     if (gdacsRow) gdacsRow.insertAdjacentHTML("beforeend", `<details class="intel-disaster-filter" ${filtersOpen ? "open" : ""}><summary>Disaster types <span data-gdacs-summary></span></summary><div class="intel-disaster-actions"><button type="button" data-gdacs-select="all">All</button><button type="button" data-gdacs-select="none">None</button></div><div class="intel-disaster-grid">${disasterTypes().map(type => `<label><input type="checkbox" data-gdacs-type="${escape(type.id)}"/>${gdacsIconSvg(type.id)}<span>${escape(type.label)}</span></label>`).join("")}</div><p>Icon shows the disaster type. Color shows the GDACS alert level, not whether an area is safe.</p></details>`);
     for (const id of TRAFFIC_IDS) {
-      const selected = trafficFilters[id];
+      const selected = trafficDrafts.get(id) || trafficFilters[id];
       const options = (items, value) => Object.entries(items).map(([key, label]) => `<option value="${key}" ${key === value ? "selected" : ""}>${escape(label)}</option>`).join("");
-      panel?.querySelector(`[data-pack-row="${id}"]`)?.insertAdjacentHTML("beforeend", `<details class="intel-traffic-filter" data-traffic-filter="${id}" ${trafficOpen.includes(id) ? "open" : ""}><summary>Filters · classification & type</summary><form data-traffic-form="${id}"><label>Classification<select name="affiliation">${options({all:"All classifications",military:id === "flights" ? "Military (provider flag)" : "Military / restricted (AIS 35)", commercial:id === "flights" ? "Commercial / airline (estimated)" : "Commercial (AIS type)",unknown:"Other / unknown ownership"},selected.affiliation)}</select></label><label>Type<select name="type">${options({all:"All types",...TRAFFIC_TYPES[id]},selected.type)}</select></label><label>${id === "flights" ? "Callsign, registration or model" : "Vessel name, callsign or MMSI"}<input name="query" type="search" maxlength="64" value="${escape(selected.query)}" placeholder="Search received traffic"/></label><button type="submit">Apply filters</button><p>${id === "flights" ? "Commercial is an estimate from callsign and aircraft category, not confirmed ownership. Missing military flags do not prove civilian status." : "AIS type is self-reported and can arrive after a position. Type 35 includes military and other restricted operations. Unknown vessels stay separate."}</p></form></details>`);
+      panel?.querySelector(`[data-pack-row="${id}"]`)?.insertAdjacentHTML("beforeend", `<details class="intel-traffic-filter" data-traffic-filter="${id}" ${trafficOpen.includes(id) ? "open" : ""}><summary>Filters · classification & type</summary><form data-traffic-form="${id}"><label>Classification<select name="affiliation">${options({all:"All classifications",military:id === "flights" ? "Military (provider flag)" : "Military / restricted (AIS 35)", commercial:id === "flights" ? "Commercial / airline (estimated)" : "Commercial (AIS type)",unknown:"Other / unknown ownership"},selected.affiliation)}</select></label><label>Type<select name="type">${options({all:"All types",...TRAFFIC_TYPES[id]},selected.type)}</select></label><label>${id === "flights" ? "Callsign, registration or model" : "Vessel name, callsign or MMSI"}<input name="query" type="search" maxlength="64" value="${escape(selected.query)}" placeholder="Search received traffic"/></label><p>${id === "flights" ? "Commercial is an estimate from callsign and aircraft category, not confirmed ownership. Missing military flags do not prove civilian status." : "AIS type is self-reported and can arrive after a position. Type 35 includes military and other restricted operations. Unknown vessels stay separate."}</p></form></details>`);
     }
     renderStatus();
+    const restore = focusedTraffic ? panel?.querySelector(`[data-traffic-form="${focusedTraffic}"] [name="${focusedName}"]`) : ACCESS[focusedCredential] ? panel?.querySelector(`[name="${focusedCredential}"]`) : null;
+    restore?.focus();
+    if (restore && selectionStart != null) restore.setSelectionRange(selectionStart, selectionEnd);
     if (focusedPack && IDS.includes(focusedPack)) panel.querySelector(`[data-intel-pack="${focusedPack}"]`)?.focus();
     if (focusedType && GDACS_TYPES.some(type => type.id === focusedType)) panel.querySelector(`[data-gdacs-type="${focusedType}"]`)?.focus();
   }
 
   function renderStatus() {
+    const windowSelect = panel?.querySelector("[data-firms-days]");
+    if (windowSelect) { windowSelect.value = String(firmsDays); windowSelect.disabled = saving; }
     const count = enabled.size;
     if (button) {
       button.classList.add("intel-packs-toggle");
@@ -359,7 +395,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     if (typeSummary) typeSummary.textContent = gdacsTypes.length === disasterTypes().length ? "All" : gdacsTypes.length ? `${gdacsTypes.length} of ${disasterTypes().length}` : "None";
     for (const input of panel.querySelectorAll("[data-gdacs-type]")) { input.checked = gdacsTypes.includes(input.dataset.gdacsType); input.disabled = saving; }
     for (const control of panel.querySelectorAll("[data-gdacs-select]")) control.disabled = saving;
-    for (const control of panel.querySelectorAll("[data-traffic-form] button, [data-traffic-form] select, [data-traffic-form] input")) control.disabled = saving;
+    for (const control of panel.querySelectorAll("[data-traffic-form] button, [data-traffic-form] select, [data-traffic-form] input")) control.disabled = false;
     for (const pack of currentPacks()) {
       const state = results.get(pack.id);
       const input = panel.querySelector(`[data-intel-pack="${pack.id}"]`);
@@ -370,12 +406,17 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (note) note.textContent = "";
     }
     panel.querySelector(".intel-packs-notice").textContent = notice;
-    for (const key of Object.keys(ACCESS)) {
+    for (const [key, field] of Object.entries(ACCESS)) {
       const configured = Boolean(catalogue.credentials?.[key]);
-      panel.querySelector(`[data-intel-credential="${key}"]`).textContent = configured ? "Saved" : "Not set";
-      panel.querySelector(`[data-intel-clear="${key}"]`).hidden = !configured;
+      const input = panel.querySelector(`[name="${key}"]`);
+      if (input) {
+        input.placeholder = configured ? catalogue.credential_previews?.[key] || "••••••••" : `Paste ${field.title}`;
+        input.title = configured ? "Saved key · enter a new key to replace it" : field.title;
+        input.disabled = false;
+      }
+      const remove = panel.querySelector(`[data-intel-clear="${key}"]`);
+      if (remove) remove.hidden = !configured;
     }
-    panel.querySelector("[data-intel-access-summary]").textContent = currentPacks().some(pack => pack.enabled && pack.configured === false) ? "Setup needed" : "";
     for (const element of panel.querySelectorAll("[data-intel-access-form] button")) element.disabled = saving;
   }
 
@@ -393,6 +434,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     enabled = new Set([...enabled].filter(id => IDS.includes(id)));
     gdacsTypes = normalizeGdacsTypes(value.settings?.gdacs_types, disasterTypes());
     trafficFilters = normalizeTrafficFilters(value.settings?.traffic_filters);
+    firmsDays = [1, 3, 7].includes(value.settings?.firms_days) ? value.settings.firms_days : 3;
     renderCatalogue();
     for (const context of maps.values()) { syncLayers(context); schedule(context, 0); }
   }
@@ -425,6 +467,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       const value = await request("/api/intel-packs/settings", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
       if (destroyed) return false;
       notice = body.credentials ? "Source access saved on this device." : "";
+      if (body.credentials) for (const key of Object.keys(body.credentials)) {
+        if (credentialDrafts.get(key)?.trim() === body.credentials[key]) credentialDrafts.delete(key);
+      }
       results.clear();
       applyCatalogue(value);
       return true;
@@ -441,7 +486,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     renderStatus();
     const saved = await save({enabled: [...enabled]});
     if (!saved) { enabled = previous; for (const context of maps.values()) { syncLayers(context); schedule(context, 0); } renderStatus(); }
-    else if (value && packById(id)?.configured === false && panel) panel.querySelector(".intel-source-access").open = true;
+    else if (value && packById(id)?.configured === false && panel) panel.querySelector(`[data-pack-row="${id}"] input[type="password"]`)?.focus();
     if (restoreFocus) panel.querySelector(`[data-intel-pack="${id}"]`)?.focus();
     return saved;
   }
@@ -471,6 +516,27 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     finally { renderStatus(); }
   }
 
+  async function setFirmsDays(value) {
+    if (![1, 3, 7].includes(value) || saving || destroyed) return false;
+    const previous = firmsDays;
+    firmsDays = value;
+    results.delete("firms");
+    for (const context of maps.values()) {
+      invalidate(context, "firms");
+      context.data.delete("firms");
+      context.popup?.remove();
+      syncLayers(context);
+    }
+    const saved = await save({firms_days: value});
+    if (!saved) {
+      firmsDays = previous;
+      for (const context of maps.values()) schedule(context, 0);
+      renderStatus();
+    }
+    panel?.querySelector("[data-firms-days]")?.focus();
+    return saved;
+  }
+
   async function setGdacsTypes(value) {
     if (!packById("gdacs") || !Array.isArray(value) || saving || destroyed) return false;
     const previous = gdacsTypes;
@@ -496,7 +562,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     for (const context of maps.values()) { context.popup?.remove(); syncLayers(context); }
     const saved = await save({traffic_filters: trafficFilters});
     if (!saved) { trafficFilters = previous; for (const context of maps.values()) syncLayers(context); renderCatalogue(); }
-    panel?.querySelector(`[data-traffic-form="${id}"] button`)?.focus();
     return saved;
   }
 
@@ -774,8 +839,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     trafficAnimator.start();
   });
   const ready = refresh();
-  return {ready, attachMap, refresh, setEnabled, setGdacsTypes, setTrafficFilters, updateCredentials, getState: () => ({packs: currentPacks(), settings: {gdacs_types: [...gdacsTypes], traffic_filters: trafficFilters}, results: Object.fromEntries(results)}), destroy() {
+  return {ready, attachMap, refresh, setEnabled, setFirmsDays, setGdacsTypes, setTrafficFilters, updateCredentials, getState: () => ({packs: currentPacks(), settings: {firms_days: firmsDays, gdacs_types: [...gdacsTypes], traffic_filters: trafficFilters}, results: Object.fromEntries(results)}), destroy() {
     destroyed = true; ++catalogueGeneration; clearInterval(interval); clearInterval(trafficInterval);
+    for (const timer of autosaveTimers.values()) clearTimeout(timer);
     trafficAnimator.destroy();
     for (const context of maps.values()) { if (hasParsedStyle(context)) for (const id of IDS) removeIntelLayers(context.map, id); detachMap(context.map); }
     for (const cleanup of listeners) cleanup();

@@ -12,6 +12,7 @@ datas = [(str(static_dir), "retium/static")]
 datas += [(str(project_root / "src/retium/routing-defaults.json"), "retium")]
 datas += [(str(project_root / "src/retium/routing-catalogue.json"), "retium")]
 datas += collect_data_files("webview")
+datas += collect_data_files("faster_whisper")
 datas += copy_metadata("pywebview")
 # RNS discovers interface names by globbing its package directory at runtime.
 # Preserve those small source files so the same discovery works when frozen.
@@ -22,6 +23,7 @@ datas += collect_data_files(
 )
 
 hiddenimports = collect_submodules("RNS.Interfaces")
+hiddenimports += collect_submodules("faster_whisper")
 hiddenimports += [
     "RNS.Interfaces.AutoInterface",
     "RNS.Interfaces.AX25KISSInterface",
@@ -62,8 +64,6 @@ a = Analysis(
         "PySide2",
         "PySide6",
         "cefpython3",
-        "faster_whisper",
-        "onnxruntime",
         "torch",
     ],
     noarchive=False,
@@ -88,6 +88,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(generated_dir / "reticom.ico"),
+    icon=str(static_dir / "favicon.ico"),
     version=str(generated_dir / "version-info.txt"),
 )

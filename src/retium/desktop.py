@@ -226,7 +226,10 @@ def run(smoke_test: bool = False, window_smoke_test: bool = False) -> int:
                 threading.Timer(2, window.destroy).start()
 
             window.events.loaded += close_test_window
-        webview.start(gui="edgechromium", debug=False, private_mode=False)
+        webview.start(
+            gui="edgechromium", debug=False, private_mode=False,
+            icon=str(Path(__file__).with_name("static") / "favicon.ico"),
+        )
         return 0
     except Exception as exc:
         logging.exception("Reticom Command failed")

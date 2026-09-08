@@ -353,11 +353,12 @@ test("UI keeps readable sources, blank password inputs and 44px mobile controls"
   assert.match(css, /prefers-reduced-motion: reduce/);
 });
 
-test("NASA FIRMS exposes the official map-key link directly on its layer", () => {
+test("provider key forms live in their own layer and use masked placeholders", () => {
   const js = readFileSync(new URL("../src/retium/static/intel-packs.js", import.meta.url), "utf8");
-  assert.match(js, /url: "https:\/\/firms\.modaps\.eosdis\.nasa\.gov\/api\/map_key\/", link: "Get a NASA FIRMS map key"/);
-  assert.match(js, /querySelector\('\[data-pack-row="firms"\]'\)\?\.insertAdjacentHTML/);
-  assert.match(js, /class="intel-pack-key-link" href="\$\{ACCESS\.firms_key\.url\}" target="_blank" rel="noopener noreferrer"/);
+  assert.match(js, /data-pack-row="\$\{field.pack\}"/);
+  assert.match(js, /data-intel-access-form="\$\{key\}"/);
+  assert.match(js, /input.placeholder = configured \? catalogue.credential_previews/);
+  assert.doesNotMatch(js, /<details class="intel-source-access">/);
 });
 
 test("military areas expose a durable current-view download control", () => {
@@ -365,4 +366,23 @@ test("military areas expose a durable current-view download control", () => {
   assert.match(source, /data-intel-download/);
   assert.match(source, /SAVE THIS VIEW OFFLINE/);
   assert.match(source, /\/api\/intel-packs\/\$\{encodeURIComponent\(id\)\}\/download/);
+});
+
+
+test("FIRMS window changes persist and reject unsupported ranges", async () => {
+  let days = 3;
+  const changes = [];
+  const controller = createIntelPacks({fetchImpl: async (url, options) => {
+    if (options.method === "PATCH") { days = JSON.parse(options.body).firms_days; changes.push(days); }
+    return response({...catalogue([pack("firms")]), settings: {enabled: ["firms"], firms_days: days}});
+  }});
+  try {
+    await controller.ready;
+    for (const value of [1, 7, 3]) {
+      assert.equal(await controller.setFirmsDays(value), true);
+      assert.equal(controller.getState().settings.firms_days, value);
+    }
+    assert.equal(await controller.setFirmsDays(2), false);
+    assert.deepEqual(changes, [1, 7, 3]);
+  } finally { controller.destroy(); }
 });

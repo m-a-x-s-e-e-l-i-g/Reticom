@@ -50,9 +50,17 @@ def test_real_membership_queue_admission_and_revocation(tmp_path):
         later=api(host_port,"/api/send",{"type":"chat.message","message":"After revocation"})["event"]
         assert not any(e["id"]==later["id"] for e in api(phone_port,"/api/feed")["events"])
         eventually(lambda:api(phone_port,"/api/state")["team"]["membership_status"]=="revoked")
+        api(host_port,"/api/team/members",{"identity":key,"status":"removed"})
+        assert not any(m["identity"] == key for m in api(host_port,"/api/team/members")["members"])
+        state = api(host_port,"/api/state")
+        assert not any(o["sender_hash"] == key for o in state["operators"])
+        assert not any(e["network"]["sender_hash"] == key for e in state["events"])
+        assert any(e["id"] == secret["id"] for e in state["events"])
+        eventually(lambda:api(phone_port,"/api/state")["team"]["membership_status"]=="removed")
         host.terminate();host.wait(15);launch("host","gateway",host_port)
         eventually(lambda:api(host_port,"/api/health"))
-        assert next(m for m in api(host_port,"/api/team/members")["members"] if m["identity"]==key)["status"]=="revoked"
+        assert not any(m["identity"] == key for m in api(host_port,"/api/team/members")["members"])
+        assert not any(o["sender_hash"] == key for o in api(host_port,"/api/state")["operators"])
         print("Verified real RNS denial, pending queue, owner approval, delivery, revocation and restart persistence.")
     finally:
         for process in processes:

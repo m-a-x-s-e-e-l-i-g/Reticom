@@ -2,7 +2,8 @@ import {displayPositionSeries, locationTime} from "./location-filter.js";
 import {drawingFeatures} from "./map-drawings.js?v=20260905-2";
 import {withDisplayWaypointLabels} from "./map-labels.js";
 import {tacticalMarker, reportProperties, REPORT_STATUS_LABELS} from "./marker-catalog.js?v=20260905-2";
-import {activeAutomaticReports, buildAutomaticReportFeatures, AUTOMATIC_REPORT_POSITION_MAX_AGE_SECONDS} from "./automatic-reports.js";
+import {activeAutomaticReports, buildAutomaticReportFeatures, automaticReportOrigin} from "./automatic-reports.js?v=20260908-3";
+import {resolveReportLandmark} from "./report-landmarks.js?v=20260908-2";
 import {latestNavigationPlans, sharedNavigationFeatures} from "./shared-navigation-model.js";
 
 const PALETTE = ["#899a78", "#8cabc0", "#b8a16d", "#a393af", "#79a59a", "#b59e91"];
@@ -129,10 +130,10 @@ export function allTeamsModel(teams, hidden = new Set(), now = Date.now() / 1000
         createdAt: event.created_at, message: event.type === "chat.message" ? event.message : event.transcript, event})), now);
     for (const item of automatic) {
       const {event, report} = item;
-      const candidates = positions.get(event.network?.sender_hash) || [];
-      const origin = [...candidates].reverse().find((fix) => fix.created_at <= event.created_at + 5);
-      if (!origin || event.created_at - origin.created_at > AUTOMATIC_REPORT_POSITION_MAX_AGE_SECONDS) continue;
+      const origin = automaticReportOrigin(report, event, positions);
+      if (!origin) continue;
       for (const feature of buildAutomaticReportFeatures(report, [origin.lon, origin.lat], {
+        landmarkLocation: resolveReportLandmark(report, [origin.lon, origin.lat]),
         id: event.id, callsign: event.callsign, senderHash: item.senderHash, createdAt: event.created_at, message: item.message, nowSeconds: now,
       })) add(feature.geometry, event, {...feature.properties, kind: "automatic", description: item.message});
     }

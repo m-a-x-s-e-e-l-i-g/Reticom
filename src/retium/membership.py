@@ -86,7 +86,7 @@ class Membership:
                 raise ValueError("Invalid membership revision or roster")
             for key, member in policy["members"].items():
                 identity_hash(key)
-                if not isinstance(member, dict) or set(member) != {"status", "callsign"} or member["status"] not in {"approved", "revoked", "rejected"}:
+                if not isinstance(member, dict) or set(member) != {"status", "callsign"} or member["status"] not in {"approved", "revoked", "rejected", "removed"}:
                     raise ValueError("Invalid member decision")
                 label(member["callsign"])
             if self.envelope:
@@ -129,8 +129,8 @@ class Membership:
         identity_hash(sender)
         if not self.owner:
             raise PermissionError("Only the original team owner can change membership")
-        if status not in {"approved", "rejected", "revoked"}:
-            raise ValueError("Choose approve, reject or revoke")
+        if status not in {"approved", "rejected", "revoked", "removed"}:
+            raise ValueError("Choose approve, reject, revoke or remove")
         if sender == self.identity.hash.hex():
             raise ValueError("The team owner cannot revoke itself")
         with self.lock:
@@ -139,15 +139,20 @@ class Membership:
             name = label(callsign or previous.get("callsign") or self.pending.get(sender, {}).get("callsign") or "Operator")
             if sender not in policy["members"] and len(policy["members"]) >= MAX_MEMBERS:
                 raise ValueError("Membership roster is full")
-            policy["members"][sender] = {"status": status, "callsign": name}
+            policy["members"][sender] = {"status": status, "callsign": "Removed operator" if status == "removed" else name}
             policy["revision"] += 1
             self._sign(policy)
             self.pending.pop(sender, None)
             self.write(self.pending_path, self.pending)
 
+    def removed_identities(self):
+        with self.lock:
+            members = self.envelope["policy"]["members"] if self.envelope else {}
+            return {key for key, value in members.items() if value["status"] == "removed"}
+
     def listing(self):
         with self.lock:
             members = self.envelope["policy"]["members"] if self.envelope else {}
             return {"owner": self.owner, "approval_required": True,
-                "members": [{"identity": key, **value} for key, value in members.items()],
+                "members": [{"identity": key, **value} for key, value in members.items() if value["status"] != "removed"],
                 "requests": [{"identity": key, **value} for key, value in self.pending.items() if key not in members]}

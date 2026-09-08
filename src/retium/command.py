@@ -228,6 +228,8 @@ def create_command_app(config_dir: Path, data_dir: Path, factory: Callable) -> F
     # Public layers belong to this device, not to a selected team's signed feed.
     public_intel = intel_router(data_dir)
     app.include_router(public_intel)
+    from .landmarks import landmark_router
+    app.include_router(landmark_router())
     offline_routes = offline_routing_router(data_dir)
     app.include_router(offline_routes)
     app.state.command_teams = teams

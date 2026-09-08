@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -36,6 +37,7 @@ class LocalTranscriber:
         self._model: Any = None
         self._model_lock = threading.Lock()
         self._state_lock = threading.Lock()
+        self._errors: dict[str, str] = {}
         self._pending: set[str] = set()
         self._suppressed: set[str] = set()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="retium-stt")
@@ -75,6 +77,9 @@ class LocalTranscriber:
             return cached
         with self._state_lock:
             pending = clip_id in self._pending
+            error = self._errors.get(clip_id)
+        if error and not pending:
+            return {"status": "error", "clip_id": clip_id, "error": error}
         return {"status": "processing" if pending else "unavailable", "clip_id": clip_id}
 
     def _get_model(self) -> Any:
@@ -83,9 +88,12 @@ class LocalTranscriber:
                 try:
                     factory = self._model_factory
                     if factory is None:
-                        from faster_whisper import WhisperModel
-
-                        factory = WhisperModel
+                        if os.environ.get("RETICOM_ANDROID") == "1":
+                            from .android_transcription import AndroidWhisperModel
+                            factory = AndroidWhisperModel
+                        else:
+                            from faster_whisper import WhisperModel
+                            factory = WhisperModel
                     self._model = factory(
                         self.model_name,
                         device="cpu",
@@ -165,11 +173,17 @@ class LocalTranscriber:
                 return False
             if clip_id in self._pending:
                 return False
+            self._errors.pop(clip_id, None)
             self._pending.add(clip_id)
 
         def run() -> None:
             try:
                 self.transcribe(clip_id, audio, mime_type)
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Transcription failed for %s", clip_id)
+                with self._state_lock:
+                    if clip_id not in self._suppressed:
+                        self._errors[clip_id] = str(exc)
             finally:
                 with self._state_lock:
                     self._pending.discard(clip_id)
@@ -182,6 +196,7 @@ class LocalTranscriber:
         staging_path = cache_path.with_suffix(".tmp")
         with self._state_lock:
             self._suppressed.add(clip_id)
+            self._errors.pop(clip_id, None)
         removed = False
         for target in (cache_path, staging_path):
             if target.exists():

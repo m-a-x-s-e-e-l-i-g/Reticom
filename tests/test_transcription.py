@@ -69,3 +69,30 @@ def test_local_transcription_cache_can_be_deleted(tmp_path):
     assert transcriber.status(clip_id)["status"] == "unavailable"
     assert transcriber.schedule(clip_id, b"encoded voice", "audio/webm") is False
     transcriber.close()
+
+
+def test_background_failure_is_visible_and_can_be_retried(tmp_path):
+    import time
+    model = FakeModel()
+    attempts = []
+    def factory(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("engine missing")
+        return model
+    transcriber = LocalTranscriber(tmp_path, model_factory=factory)
+    clip = "00112233-4455-6677-8899-aabbccddeeff"
+    def completed():
+        deadline = time.monotonic() + 2
+        while transcriber.status(clip)["status"] == "processing" and time.monotonic() < deadline:
+            time.sleep(.01)
+        return transcriber.status(clip)
+    try:
+        assert transcriber.schedule(clip, b"audio", "audio/webm")
+        assert completed()["status"] == "error"
+        assert "engine missing" in transcriber.status(clip)["error"]
+        assert transcriber.schedule(clip, b"audio", "audio/webm")
+        assert completed()["status"] == "ready"
+        assert "error" not in transcriber.status(clip)
+    finally:
+        transcriber.close()

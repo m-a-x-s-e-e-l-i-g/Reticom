@@ -17,12 +17,15 @@ Mapy's official outdoor map/routing API is an alternative for a future configure
 | Hiking trails (legacy endpoint only) | OSM paths and walking/hiking route relations for older clients | No key; zoom 12+ | 24 hours |
 | Military areas & airstrips | OSM military land, bases, training grounds, military airfields and general airstrips/airfields/runways | No key; zoom 10+ | 24 hours |
 | Disaster alerts | Published GDACS app-feed alerts worldwide | No key | 15 minutes |
+| Road closures & disruptions | NDW Netherlands incidents and NCDOT North Carolina work zones; supplied road segments and points | No key; off by default; partial geographic coverage | 2 minutes NL / 5 minutes NC |
 | Satellite heat detections | NASA FIRMS VIIRS NOAA-20 NRT observations, latest 3 days | Free FIRMS MAP_KEY; zoom 4+ | 30 minutes |
 | Conflict & protest reports | ACLED events, latest 30 days | Your ACLED OAuth access token and appropriate account access; zoom 4+ | 6 hours |
 | Live aircraft | Reported aircraft positions, direction, altitude and type filters | No key; regional views, zoom 7+ | About 10 seconds; memory only |
 | Live boats & ships | AIS positions, vessel types and classification filters | Your AISStream key and permitted use; regional views, zoom 7+ | Stream + 5-second UI refresh; memory only |
 
 Both traffic packs are off by default. See [live traffic](live-traffic.md) for setup, military/commercial classification caveats, position expiry, privacy and provider limits.
+
+The road layer is also off by default. See [road disruptions](road-disruptions.md) for coverage, stale/ended report handling, and the Waze/international source investigation.
 
 Refresh intervals are cache lifetimes, not promises about when upstream data is updated. A successful empty result means the provider returned no records for that request, **not** that an area is safe or contains no relevant features. Errors must not be presented as successful empty results. A limited result is labeled `truncated`.
 

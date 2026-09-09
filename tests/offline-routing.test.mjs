@@ -47,3 +47,37 @@ test("cancelling before fallback prevents an online request", async () => {
   }), {name: "AbortError"});
   assert.equal(calls, 1);
 });
+
+const routes = [0,1].map(i=>({geometry:{type:"LineString",coordinates:[[4,51],[4.1,51+i*.01]]},distance:100+i*50,duration:20+i,legs:[{steps:[{name:`route ${i}`}]}]}));
+
+test("driving selects the checked alternative and keeps its directions, distance and time",async()=>{
+  const calls=[];
+  const result=await calculateDeviceRoute(origin,target,"driving",{checkClosures:true,fetcher:async(url,options)=>{
+    calls.push(url);
+    if(url==="/api/offline-routing/route") { assert.equal(JSON.parse(options.body).alternatives,true);return response({code:"outside_coverage"},false); }
+    if(url.startsWith("https:")) { assert.match(url,/alternatives=true/);return response({code:"Ok",routes}); }
+    assert.equal(url,"/api/intel-packs/roads/check-route");
+    assert.deepEqual(JSON.parse(options.body),{routes:routes.map(r=>r.geometry.coordinates),cached_only:false});
+    return response({selected:1,status:"checked",note:"Alternative chosen"});
+  }});
+  assert.equal(result.routes[0],routes[1]);assert.equal(result.road_check.selected,1);assert.equal(calls.length,3);
+});
+
+test("offline closure checking requests cached data and never falls back online",async()=>{
+  const result=await calculateDeviceRoute(origin,target,"driving",{checkClosures:true,offlineOnly:true,fetcher:async(url,options)=>{
+    assert.ok(url.startsWith("/api/"));
+    if(url==="/api/offline-routing/route") return response({code:"Ok",source:"offline",routes});
+    assert.equal(JSON.parse(options.body).cached_only,true);
+    return response({selected:0,status:"closures",warning:"Closure ahead"});
+  }});
+  assert.equal(result.road_check.warning,"Closure ahead");assert.equal(result.source,"offline");
+});
+
+test("closure-check failure remains visible and walking is not blocked by vehicle closures",async()=>{
+  const fetcher=async(url)=> url==="/api/offline-routing/route" ? response({code:"Ok",routes}) : response({},false);
+  assert.match((await calculateDeviceRoute(origin,target,"driving",{checkClosures:true,fetcher})).road_check.warning,/not been checked/);
+  const walking=await calculateDeviceRoute(origin,target,"walking",{checkClosures:true,fetcher:async(url)=>{
+    assert.equal(url,"/api/offline-routing/route");return response({code:"Ok",routes});
+  }});
+  assert.equal(walking.road_check,undefined);
+});

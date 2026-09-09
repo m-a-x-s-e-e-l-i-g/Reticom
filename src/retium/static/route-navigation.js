@@ -12,14 +12,14 @@ function validPoint(point) {
     && Number(point[1]) <= 90;
 }
 
-export function calculatedRouteUrl(origin, target, service, profile = "driving") {
+export function calculatedRouteUrl(origin, target, service, profile = "driving", alternatives = false) {
   if (!validPoint(origin) || !validPoint(target)) return null;
   if (!["driving", "walking"].includes(profile)) return null;
   service ??= profile === "walking" ? WALKING_ROUTE_SERVICE : DEFAULT_ROUTE_SERVICE;
   const base = String(service || "").replace(/\/+$/, "");
   if (!base) return null;
   const coordinates = `${Number(origin[0])},${Number(origin[1])};${Number(target[0])},${Number(target[1])}`;
-  return `${base}/route/v1/driving/${coordinates}?alternatives=false&steps=true&geometries=geojson&overview=full`;
+  return `${base}/route/v1/driving/${coordinates}?alternatives=${alternatives ? "true" : "false"}&steps=true&geometries=geojson&overview=full`;
 }
 
 export function parseCalculatedRoute(payload) {

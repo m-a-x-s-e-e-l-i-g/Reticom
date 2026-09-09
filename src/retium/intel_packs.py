@@ -22,6 +22,7 @@ from .intel_sources import PACKS, ProviderError, MAX_FEATURES, OSM_AREA_LIMIT_KM
 from .osm_cache import buffered_bounds, intersects, merge_entries
 from .elevation import ElevationStore, ELEVATION_MAX_ZOOM
 from .traffic import TRAFFIC_PACKS, TRAFFIC_IDS, LiveTraffic, validate_traffic_filters
+from .road_disruptions import ROAD_PACK, RoadDisruptions, validate_road_filters
 
 
 ELEVATION_PACK = {
@@ -30,7 +31,7 @@ ELEVATION_PACK = {
     "attribution": "Terrain: Mapzen / data providers", "attribution_url": "https://github.com/tilezen/joerd/blob/master/docs/attribution.md", "min_zoom": 9,
     "ttl_seconds": 2592000, "credential_fields": [],
 }
-CATALOGUE = {p["id"]: p for p in [*PACKS, ELEVATION_PACK, *TRAFFIC_PACKS]}
+CATALOGUE = {p["id"]: p for p in [*PACKS, ROAD_PACK, ELEVATION_PACK, *TRAFFIC_PACKS]}
 GDACS_TYPES = tuple(item["id"] for item in CATALOGUE["gdacs"]["disaster_types"])
 DEFAULT_GDACS_TYPES = tuple(code for code in GDACS_TYPES if code != "DR")
 DEFAULT_ENABLED = ["gdacs", "military"]  # Trails now come from always-on basemap tiles.
@@ -102,6 +103,10 @@ class IntelPackStore:
         self.enabled = {key for key in enabled if isinstance(key, str) and key in CATALOGUE} if isinstance(enabled, list) else set()
         self.credentials = {key: value for key, value in credentials.items() if key in SECRET_FIELDS and isinstance(value, str)} if isinstance(credentials, dict) else {}
         self.firms_days = stored.get("firms_days", 3)
+        try:
+            self.road_filters = validate_road_filters(stored.get("road_filters", {}))
+        except ValueError:
+            self.road_filters = validate_road_filters({})
         if type(self.firms_days) is not int or self.firms_days not in (1, 3, 7):
             self.firms_days = 3
         try:
@@ -138,14 +143,14 @@ class IntelPackStore:
         with self.lock:
             return {
                 "packs": [{**pack, "enabled": key in self.enabled, "configured": self._configured(pack)} for key, pack in CATALOGUE.items()],
-                "settings": {"enabled": sorted(self.enabled), "gdacs_types": list(self.gdacs_types), "traffic_filters": self.traffic_filters, "firms_days": self.firms_days},
+                "settings": {"enabled": sorted(self.enabled), "gdacs_types": list(self.gdacs_types), "traffic_filters": self.traffic_filters, "firms_days": self.firms_days, "road_filters": self.road_filters},
                 "credentials": {key: bool(self.credentials.get(key)) for key in sorted(SECRET_FIELDS)},
                 "credential_previews": {key: ("••••••••" + value[-4:] if len(value) > 8 else "••••••••")
                                         for key in sorted(SECRET_FIELDS) if (value := self.credentials.get(key))},
             }
 
     def update(self, body):
-        if not isinstance(body, dict) or set(body) - {"enabled", "credentials", "gdacs_types", "traffic_filters", "firms_days"}:
+        if not isinstance(body, dict) or set(body) - {"enabled", "credentials", "gdacs_types", "traffic_filters", "firms_days", "road_filters"}:
             raise ValueError("Use enabled packs, disaster filters and provider credentials only")
         with self.lock:
             enabled = body.get("enabled", sorted(self.enabled))
@@ -160,9 +165,11 @@ class IntelPackStore:
             if type(firms_days) is not int or firms_days not in (1, 3, 7):
                 raise ValueError("Choose 24 hours, 3 days or 7 days for NASA FIRMS")
             gdacs_types = validate_gdacs_types(body.get("gdacs_types", list(self.gdacs_types)))
+            road_filters = validate_road_filters(body.get("road_filters", self.road_filters))
             traffic_filters = validate_traffic_filters(body.get("traffic_filters", self.traffic_filters))
             credentials = {**self.credentials, **{key: value.strip() for key, value in supplied.items()}}
-            self._write(self.settings_path, {"enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "traffic_filters": traffic_filters, "firms_days": firms_days})
+            self._write(self.settings_path, {"enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "traffic_filters": traffic_filters, "firms_days": firms_days, "road_filters": road_filters})
+            self.road_filters = road_filters
             if gdacs_types != self.gdacs_types:
                 self.next_fetch = {key: until for key, until in self.next_fetch.items()
                                    if not (key == "gdacs" or isinstance(key, tuple) and key[0] == "gdacs")}
@@ -419,7 +426,22 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None):
     elevation = elevation or ElevationStore(data_dir)
     router = APIRouter(prefix="/api/intel-packs")
     traffic = traffic or LiveTraffic(store)
+    roads = RoadDisruptions(store)
     router.traffic = traffic
+
+    @router.post("/roads/check-route")
+    async def check_road_route(request: Request):
+        from .road_navigation import assess_routes
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 4_000_000:
+                raise HTTPException(413, "Route comparison request is too large")
+        try:
+            body = json.loads(raw)
+            return await asyncio.to_thread(assess_routes, roads, body)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @router.get("")
     async def catalogue():
@@ -542,7 +564,11 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None):
     @router.get("/{pack_id}")
     async def features(pack_id: str, west: float, south: float, east: float, north: float, zoom: float):
         try:
-            result = await asyncio.to_thread(store.load, pack_id, (west, south, east, north), zoom)
+            bounds = (west, south, east, north)
+            if pack_id == "roads":
+                result = await asyncio.to_thread(roads.load, bounds, zoom)
+            else:
+                result = await asyncio.to_thread(store.load, pack_id, bounds, zoom)
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc

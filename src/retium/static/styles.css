@@ -1054,6 +1054,8 @@ button.task-delete[data-confirm="true"] { border-color: var(--danger); backgroun
 .waypoint-navigation > button { width: auto; min-height: 40px; margin: 0; padding: 6px 10px; border-color: var(--line-strong); color: var(--text-muted); font-size: .625rem; white-space: nowrap; }
 .waypoint-navigation .navigation-end { width: 40px; padding: 0; color: var(--text-faint); font-family: var(--font-data); font-size: 1.25rem; }
 .waypoint-navigation.calculated { border-color: var(--signal); }
+.navigation-road-status { grid-column: 1 / -1; color: var(--text-muted); font: .6875rem/1.4 var(--font-body); }
+.navigation-road-status[data-warning="true"] { color: var(--warning, #d8b16c); }
 .waypoint-navigation.arrived { border-color: var(--signal); }
 .waypoint-navigation.arrived .waypoint-navigation-data b { color: var(--text); }
 .shared-routes-panel { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }

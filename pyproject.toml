@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "retium"
-version = "0.2.0"
+version = "0.2.1"
 description = "Map-first field coordination over Reticulum"
 requires-python = ">=3.11"
 dependencies = [

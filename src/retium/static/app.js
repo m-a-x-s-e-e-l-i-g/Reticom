@@ -1,10 +1,10 @@
 import {connectivityState} from "./connectivity.js?v=20260905-1";
 import {createCommandWorkspace} from "./command-workspace.js?v=20260908-2";
 let commandCanvas = null;
-import {calculateDeviceRoute, initOfflineRoutingSettings, ROUTING_MODE_KEY} from "./offline-routing.js?v=20260907-3";
+import {calculateDeviceRoute, initOfflineRoutingSettings, ROUTING_MODE_KEY} from "./offline-routing.js?v=20260909-7";
 const offlineRoutingSettings = initOfflineRoutingSettings();
 import {hikingMapStyle, recenterOnFix, roadAndPathLayers, preferredMapStyle, nextMapStyle, satelliteWithTrails} from "./outdoor-map.js?v=20260907-5";
-import {createIntelPacks} from "./intel-packs.js?v=20260909-5";
+import {createIntelPacks} from "./intel-packs.js?v=20260909-7";
 import {createSharedNavigation, navigationSharePayload} from "./shared-navigation.js?v=20260906-1";
 import {HeadingTracker, HeadingOverlay, HeadingConnection} from "./live-heading.js?v=20260905-2";
 import {reportDraft, reportComposerHtml} from "./map-reports.js?v=20260905-1";
@@ -27,7 +27,7 @@ import {
   parseCalculatedRoute,
   routeInstruction,
   routeNeedsRefresh,
-} from "./route-navigation.js?v=20260907-3";
+} from "./route-navigation.js?v=20260909-7";
 import {
   automaticReportOrigin,
   activeAutomaticReports,
@@ -3563,11 +3563,12 @@ async function requestCalculatedRoute(currentPoint) {
     return;
   }
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeout = setTimeout(() => controller.abort(), 45000);
   navigation.routeAbortController?.abort();
   navigation.routeAbortController = controller;
   navigation.routeLoading = true;
   navigation.routeError = "";
+  navigation.roadCheck = null;
   navigation.lastRouteAttempt = Date.now();
   $("waypointNavigationState").textContent = "CALCULATING ROUTE";
   try {
@@ -3576,6 +3577,7 @@ async function requestCalculatedRoute(currentPoint) {
     const payload = await calculateDeviceRoute(currentPoint, navigation.target, navigation.routeProfile || "driving", {
       signal: controller.signal,
       offlineOnly: localStorage.getItem(ROUTING_MODE_KEY) === "offline",
+      checkClosures: true,
       beforeOnline: async () => {
         const requestAt = Math.max(Date.now(), lastPublicRouteRequest + 1100);
         lastPublicRouteRequest = requestAt;
@@ -3589,6 +3591,7 @@ async function requestCalculatedRoute(currentPoint) {
     navigation.routeDuration = route.duration;
     navigation.routeSteps = route.steps;
     navigation.routeSource = payload.source;
+    navigation.roadCheck = payload.road_check;
     navigation.routeOrigin = [...currentPoint];
     navigation.shareDirty = true;
     navigation.shareGeneration = (navigation.shareGeneration || 0) + 1;
@@ -3628,6 +3631,13 @@ function updateWaypointNavigation(position) {
     ? `${formatRouteDuration(waypointNavigation.routeDuration)} · ${waypointNavigation.pinnedRoute ? "PLAN" : waypointNavigation.routeProfile === "walking" ? "WALK" : "ROAD"}`
     : `${Math.round(bearing).toString().padStart(3, "0")}° ${cardinalBearing(bearing)}`;
   $("waypointNavigation").classList.toggle("arrived", arrived);
+  const roadStatus = $("waypointRoadStatus"), roadCheck = waypointNavigation.roadCheck;
+  if (roadStatus) {
+    roadStatus.hidden = !roadCheck || waypointNavigation.pinnedRoute || !calculated;
+    roadStatus.textContent = roadCheck?.warning || (roadCheck?.selected ? "Alternative chosen around reported closures" : "Known closures checked · coverage incomplete");
+    roadStatus.title = [roadCheck?.warning, roadCheck?.note, ...(roadCheck?.closures || []).map(c => [c.title, c.reason, c.source].filter(Boolean).join(" · "))].filter(Boolean).join("\n");
+    roadStatus.dataset.warning = String(Boolean(roadCheck?.warning));
+  }
   if (!arrived) {
     if (waypointNavigation.mode === "route" && waypointNavigation.routeLoading) {
       $("waypointNavigationState").textContent = "CALCULATING ROUTE";

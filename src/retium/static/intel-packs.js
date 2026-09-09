@@ -7,9 +7,10 @@ import {TrafficMotion, createTrafficAnimator} from "./traffic-motion.js?v=202609
 import {TrafficTracks, trafficKey, showTrafficTrack, clearTrafficTrack} from "./traffic-tracks.js?v=20260909-3";
 import {retainTraffic} from "./traffic-cache.js?v=20260909-3";
 import {retainIntel} from "./intel-cache.js?v=20260909-4";
+import {roadDisplayData, retainRoads, roadLayers, ROAD_IMPACTS, ROAD_TYPES, normalizeRoadFilters, filterRoadReports} from "./road-disruptions.js?v=20260909-7";
 const EMPTY = () => ({type: "FeatureCollection", features: []});
 // Trails are always-on basemap data, not a separately fetched/toggled intel pack.
-const IDS = ["military", "acled", "firms", "gdacs", "elevation", ...TRAFFIC_IDS];
+const IDS = ["military", "roads", "acled", "firms", "gdacs", "elevation", ...TRAFFIC_IDS];
 const COLORS = {trails: "#8f9c77", military: "#ad9774", acled: "#ba8077", firms: "#c49367", gdacs: "#b6a578"};
 const PREFIX = "public-intel-";
 const ACCESS = {
@@ -61,7 +62,8 @@ export function mergeIntelResults(results) {
   const warning = results.find(result => ["error", "needs_key", "zoom_in", "stale", "disabled", "waiting"].includes(result.status));
   const timestamps = results.map(result => result.fetched_at).filter(Boolean);
   return {...results[0], ...EMPTY(), features,
-    status: warning ? (features.length ? "stale" : warning.status) : results.every(result => result.status === "cached") ? "cached" : "fresh",
+    status: warning ? (features.length ? "stale" : warning.status) : results.every(result => result.status === "uncovered") ? "uncovered" : results.every(result => result.status === "cached") ? "cached" : "fresh",
+    ...(results.some(result => result.replaced_sources) ? {replaced_sources: [...new Set(results.flatMap(result => result.replaced_sources || []))]} : {}),
     capped: results.some(result => result.capped), truncated: results.some(result => result.truncated),
     ...(results.some(result => result.coverage_complete !== undefined) ? {coverage_complete: results.every(result => result.coverage_complete !== false)} : {}),
     fetched_at: timestamps.length ? timestamps.sort((a, b) => new Date(Number(a) * 1000 || a) - new Date(Number(b) * 1000 || b))[0] : undefined,
@@ -69,10 +71,10 @@ export function mergeIntelResults(results) {
   };
 }
 
-function stamp(value) {
+function stamp(value, withYear = false) {
   if (!value) return "";
   const date = new Date(typeof value === "number" ? value * (value < 1e12 ? 1000 : 1) : value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString([], {...(withYear ? {year: "numeric"} : {}), month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
 }
 
 export function intelStatusText(pack, result) {
@@ -83,6 +85,7 @@ export function intelStatusText(pack, result) {
   if (result.status === "zoom_in") return result.note || `Zoom in to level ${pack.min_zoom || 10} to load this pack`;
   if (result.status === "error") return result.error || "Source unavailable · try again later";
   if (result.status === "disabled") return "Off";
+  if (pack.id === "roads") return `${result.features?.length || 0} road reports${result.status === "stale" ? " · stale" : ""}`;
   if (TRAFFIC_IDS.includes(pack.id)) {
     if (result.status === "waiting") return result.note || "Waiting for live reports…";
     const count = result.features?.length || 0;
@@ -102,6 +105,7 @@ export function intelLayerWarning(pack, result) {
   if (!pack.enabled) return "";
   if (pack.configured === false || result?.status === "needs_key") return "Source access needed below";
   if (result?.status === "error") return result.error || "Source unavailable · try again later";
+  if (pack.id === "roads" && result?.status === "uncovered") return result.note;
   if (result?.status === "stale") return result.error || "Source unavailable · showing saved data";
   if (result?.coverage_complete === false) return "Incomplete coverage · some areas are not available";
   return "";
@@ -121,6 +125,13 @@ export function intelFeatureHtml(feature, pack, result) {
   const title = props.title || props.name || pack.title || "Public map feature";
   const detail = props.detail || props.description || "";
   const observed = stamp(props.observed_at || props.date);
+  if (pack.id === "roads") {
+    const fields = [["Impact",ROAD_IMPACTS[props.road_impact] || "Unknown"],["Reason",props.reason],
+      ["Starts",stamp(props.starts_at, true)],["Ends",stamp(props.ends_at, true) || "Not supplied"],
+      ["Last update",stamp(props.updated_at, true) || "Not supplied"],["Feed confirmed",stamp(props.confirmed_at, true)],
+      ["Direction",props.direction],["Restrictions",props.restrictions],["Authority",props.authority],["Location",props.geometry_note]];
+    return `<article class="intel-feature-popup"><small>PUBLIC ROAD REPORT · ${escape(props.source)}</small><strong>${escape(title)}</strong><p>${escape(props.stale ? "STALE · current status unconfirmed" : ROAD_IMPACTS[props.road_impact] || "Disruption reported")}</p><p>${escape(detail)}</p><dl>${fields.filter(([,v])=>v).map(([k,v])=>`<div><dt>${escape(k)}</dt><dd>${escape(v)}</dd></div>`).join("")}</dl><p class="intel-feature-caution">Coverage is incomplete. No report does not mean a road is open. Vehicle and direction restrictions may apply.</p>${source ? `<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">${escape(props.attribution || pack.attribution)} ↗</a>` : ""}</article>`;
+  }
   if (TRAFFIC_IDS.includes(pack.id)) {
     const altitude = props.altitude_m == null ? props.altitude_reference : `${props.altitude_m} m`;
     const speed = props.speed_knots == null ? "Unknown speed" : `${Number(props.speed_knots).toFixed(0)} kn`;
@@ -169,6 +180,10 @@ export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null)
   if (pack.id === "gdacs") { installGdacsIcons(map); data = gdacsDisplayData(data); }
   if (!map.getSource(id)) map.addSource(id, {type: "geojson", data});
   else map.getSource(id).setData(data);
+  if (pack.id === "roads") {
+    for (const layer of roadLayers(id)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
+    return;
+  }
   if (TRAFFIC_IDS.includes(pack.id)) {
     installTrafficIcons(map);
     for (const layer of trafficLayers(id)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
@@ -198,6 +213,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   let catalogue = {packs: [], credentials: {}}, enabled = new Set(), gdacsTypes = normalizeGdacsTypes(), firmsDays = 3, saving = false, destroyed = false, catalogueGeneration = 0, notice = "";
   let contourUrl = null, contourPending = null, contourFailed = false;
   let trafficFilters = normalizeTrafficFilters();
+  let roadFilters = normalizeRoadFilters();
   const maps = new Map(), results = new Map(), credentialDrafts = new Map(), trafficDrafts = new Map(), autosaveTimers = new Map();
   const listeners = [];
   const listen = (target, event, handler) => { target?.addEventListener(event, handler); listeners.push(() => target?.removeEventListener(event, handler)); };
@@ -206,7 +222,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const types = packById("gdacs")?.disaster_types?.filter(type => GDACS_TYPES.some(known => known.id === type.id));
     return types?.length ? types : GDACS_TYPES;
   };
-  const visibleData = (id, data) => TRAFFIC_IDS.includes(id) ? trafficDisplayData(id, data, trafficFilters[id]) : id === "gdacs" ? {...gdacsDisplayData(data, gdacsTypes), gdacs_types: [...gdacsTypes]} : data;
+  const visibleData = (id, data) => id === "roads" ? filterRoadReports(data, roadFilters) : TRAFFIC_IDS.includes(id) ? trafficDisplayData(id, data, trafficFilters[id]) : id === "gdacs" ? {...gdacsDisplayData(data, gdacsTypes), gdacs_types: [...gdacsTypes]} : data;
   const currentPacks = () => catalogue.packs.map(pack => ({...pack, enabled: enabled.has(pack.id)}));
   const isVisible = context => globalThis.document?.visibilityState !== "hidden" && (!context.map.getContainer?.()?.getClientRects || context.map.getContainer().getClientRects().length > 0);
   const activeMap = () => [...maps.values()].reverse().find(isVisible);
@@ -282,6 +298,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (event.target?.matches?.("[data-firms-days]")) void setFirmsDays(Number(event.target.value));
       const type = event.target?.dataset?.gdacsType;
       if (type) void setGdacsTypes(event.target.checked ? [...gdacsTypes, type] : gdacsTypes.filter(id => id !== type));
+      const roadGroup = event.target?.dataset?.roadGroup;
+      const roadValue = event.target?.dataset?.roadValue;
+      if (roadGroup && roadValue) void setRoadFilters({...roadFilters, [roadGroup]: event.target.checked ? [...roadFilters[roadGroup], roadValue] : roadFilters[roadGroup].filter(v => v !== roadValue)});
     });
     listen(panel.querySelector("[data-intel-refresh]"), "click", () => void refresh());
     const saveField = (target, delay) => {
@@ -343,11 +362,14 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const focusedPack = panel?.ownerDocument?.activeElement?.dataset?.intelPack;
     const focusedType = panel?.ownerDocument?.activeElement?.dataset?.gdacsType;
     const filtersOpen = Boolean(panel?.querySelector(".intel-disaster-filter")?.open);
+    const roadOpen = Boolean(panel?.querySelector("[data-road-filter]")?.open);
+    const focusedRoadGroup = active?.dataset?.roadGroup, focusedRoadValue = active?.dataset?.roadValue;
     const accessOpen = Object.keys(ACCESS).filter(key => panel?.querySelector(`[data-intel-access="${key}"]`)?.open);
     const trafficOpen = TRAFFIC_IDS.filter(id => panel?.querySelector(`[data-traffic-filter="${id}"]`)?.open);
     if (panel) panel.querySelector(".intel-pack-list").innerHTML = currentPacks().map(pack => `<section class="intel-pack-row" data-pack-row="${escape(pack.id)}"><label class="intel-pack-switch"><span><strong>${escape(pack.title)}</strong><small>${escape(pack.description)}</small></span><input type="checkbox" role="switch" data-intel-pack="${escape(pack.id)}" aria-describedby="intel-status-${escape(pack.id)}" ${pack.enabled ? "checked" : ""}/><i aria-hidden="true"></i></label><div class="intel-pack-meta"><span id="intel-status-${escape(pack.id)}" data-intel-status="${escape(pack.id)}"></span>${safeLink(pack.source_url) ? `<a href="${escape(safeLink(pack.source_url))}" target="_blank" rel="noopener noreferrer">${escape(pack.source || "Source")} ↗</a>` : ""}</div><p class="intel-pack-note" data-intel-note="${escape(pack.id)}"></p>${pack.offline_downloadable ? `<button type="button" class="intel-pack-download" data-intel-download="${escape(pack.id)}">SAVE THIS VIEW OFFLINE</button><small class="intel-pack-download-note">Keeps this visible map area on this device without an expiry.</small>` : ""}</section>`).join("");
     panel?.querySelector('[data-pack-row="firms"]')?.insertAdjacentHTML("beforeend", `<label class="intel-firms-window">Detection window<select data-firms-days aria-label="NASA FIRMS detection window">${[[1, "24 hours"], [3, "3 days"], [7, "7 days"]].map(([days, label]) => `<option value="${days}" ${days === firmsDays ? "selected" : ""}>${label}</option>`).join("")}</select></label>`);
     const gdacsRow = panel?.querySelector('[data-pack-row="gdacs"]');
+    panel?.querySelector('[data-pack-row="roads"]')?.insertAdjacentHTML("beforeend", `<details class="intel-disaster-filter" data-road-filter ${roadOpen ? "open" : ""}><summary>Filters · report type & impact</summary>${[["types", "Report types", ROAD_TYPES], ["impacts", "Impact", ROAD_IMPACTS]].map(([group, title, choices]) => `<fieldset><legend>${title}</legend><div class="intel-disaster-grid">${Object.entries(choices).map(([value, label]) => `<label><input type="checkbox" data-road-group="${group}" data-road-value="${value}"/><span>${escape(label)}</span></label>`).join("")}</div></fieldset>`).join("")}<p>Vehicle obstructions are off initially. Filters change the map; navigation still checks full closures while this layer is enabled.</p></details>`);
     for (const [key, field] of Object.entries(ACCESS)) {
       panel?.querySelector(`[data-pack-row="${field.pack}"]`)?.insertAdjacentHTML("beforeend", `<details class="intel-access-section" data-intel-access="${key}" ${accessOpen.includes(key) ? "open" : ""}><summary>${field.title}</summary><form class="intel-access-field" data-intel-access-form="${key}"><label for="intel-${key}">${field.title}</label><div class="intel-access-input"><input id="intel-${key}" name="${key}" type="password" autocomplete="off" spellcheck="false" maxlength="8192" value="${escape(credentialDrafts.get(key) || "")}" placeholder="Paste ${escape(field.title)}"/></div><div class="intel-access-links"><a href="${field.url}" target="_blank" rel="noopener noreferrer">${field.link} ↗</a><button type="button" data-intel-clear="${key}">Remove saved key</button></div></form></details>`);
     }
@@ -371,6 +393,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     if (restore && selectionStart != null) restore.setSelectionRange(selectionStart, selectionEnd);
     if (focusedPack && IDS.includes(focusedPack)) panel.querySelector(`[data-intel-pack="${focusedPack}"]`)?.focus();
     if (focusedType && GDACS_TYPES.some(type => type.id === focusedType)) panel.querySelector(`[data-gdacs-type="${focusedType}"]`)?.focus();
+    if (["types", "impacts"].includes(focusedRoadGroup) && [...Object.keys(ROAD_TYPES), ...Object.keys(ROAD_IMPACTS)].includes(focusedRoadValue)) panel.querySelector(`[data-road-group="${focusedRoadGroup}"][data-road-value="${focusedRoadValue}"]`)?.focus();
   }
 
   function renderStatus() {
@@ -390,6 +413,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     if (typeSummary) typeSummary.textContent = gdacsTypes.length === disasterTypes().length ? "All" : gdacsTypes.length ? `${gdacsTypes.length} of ${disasterTypes().length}` : "None";
     for (const input of panel.querySelectorAll("[data-gdacs-type]")) { input.checked = gdacsTypes.includes(input.dataset.gdacsType); input.disabled = saving; }
     for (const control of panel.querySelectorAll("[data-gdacs-select]")) control.disabled = saving;
+    for (const input of panel.querySelectorAll("[data-road-group]")) { input.checked = roadFilters[input.dataset.roadGroup].includes(input.dataset.roadValue); input.disabled = saving; }
     for (const control of panel.querySelectorAll("[data-traffic-form] button, [data-traffic-form] select, [data-traffic-form] input")) control.disabled = false;
     for (const pack of currentPacks()) {
       const state = results.get(pack.id);
@@ -429,6 +453,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     enabled = new Set([...enabled].filter(id => IDS.includes(id)));
     gdacsTypes = normalizeGdacsTypes(value.settings?.gdacs_types, disasterTypes());
     trafficFilters = normalizeTrafficFilters(value.settings?.traffic_filters);
+    roadFilters = normalizeRoadFilters(value.settings?.road_filters);
     firmsDays = [1, 3, 7].includes(value.settings?.firms_days) ? value.settings.firms_days : 3;
     renderCatalogue();
     for (const context of maps.values()) { syncLayers(context); schedule(context, 0); }
@@ -532,6 +557,24 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     return saved;
   }
 
+  async function setRoadFilters(value) {
+    if (saving || destroyed) return false;
+    const focused = panel?.ownerDocument?.activeElement?.dataset;
+    const focusGroup = focused?.roadGroup, focusValue = focused?.roadValue;
+    const previous = roadFilters;
+    roadFilters = normalizeRoadFilters(value);
+    for (const context of maps.values()) syncLayers(context);
+    renderStatus();
+    const saved = await save({road_filters: roadFilters});
+    if (!saved) {
+      roadFilters = previous;
+      for (const context of maps.values()) syncLayers(context);
+      renderStatus();
+    }
+    if (["types", "impacts"].includes(focusGroup) && [...Object.keys(ROAD_TYPES), ...Object.keys(ROAD_IMPACTS)].includes(focusValue)) panel?.querySelector(`[data-road-group="${focusGroup}"][data-road-value="${focusValue}"]`)?.focus();
+    return saved;
+  }
+
   async function setGdacsTypes(value) {
     if (!packById("gdacs") || !Array.isArray(value) || saving || destroyed) return false;
     const previous = gdacsTypes;
@@ -608,6 +651,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     }
     updateCredit(context);
     updateTrafficTrack(context);
+    updateRoadPopup(context);
     renderStatus();
     trafficAnimator.start();
   }
@@ -671,16 +715,24 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         let data = mergeIntelResults(parts);
         const previous = context.data.get(pack.id);
         if (traffic) data = retainTraffic(previous, data);
+        else if (pack.id === "roads") data = retainRoads(previous, data);
         else data = retainIntel(previous, data, requestedBoxes);
         results.set(pack.id, visibleData(pack.id, data));
         context.data.set(pack.id, data);
         context.tracks.get(pack.id)?.ingest(data);
         if (hasParsedStyle(context)) installIntelLayers(map, pack, animatedData(context, pack.id, data).data);
+        if (pack.id === "roads") updateRoadPopup(context);
         trafficAnimator.start();
       } catch (error) {
         if (destroyed || !enabled.has(pack.id) || context.requests.get(pack.id) !== pending) return;
-        const old = context.data.get(pack.id);
+        let old = context.data.get(pack.id);
         const failure = error.name === "AbortError" ? "Source request timed out. Try again later." : error.message;
+        if (pack.id === "roads" && old) {
+          old = roadDisplayData({...old, features: old.features.map(feature => ({...feature, properties: {...feature.properties, stale: true}}))});
+          context.data.set(pack.id, old);
+          map.getSource(sourceId(pack.id))?.setData(visibleData(pack.id, old));
+          updateRoadPopup(context);
+        }
         results.set(pack.id, visibleData(pack.id, old?.features?.length ? {...old, status: "stale", error: failure} : {status: "error", error: failure}));
       } finally {
         clearTimeout(timeout);
@@ -701,6 +753,14 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const identity = String(feature?.properties?.identity || "").toLowerCase();
     const profile = packId === "flights" ? context.aircraftProfiles.get(identity) : null;
     return {...feature, properties: {...feature.properties, ...(profile || {}), ...additions}};
+  }
+
+  function updateRoadPopup(context) {
+    if (!context.selectedRoad) return;
+    if (!enabled.has("roads")) { context.popup?.remove(); return; }
+    const feature = visibleData("roads", context.data.get("roads")).features.find(f => f.id === context.selectedRoad);
+    if (!feature) { context.popup?.remove(); return; }
+    context.popup?.setHTML(intelFeatureHtml(feature, packById("roads"), results.get("roads")));
   }
 
   async function loadAircraftProfile(context, identity) {
@@ -793,6 +853,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (!context.Popup || event.originalEvent?.target?.closest?.(".maplibregl-marker,button,a")) return;
       context.popup?.remove(); context.popup = null;
       context.selectedTraffic = null;
+      context.selectedRoad = null;
       clearTrafficTrack(map);
       const features = map.queryRenderedFeatures(event.point);
       if (features.some(feature => isTeamLayer(feature.layer))) return;
@@ -806,8 +867,10 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       popup.on?.("close", () => {
         if (context.popup !== popup) return;
         context.popup = null; context.selectedTraffic = null;
+        context.selectedRoad = null;
         clearTrafficTrack(map);
       });
+      if (id === "roads") context.selectedRoad = feature.properties?.road_id || feature.id;
       if (TRAFFIC_IDS.includes(id)) {
         const observed = context.data.get(id)?.features.find(item => trafficKey(item) === trafficKey(feature));
         // Rendered IDs may be MapLibre IDs and coordinates may be predicted.
@@ -858,9 +921,15 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   if (typeof window !== "undefined") listen(window, "online", () => { if (enabled.has("elevation")) void refresh(); });
   const interval = setInterval(() => { for (const context of maps.values()) if (isVisible(context) && !context.requests.size) schedule(context, 0); }, 60000);
   const trafficInterval = setInterval(() => {
-    if (!TRAFFIC_IDS.some(id => enabled.has(id))) return;
+    if (!enabled.has("roads") && !TRAFFIC_IDS.some(id => enabled.has(id))) return;
     for (const context of maps.values()) {
       if (!isVisible(context)) { releaseTraffic(context); continue; }
+      if (enabled.has("roads") && context.data.has("roads")) {
+        const data = roadDisplayData(context.data.get("roads"));
+        context.data.set("roads", data);
+        context.map.getSource(sourceId("roads"))?.setData(visibleData("roads", data));
+        updateRoadPopup(context);
+      }
       for (const id of TRAFFIC_IDS) if (enabled.has(id) && context.data.has(id)) {
         const data = visibleData(id, context.data.get(id));
         context.map.getSource(sourceId(id))?.setData(animatedData(context, id, context.data.get(id)).data);
@@ -880,7 +949,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     trafficAnimator.start();
   });
   const ready = refresh();
-  return {ready, attachMap, refresh, setEnabled, setFirmsDays, setGdacsTypes, setTrafficFilters, updateCredentials, getState: () => ({packs: currentPacks(), settings: {firms_days: firmsDays, gdacs_types: [...gdacsTypes], traffic_filters: trafficFilters}, results: Object.fromEntries(results)}), destroy() {
+  return {ready, attachMap, refresh, setEnabled, setRoadFilters, setFirmsDays, setGdacsTypes, setTrafficFilters, updateCredentials, getState: () => ({packs: currentPacks(), settings: {road_filters: roadFilters, firms_days: firmsDays, gdacs_types: [...gdacsTypes], traffic_filters: trafficFilters}, results: Object.fromEntries(results)}), destroy() {
     destroyed = true; ++catalogueGeneration; clearInterval(interval); clearInterval(trafficInterval);
     for (const timer of autosaveTimers.values()) clearTimeout(timer);
     trafficAnimator.destroy();

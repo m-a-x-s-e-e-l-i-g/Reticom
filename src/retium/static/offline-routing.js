@@ -1,4 +1,4 @@
-import {calculatedRouteUrl} from "./route-navigation.js?v=20260907-3";
+import {calculatedRouteUrl} from "./route-navigation.js?v=20260909-7";
 import {formatMapBytes} from "./map-offline.js?v=20260903-1";
 import {createRoutingCatalogue} from "./routing-catalogue.js?v=20260907-1";
 
@@ -7,16 +7,43 @@ export const ROUTING_MODE_KEY = "reticom-routing-mode";
 // Only absence of local coverage/engine permits the explicitly enabled online
 // fallback. A local no-route/error never silently sends coordinates elsewhere.
 export async function calculateDeviceRoute(origin, target, profile, {
-  fetcher = fetch, signal, offlineOnly = false, beforeOnline = async () => {},
+  fetcher = fetch, signal, offlineOnly = false, beforeOnline = async () => {}, checkClosures = false,
 } = {}) {
-  const url = calculatedRouteUrl(origin, target, undefined, profile);
+  checkClosures = checkClosures && profile === "driving";
+  const url = calculatedRouteUrl(origin, target, undefined, profile, checkClosures);
   if (!url) throw new Error("Invalid route coordinates or travel mode");
+  const check = async payload => {
+    if (!checkClosures || payload.code !== "Ok") return payload;
+    const candidates = (payload.routes || []).slice(0, 4);
+    const checkController = new AbortController();
+    const cancelCheck = () => checkController.abort();
+    signal?.addEventListener("abort", cancelCheck, {once:true});
+    if (signal?.aborted) cancelCheck();
+    const checkTimeout = setTimeout(cancelCheck, 20000);
+    let assessment;
+    try {
+      const response = await fetcher("/api/intel-packs/roads/check-route", {
+        method:"POST", headers:{"content-type":"application/json"}, signal:checkController.signal,
+        body:JSON.stringify({routes:candidates.map(r => r.geometry?.coordinates), cached_only:offlineOnly}),
+      });
+      if (!response.ok) throw new Error("Road check unavailable");
+      assessment = await response.json();
+      if (!Number.isInteger(assessment.selected) || !candidates[assessment.selected]) throw new Error("Invalid road check");
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      assessment = {selected:0, status:"unavailable", warning:"Road closure check unavailable. Conditions have not been checked."};
+    } finally {
+      clearTimeout(checkTimeout);
+      signal?.removeEventListener("abort", cancelCheck);
+    }
+    return {...payload, routes:[candidates[assessment.selected] || payload.routes?.[0]], road_check:assessment};
+  };
   const local = await fetcher("/api/offline-routing/route", {
     method: "POST", headers: {"content-type": "application/json"}, signal,
-    body: JSON.stringify({origin, target, profile}),
+    body: JSON.stringify({origin, target, profile, ...(checkClosures ? {alternatives:true} : {})}),
   });
   const payload = await local.json();
-  if (local.ok) return payload;
+  if (local.ok) return check(payload);
   if (offlineOnly || !["outside_coverage", "engine_unavailable"].includes(payload.code)) {
     throw new Error(payload.detail || "Offline route calculation failed");
   }
@@ -25,7 +52,7 @@ export async function calculateDeviceRoute(origin, target, profile, {
   const response = await fetcher(url, {cache: "no-store", signal, headers: {accept: "application/json"}});
   const online = await response.json();
   if (!response.ok) throw new Error(online.message || "Online route unavailable; import a routing pack to navigate offline");
-  return {...online, source: "online"};
+  return check({...online, source: "online"});
 }
 
 export function initOfflineRoutingSettings() {

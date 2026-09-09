@@ -100,6 +100,14 @@ def test_profiles_and_geometry_bounds(tmp_path, store):
     assert exc.value.code == "no_route"
 
 
+def test_local_alternatives_are_requested_and_stay_inside_downloaded_pack(tmp_path, store):
+    store.install(pack(tmp_path))
+    store.engine.result["routes"].append({"geometry":{"type":"LineString","coordinates":[[4,51],[8,51],[4.1,51.1]]}})
+    result=store.route([4,51],[4.1,51.1],"driving",True)
+    assert store.engine.calls[-1][1]["alternates"] == 2
+    assert len(result["routes"]) == 1
+
+
 def test_coverage_and_engine_failures_never_invoke_engine(store):
     with pytest.raises(RoutingError) as exc: store.route([4, 51], [4.1, 51.1], "walking")
     assert exc.value.code == "outside_coverage"

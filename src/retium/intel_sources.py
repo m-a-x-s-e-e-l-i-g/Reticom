@@ -20,6 +20,7 @@ from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from .road_disruptions import ROAD_URLS
 
 
 MAX_BYTES = 8_000_000
@@ -128,7 +129,7 @@ def fetch_bytes(url: str, *, data: bytes | None = None, headers: dict | None = N
                 timeout: float = 20, max_bytes: int = MAX_BYTES) -> bytes:
     parts = urlsplit(url)
     allowed = (
-        url == OVERPASS_URL or _gdacs_endpoint(url)
+        url == OVERPASS_URL or _gdacs_endpoint(url) or url in ROAD_URLS
         or (parts.scheme == "https" and parts.netloc == "acleddata.com" and parts.path == "/api/acled/read")
         or (parts.scheme == "https" and parts.netloc == "firms.modaps.eosdis.nasa.gov" and parts.path.startswith("/api/area/csv/"))
     )

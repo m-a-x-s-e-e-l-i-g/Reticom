@@ -22,6 +22,7 @@ from .intel_sources import PACKS, ProviderError, MAX_FEATURES, OSM_AREA_LIMIT_KM
 from .osm_cache import buffered_bounds, intersects, merge_entries
 from .elevation import ElevationStore, ELEVATION_MAX_ZOOM
 from .traffic import TRAFFIC_PACKS, TRAFFIC_IDS, LiveTraffic, validate_traffic_filters
+from .road_disruptions import ROAD_PACK, RoadDisruptions
 
 
 ELEVATION_PACK = {
@@ -30,7 +31,7 @@ ELEVATION_PACK = {
     "attribution": "Terrain: Mapzen / data providers", "attribution_url": "https://github.com/tilezen/joerd/blob/master/docs/attribution.md", "min_zoom": 9,
     "ttl_seconds": 2592000, "credential_fields": [],
 }
-CATALOGUE = {p["id"]: p for p in [*PACKS, ELEVATION_PACK, *TRAFFIC_PACKS]}
+CATALOGUE = {p["id"]: p for p in [*PACKS, ROAD_PACK, ELEVATION_PACK, *TRAFFIC_PACKS]}
 GDACS_TYPES = tuple(item["id"] for item in CATALOGUE["gdacs"]["disaster_types"])
 DEFAULT_GDACS_TYPES = tuple(code for code in GDACS_TYPES if code != "DR")
 DEFAULT_ENABLED = ["gdacs", "military"]  # Trails now come from always-on basemap tiles.
@@ -419,6 +420,7 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None):
     elevation = elevation or ElevationStore(data_dir)
     router = APIRouter(prefix="/api/intel-packs")
     traffic = traffic or LiveTraffic(store)
+    roads = RoadDisruptions(store)
     router.traffic = traffic
 
     @router.get("")
@@ -542,7 +544,11 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None):
     @router.get("/{pack_id}")
     async def features(pack_id: str, west: float, south: float, east: float, north: float, zoom: float):
         try:
-            result = await asyncio.to_thread(store.load, pack_id, (west, south, east, north), zoom)
+            bounds = (west, south, east, north)
+            if pack_id == "roads":
+                result = await asyncio.to_thread(roads.load, bounds, zoom)
+            else:
+                result = await asyncio.to_thread(store.load, pack_id, bounds, zoom)
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc

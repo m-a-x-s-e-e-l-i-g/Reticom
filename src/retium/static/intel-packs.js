@@ -7,9 +7,10 @@ import {TrafficMotion, createTrafficAnimator} from "./traffic-motion.js?v=202609
 import {TrafficTracks, trafficKey, showTrafficTrack, clearTrafficTrack} from "./traffic-tracks.js?v=20260909-3";
 import {retainTraffic} from "./traffic-cache.js?v=20260909-3";
 import {retainIntel} from "./intel-cache.js?v=20260909-4";
+import {roadDisplayData, retainRoads, roadLayers, ROAD_IMPACTS} from "./road-disruptions.js?v=20260909-6";
 const EMPTY = () => ({type: "FeatureCollection", features: []});
 // Trails are always-on basemap data, not a separately fetched/toggled intel pack.
-const IDS = ["military", "acled", "firms", "gdacs", "elevation", ...TRAFFIC_IDS];
+const IDS = ["military", "roads", "acled", "firms", "gdacs", "elevation", ...TRAFFIC_IDS];
 const COLORS = {trails: "#8f9c77", military: "#ad9774", acled: "#ba8077", firms: "#c49367", gdacs: "#b6a578"};
 const PREFIX = "public-intel-";
 const ACCESS = {
@@ -61,7 +62,8 @@ export function mergeIntelResults(results) {
   const warning = results.find(result => ["error", "needs_key", "zoom_in", "stale", "disabled", "waiting"].includes(result.status));
   const timestamps = results.map(result => result.fetched_at).filter(Boolean);
   return {...results[0], ...EMPTY(), features,
-    status: warning ? (features.length ? "stale" : warning.status) : results.every(result => result.status === "cached") ? "cached" : "fresh",
+    status: warning ? (features.length ? "stale" : warning.status) : results.every(result => result.status === "uncovered") ? "uncovered" : results.every(result => result.status === "cached") ? "cached" : "fresh",
+    ...(results.some(result => result.replaced_sources) ? {replaced_sources: [...new Set(results.flatMap(result => result.replaced_sources || []))]} : {}),
     capped: results.some(result => result.capped), truncated: results.some(result => result.truncated),
     ...(results.some(result => result.coverage_complete !== undefined) ? {coverage_complete: results.every(result => result.coverage_complete !== false)} : {}),
     fetched_at: timestamps.length ? timestamps.sort((a, b) => new Date(Number(a) * 1000 || a) - new Date(Number(b) * 1000 || b))[0] : undefined,
@@ -69,10 +71,10 @@ export function mergeIntelResults(results) {
   };
 }
 
-function stamp(value) {
+function stamp(value, withYear = false) {
   if (!value) return "";
   const date = new Date(typeof value === "number" ? value * (value < 1e12 ? 1000 : 1) : value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString([], {...(withYear ? {year: "numeric"} : {}), month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
 }
 
 export function intelStatusText(pack, result) {
@@ -83,6 +85,7 @@ export function intelStatusText(pack, result) {
   if (result.status === "zoom_in") return result.note || `Zoom in to level ${pack.min_zoom || 10} to load this pack`;
   if (result.status === "error") return result.error || "Source unavailable · try again later";
   if (result.status === "disabled") return "Off";
+  if (pack.id === "roads") return `${result.features?.length || 0} road reports${result.status === "stale" ? " · stale" : ""}`;
   if (TRAFFIC_IDS.includes(pack.id)) {
     if (result.status === "waiting") return result.note || "Waiting for live reports…";
     const count = result.features?.length || 0;
@@ -102,6 +105,7 @@ export function intelLayerWarning(pack, result) {
   if (!pack.enabled) return "";
   if (pack.configured === false || result?.status === "needs_key") return "Source access needed below";
   if (result?.status === "error") return result.error || "Source unavailable · try again later";
+  if (pack.id === "roads" && result?.status === "uncovered") return result.note;
   if (result?.status === "stale") return result.error || "Source unavailable · showing saved data";
   if (result?.coverage_complete === false) return "Incomplete coverage · some areas are not available";
   return "";
@@ -121,6 +125,13 @@ export function intelFeatureHtml(feature, pack, result) {
   const title = props.title || props.name || pack.title || "Public map feature";
   const detail = props.detail || props.description || "";
   const observed = stamp(props.observed_at || props.date);
+  if (pack.id === "roads") {
+    const fields = [["Impact",ROAD_IMPACTS[props.road_impact] || "Unknown"],["Reason",props.reason],
+      ["Starts",stamp(props.starts_at, true)],["Ends",stamp(props.ends_at, true) || "Not supplied"],
+      ["Last update",stamp(props.updated_at, true) || "Not supplied"],["Feed confirmed",stamp(props.confirmed_at, true)],
+      ["Direction",props.direction],["Restrictions",props.restrictions],["Authority",props.authority],["Location",props.geometry_note]];
+    return `<article class="intel-feature-popup"><small>PUBLIC ROAD REPORT · ${escape(props.source)}</small><strong>${escape(title)}</strong><p>${escape(props.stale ? "STALE · current status unconfirmed" : ROAD_IMPACTS[props.road_impact] || "Disruption reported")}</p><p>${escape(detail)}</p><dl>${fields.filter(([,v])=>v).map(([k,v])=>`<div><dt>${escape(k)}</dt><dd>${escape(v)}</dd></div>`).join("")}</dl><p class="intel-feature-caution">Coverage is incomplete. No report does not mean a road is open. Vehicle and direction restrictions may apply.</p>${source ? `<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">${escape(props.attribution || pack.attribution)} ↗</a>` : ""}</article>`;
+  }
   if (TRAFFIC_IDS.includes(pack.id)) {
     const altitude = props.altitude_m == null ? props.altitude_reference : `${props.altitude_m} m`;
     const speed = props.speed_knots == null ? "Unknown speed" : `${Number(props.speed_knots).toFixed(0)} kn`;
@@ -169,6 +180,10 @@ export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null)
   if (pack.id === "gdacs") { installGdacsIcons(map); data = gdacsDisplayData(data); }
   if (!map.getSource(id)) map.addSource(id, {type: "geojson", data});
   else map.getSource(id).setData(data);
+  if (pack.id === "roads") {
+    for (const layer of roadLayers(id)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
+    return;
+  }
   if (TRAFFIC_IDS.includes(pack.id)) {
     installTrafficIcons(map);
     for (const layer of trafficLayers(id)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
@@ -206,7 +221,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const types = packById("gdacs")?.disaster_types?.filter(type => GDACS_TYPES.some(known => known.id === type.id));
     return types?.length ? types : GDACS_TYPES;
   };
-  const visibleData = (id, data) => TRAFFIC_IDS.includes(id) ? trafficDisplayData(id, data, trafficFilters[id]) : id === "gdacs" ? {...gdacsDisplayData(data, gdacsTypes), gdacs_types: [...gdacsTypes]} : data;
+  const visibleData = (id, data) => id === "roads" ? roadDisplayData(data) : TRAFFIC_IDS.includes(id) ? trafficDisplayData(id, data, trafficFilters[id]) : id === "gdacs" ? {...gdacsDisplayData(data, gdacsTypes), gdacs_types: [...gdacsTypes]} : data;
   const currentPacks = () => catalogue.packs.map(pack => ({...pack, enabled: enabled.has(pack.id)}));
   const isVisible = context => globalThis.document?.visibilityState !== "hidden" && (!context.map.getContainer?.()?.getClientRects || context.map.getContainer().getClientRects().length > 0);
   const activeMap = () => [...maps.values()].reverse().find(isVisible);
@@ -608,6 +623,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     }
     updateCredit(context);
     updateTrafficTrack(context);
+    updateRoadPopup(context);
     renderStatus();
     trafficAnimator.start();
   }
@@ -671,16 +687,24 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         let data = mergeIntelResults(parts);
         const previous = context.data.get(pack.id);
         if (traffic) data = retainTraffic(previous, data);
+        else if (pack.id === "roads") data = retainRoads(previous, data);
         else data = retainIntel(previous, data, requestedBoxes);
         results.set(pack.id, visibleData(pack.id, data));
         context.data.set(pack.id, data);
         context.tracks.get(pack.id)?.ingest(data);
         if (hasParsedStyle(context)) installIntelLayers(map, pack, animatedData(context, pack.id, data).data);
+        if (pack.id === "roads") updateRoadPopup(context);
         trafficAnimator.start();
       } catch (error) {
         if (destroyed || !enabled.has(pack.id) || context.requests.get(pack.id) !== pending) return;
-        const old = context.data.get(pack.id);
+        let old = context.data.get(pack.id);
         const failure = error.name === "AbortError" ? "Source request timed out. Try again later." : error.message;
+        if (pack.id === "roads" && old) {
+          old = roadDisplayData({...old, features: old.features.map(feature => ({...feature, properties: {...feature.properties, stale: true}}))});
+          context.data.set(pack.id, old);
+          map.getSource(sourceId(pack.id))?.setData(old);
+          updateRoadPopup(context);
+        }
         results.set(pack.id, visibleData(pack.id, old?.features?.length ? {...old, status: "stale", error: failure} : {status: "error", error: failure}));
       } finally {
         clearTimeout(timeout);
@@ -701,6 +725,14 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const identity = String(feature?.properties?.identity || "").toLowerCase();
     const profile = packId === "flights" ? context.aircraftProfiles.get(identity) : null;
     return {...feature, properties: {...feature.properties, ...(profile || {}), ...additions}};
+  }
+
+  function updateRoadPopup(context) {
+    if (!context.selectedRoad) return;
+    if (!enabled.has("roads")) { context.popup?.remove(); return; }
+    const feature = roadDisplayData(context.data.get("roads")).features.find(f => f.id === context.selectedRoad);
+    if (!feature) { context.popup?.remove(); return; }
+    context.popup?.setHTML(intelFeatureHtml(feature, packById("roads"), results.get("roads")));
   }
 
   async function loadAircraftProfile(context, identity) {
@@ -793,6 +825,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (!context.Popup || event.originalEvent?.target?.closest?.(".maplibregl-marker,button,a")) return;
       context.popup?.remove(); context.popup = null;
       context.selectedTraffic = null;
+      context.selectedRoad = null;
       clearTrafficTrack(map);
       const features = map.queryRenderedFeatures(event.point);
       if (features.some(feature => isTeamLayer(feature.layer))) return;
@@ -806,8 +839,10 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       popup.on?.("close", () => {
         if (context.popup !== popup) return;
         context.popup = null; context.selectedTraffic = null;
+        context.selectedRoad = null;
         clearTrafficTrack(map);
       });
+      if (id === "roads") context.selectedRoad = feature.properties?.road_id || feature.id;
       if (TRAFFIC_IDS.includes(id)) {
         const observed = context.data.get(id)?.features.find(item => trafficKey(item) === trafficKey(feature));
         // Rendered IDs may be MapLibre IDs and coordinates may be predicted.
@@ -858,9 +893,15 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   if (typeof window !== "undefined") listen(window, "online", () => { if (enabled.has("elevation")) void refresh(); });
   const interval = setInterval(() => { for (const context of maps.values()) if (isVisible(context) && !context.requests.size) schedule(context, 0); }, 60000);
   const trafficInterval = setInterval(() => {
-    if (!TRAFFIC_IDS.some(id => enabled.has(id))) return;
+    if (!enabled.has("roads") && !TRAFFIC_IDS.some(id => enabled.has(id))) return;
     for (const context of maps.values()) {
       if (!isVisible(context)) { releaseTraffic(context); continue; }
+      if (enabled.has("roads") && context.data.has("roads")) {
+        const data = roadDisplayData(context.data.get("roads"));
+        context.data.set("roads", data);
+        context.map.getSource(sourceId("roads"))?.setData(data);
+        updateRoadPopup(context);
+      }
       for (const id of TRAFFIC_IDS) if (enabled.has(id) && context.data.has(id)) {
         const data = visibleData(id, context.data.get(id));
         context.map.getSource(sourceId(id))?.setData(animatedData(context, id, context.data.get(id)).data);

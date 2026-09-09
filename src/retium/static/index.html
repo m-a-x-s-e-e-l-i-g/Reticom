@@ -7,8 +7,8 @@
   <title>Reticom</title>
   <link rel="icon" href="/favicon.ico?v=20260908-1" sizes="any">
   <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css?v=6.6.0">
-  <link rel="stylesheet" href="/styles.css?v=20260907-10">
-  <link rel="stylesheet" href="/intel-packs.css?v=20260908-6">
+  <link rel="stylesheet" href="/styles.css?v=20260909-7">
+  <link rel="stylesheet" href="/intel-packs.css?v=20260909-7">
   <link rel="stylesheet" href="/command-workspace.css?v=20260908-3">
 </head>
 <body>
@@ -460,6 +460,7 @@
         <button id="shareWaypointNavigation" type="button" class="secondary compact" aria-pressed="false" aria-label="Share route with team" disabled>SHARE</button>
         <button id="stopWaypointNavigation" type="button" class="navigation-end" aria-label="End navigation" title="End navigation">×</button>
         <small id="waypointNavigationState" class="visually-hidden">ACQUIRING POSITION</small>
+        <small id="waypointRoadStatus" class="navigation-road-status" hidden></small>
         <small id="navigationShareState" class="visually-hidden">PRIVATE NAVIGATION</small>
       </div>
       <div id="latestMessages" class="latest-messages hidden" aria-live="polite"></div>
@@ -575,6 +576,6 @@
   </nav>
 
   <div id="toast" class="toast"></div>
-  <script type="module" src="/app.js?v=20260909-6"></script>
+  <script type="module" src="/app.js?v=20260909-7"></script>
 </body>
 </html>

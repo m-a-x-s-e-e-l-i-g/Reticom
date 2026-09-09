@@ -222,7 +222,7 @@ class OfflineRouting:
             shutil.rmtree(directory)
             return self.listing()
 
-    def route(self, origin, target, profile):
+    def route(self, origin, target, profile, alternatives=False):
         origin, target = point(origin), point(target)
         if profile not in ("walking", "driving"):
             raise RoutingError("Choose walking or driving", "invalid_profile")
@@ -235,6 +235,8 @@ class OfflineRouting:
             request = {"locations": [{"lon": p[0], "lat": p[1], "radius": 100} for p in (origin, target)],
                        "costing": "pedestrian" if profile == "walking" else "auto",
                        "format": "osrm", "shape_format": "geojson", "units": "kilometers"}
+            if alternatives:
+                request["alternates"] = 2
             for pack in sorted(packs, key=lambda p: p["created_at"], reverse=True):
                 try:
                     result = self.engine.route(self._directory(pack["id"]) / "valhalla.json", request)
@@ -243,7 +245,15 @@ class OfflineRouting:
                         continue
                     if not all(contains(pack["bounds"], point(p)) for p in coords):
                         continue
-                    return {**result, "source": "offline", "pack": pack["name"],
+                    valid_routes = []
+                    for candidate in result.get("routes", [])[:4]:
+                        geometry = candidate.get("geometry", {})
+                        coordinates = geometry.get("coordinates", [])
+                        if geometry.get("type") == "LineString" and len(coordinates) >= 2 and all(contains(pack["bounds"], point(p)) for p in coordinates):
+                            valid_routes.append(candidate)
+                    if not valid_routes:
+                        continue
+                    return {**result, "routes": valid_routes, "source": "offline", "pack": pack["name"],
                             "data_date": pack["created_at"], "profile": profile}
                 except RuntimeError as exc:
                     # Configuration/native failures are not a missing road.
@@ -314,10 +324,12 @@ def offline_routing_router(data_dir: Path):
             body = json.loads(raw)
             if not isinstance(body, dict):
                 raise RoutingError("Invalid route request")
+            if type(body.get("alternatives", False)) is not bool:
+                raise RoutingError("Invalid route alternatives option")
             if store.route_lock.locked():
                 raise RoutingError("A route is still being calculated. Try again shortly.", "routing_busy", 409)
             async with store.route_lock:
-                task = asyncio.create_task(asyncio.to_thread(store.route, body.get("origin"), body.get("target"), body.get("profile", "driving")))
+                task = asyncio.create_task(asyncio.to_thread(store.route, body.get("origin"), body.get("target"), body.get("profile", "driving"), body.get("alternatives", False)))
                 try:
                     return await asyncio.shield(task)
                 except asyncio.CancelledError:

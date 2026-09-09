@@ -27,6 +27,24 @@ MAX_BYTES = 16_000_000
 MAX_RECORDS, MAX_POSITIONS = 10000, 250000
 STALE_SECONDS, EXPIRE_SECONDS = 600, 3600
 XSI = "{http://www.w3.org/2001/XMLSchema-instance}type"
+ROAD_TYPES = {
+    "closures": "Closures & restrictions", "roadworks": "Roadworks", "accidents": "Accidents",
+    "vehicle_obstruction": "Vehicle obstruction", "weather": "Weather & flooding", "other": "Other incidents",
+}
+ROAD_IMPACTS = ("closed", "restricted", "incident")
+DEFAULT_ROAD_TYPES = tuple(key for key in ROAD_TYPES if key != "vehicle_obstruction")
+
+
+def validate_road_filters(value):
+    if not isinstance(value, dict) or set(value) - {"types", "impacts"}:
+        raise ValueError("Choose valid road report filters")
+    result = {}
+    for key, allowed, default in (("types", ROAD_TYPES, DEFAULT_ROAD_TYPES), ("impacts", ROAD_IMPACTS, ROAD_IMPACTS)):
+        selected = value.get(key, list(default))
+        if not isinstance(selected, list) or any(not isinstance(v, str) or v not in allowed for v in selected):
+            raise ValueError("Choose valid road report filters")
+        result[key] = [v for v in allowed if v in selected]
+    return result
 
 
 def timestamp(value):
@@ -185,7 +203,11 @@ def parse_ndw(raw, now):
                                timestamp(value(record, "situationRecordVersionTime")), impact, reason,
                                road or label(management or kind), detail,
                                restrictions=restrictions, direction=value(record, "directionRelativeOnLinearSection"),
-                               authority=texts(record, "sourceName")))
+                               authority=texts(record, "sourceName"),
+                               road_type={"VehicleObstruction":"vehicle_obstruction", "Accident":"accidents",
+                                   "WeatherRelatedRoadConditions":"weather", "EnvironmentalObstruction":"weather",
+                                   "ConstructionWorks":"roadworks", "MaintenanceWorks":"roadworks",
+                                   "RoadOrCarriagewayOrLaneManagement":"closures", "GeneralNetworkManagement":"closures"}.get(kind, "other")))
     return features, publication
 
 
@@ -223,7 +245,7 @@ def parse_wzdx(raw, now):
         features.append(report("ncdot", row["id"], {"type":"MultiLineString", "coordinates":lines}, start, end,
                                timestamp(core.get("update_date")), impact, "Roadworks · " + label(vehicle),
                                ", ".join(core.get("road_names") or []) or "Roadworks", core.get("description"),
-                               direction=core.get("direction"), restrictions=clean(p.get("restrictions") or "")))
+                               direction=core.get("direction"), restrictions=clean(p.get("restrictions") or ""), road_type="roadworks"))
     return features, publication
 
 
@@ -240,7 +262,7 @@ class RoadDisruptions:
         self.next_fetch = {}
         self.failed = set()
 
-    def snapshot(self, key):
+    def snapshot(self, key, *, cached_only=False):
         source = SOURCES[key]
         path = self.directory / f"{key}.json"
         with self.locks[key]:
@@ -248,8 +270,10 @@ class RoadDisruptions:
                 return None
             now = self.clock()
             cached = self.store._read(path)
-            if cached and (cached.get("version") != 1 or not 0 <= now - cached.get("received_at", 0) <= EXPIRE_SECONDS):
+            if cached and (cached.get("version") != 2 or not 0 <= now - cached.get("received_at", 0) <= EXPIRE_SECONDS):
                 cached = None
+            if cached_only:
+                return cached
             if now < self.next_fetch.get(key, 0) or cached and now - cached["received_at"] < source["interval"]:
                 return cached
             self.next_fetch[key] = now + source["interval"]
@@ -267,14 +291,14 @@ class RoadDisruptions:
                     return cached
                 if not self.store.is_enabled("roads"):
                     return None
-                cached = {"version":1, "received_at":now, "published_at":published, "features":features}
+                cached = {"version":2, "received_at":now, "published_at":published, "features":features}
                 self.store._write(path, cached)
                 self.failed.discard(key)
             except Exception:
                 self.failed.add(key)  # Never expose upstream response details.
             return cached
 
-    def load(self, bounds, zoom):
+    def load(self, bounds, zoom, *, cached_only=False):
         from .intel_packs import validate_bounds
         bounds = validate_bounds(bounds)
         if not math.isfinite(zoom) or not 0 <= zoom <= 24:
@@ -287,7 +311,7 @@ class RoadDisruptions:
             return {**empty, "status":"uncovered", "note":"No connected road feed for this area. Coverage: Netherlands and North Carolina, US."}
         features, replaced, missing = [], [], []
         for key in selected:
-            snapshot = self.snapshot(key)
+            snapshot = self.snapshot(key, cached_only=cached_only)
             if not snapshot:
                 missing.append(SOURCES[key]["name"])
                 continue

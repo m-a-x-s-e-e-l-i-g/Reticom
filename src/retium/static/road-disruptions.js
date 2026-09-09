@@ -1,4 +1,15 @@
 // Closure reports are time-sensitive; never use the indefinite area cache.
+export const ROAD_TYPES = {closures:"Closures & restrictions",roadworks:"Roadworks",accidents:"Accidents",vehicle_obstruction:"Vehicle obstruction",weather:"Weather & flooding",other:"Other incidents"};
+export function normalizeRoadFilters(value) {
+  const types = Object.keys(ROAD_TYPES), impacts = ["closed", "restricted", "incident"];
+  return {types: Array.isArray(value?.types) ? types.filter(v => value.types.includes(v)) : types.filter(v => v !== "vehicle_obstruction"),
+    impacts: Array.isArray(value?.impacts) ? impacts.filter(v => value.impacts.includes(v)) : impacts};
+}
+export function filterRoadReports(data, filters, now = Date.now()/1000) {
+  filters = normalizeRoadFilters(filters);
+  const current = roadDisplayData(data, now);
+  return {...current, features:current.features.filter(f => filters.types.includes(f.properties.road_type || "other") && filters.impacts.includes(f.properties.road_impact))};
+}
 export function roadDisplayData(data, now = Date.now()/1000) {
   return {...data, type:"FeatureCollection", features:(data?.features || []).filter(feature => {
     const p = feature.properties || {};

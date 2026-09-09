@@ -1,9 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {roadDisplayData,retainRoads,roadLayers} from "../src/retium/static/road-disruptions.js";
+import {roadDisplayData,retainRoads,roadLayers,filterRoadReports,normalizeRoadFilters} from "../src/retium/static/road-disruptions.js";
 import {createIntelPacks,intelFeatureHtml,mergeIntelResults,intelLayerWarning} from "../src/retium/static/intel-packs.js";
 const fix=(id="one",source="ndw",extra={})=>({type:"Feature",id,geometry:{type:"MultiLineString",coordinates:[[[4,51],[4.01,51.01]]]},properties:{road_id:id,road_source:source,road_impact:"closed",title:"Road",starts_at:900,ends_at:2000,stale_at:1100,expires_at:1500,...extra}});
 const data=(features=[],extra={})=>({type:"FeatureCollection",features,status:"fresh",...extra});
+
+test("vehicle obstructions start hidden and report/impact filters combine without losing cache",()=>{
+  const all=data([fix("vehicle","ndw",{road_type:"vehicle_obstruction",road_impact:"incident"}),fix("closure","ndw",{road_type:"closures"})]);
+  assert.deepEqual(filterRoadReports(all,undefined,1000).features.map(f=>f.id),["closure"]);
+  assert.deepEqual(filterRoadReports(all,{types:["vehicle_obstruction"],impacts:["incident"]},1000).features.map(f=>f.id),["vehicle"]);
+  assert.equal(filterRoadReports(all,{types:["vehicle_obstruction"],impacts:["closed"]},1000).features.length,0);
+  assert.equal(filterRoadReports(all,{types:[],impacts:[]},1000).features.length,0);
+  assert.equal(all.features.length,2);
+  assert.equal(normalizeRoadFilters({types:[]}).types.length,0);
+});
 
 test("viewport merging preserves uncovered status and every authoritative road source",()=>{
   const uncovered=mergeIntelResults([data([],{status:"uncovered",note:"No connected road feed"})]);

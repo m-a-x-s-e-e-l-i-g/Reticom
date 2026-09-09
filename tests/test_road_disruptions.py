@@ -163,3 +163,20 @@ def test_endpoint_toggle_and_no_coverage_without_reticulum(tmp_path):
         assert client.patch("/api/intel-packs/settings",json={"enabled":["roads"]}).status_code==200
         assert client.get(url).json()["status"]=="uncovered"
         assert client.get(url.replace("west=10","west=nan")).status_code==422
+
+
+def test_road_filters_default_exclude_vehicle_obstruction_and_persist(tmp_path):
+    store=IntelPackStore(tmp_path)
+    assert "vehicle_obstruction" not in store.catalogue()["settings"]["road_filters"]["types"]
+    filters={"types":["vehicle_obstruction"],"impacts":["incident"]}
+    store.update({"road_filters":filters})
+    assert IntelPackStore(tmp_path).catalogue()["settings"]["road_filters"] == filters
+    store.update({"road_filters":{"types":[],"impacts":[]}})
+    assert IntelPackStore(tmp_path).road_filters == {"types":[],"impacts":[]}
+    with pytest.raises(ValueError): store.update({"road_filters":{"types":["invalid"]}})
+
+
+def test_provider_classification_preserves_vehicle_obstruction_type():
+    raw=ndw().replace(b'RoadOrCarriagewayOrLaneManagement',b'VehicleObstruction')
+    assert parse_ndw(raw,NOW)[0][0]["properties"]["road_type"] == "vehicle_obstruction"
+    assert parse_wzdx(wzdx(),NOW)[0][0]["properties"]["road_type"] == "roadworks"

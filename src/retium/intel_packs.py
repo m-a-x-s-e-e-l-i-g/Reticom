@@ -198,7 +198,7 @@ class IntelPackStore:
         scope = list(bbox) if detail else "overview"
         return hashlib.sha256(json.dumps([credential_hash, scope]).encode()).hexdigest()
 
-    def _cached(self, pack_id, bbox, credential_hash):
+    def _cached(self, pack_id, bbox, credential_hash, *, partial=False):
         candidates = []
         for path in self.cache_dir.glob(f"{pack_id}-*.json"):
             entry = self._read(path)
@@ -208,11 +208,11 @@ class IntelPackStore:
                 continue
             try:
                 age = self.clock() - float(entry["fetched_at"])
-                if (entry.get("pinned") or 0 <= age <= STALE_LIMIT.get(pack_id, 86400)) and (intersects(entry["bounds"], bbox) if pack_id in OSM_PACKS else contains(entry["bounds"], bbox)):
+                if (entry.get("pinned") or 0 <= age <= STALE_LIMIT.get(pack_id, 86400)) and (intersects(entry["bounds"], bbox) if partial or pack_id in OSM_PACKS else contains(entry["bounds"], bbox)):
                     candidates.append(entry)
             except (TypeError, ValueError, KeyError):
                 continue
-        if pack_id not in OSM_PACKS or not candidates:
+        if (pack_id not in OSM_PACKS and not partial) or not candidates:
             return max(candidates, key=lambda entry: entry["fetched_at"], default=None)
         candidates.sort(key=lambda entry: entry["fetched_at"], reverse=True)
         fresh = [entry for entry in candidates if entry.get("pinned") or self.clock() < entry["fetched_at"] + CATALOGUE[pack_id]["ttl_seconds"]]
@@ -329,6 +329,14 @@ class IntelPackStore:
         usage["packs"][pack_id]["bytes"] += max(0, int(data.get("source_bytes", len(json.dumps(data).encode()))))
         self._write(self.usage_path, usage)
 
+    def _wide_cached_view(self, pack_id, bbox, note):
+        cached = self._cached(pack_id, bbox, self._cache_hash(pack_id, bbox), partial=True)
+        if not cached:
+            return {**self._empty(pack_id, "zoom_in"), "note": note}
+        fresh = cached.get("pinned") or self.clock() < cached["fetched_at"] + CATALOGUE[pack_id]["ttl_seconds"]
+        result = self._response(pack_id, cached, bbox, "cached" if fresh else "stale")
+        return {**result, "note": f"Showing saved areas. {note}", "download_limited": True}
+
     def load(self, pack_id, bbox, zoom):
         if pack_id not in CATALOGUE or pack_id == "elevation" or pack_id in TRAFFIC_IDS:
             raise ValueError("Choose a public feature pack")
@@ -345,15 +353,13 @@ class IntelPackStore:
                 if not self._configured(pack):
                     return self._empty(pack_id, "needs_key", "Add provider access in Intel packs settings.")
                 if zoom < pack["min_zoom"]:
-                    return self._empty(pack_id, "zoom_in", f"Zoom in to level {pack['min_zoom']} to load this pack.")
+                    return self._wide_cached_view(pack_id, bbox, f"Zoom in to level {pack['min_zoom']} to download additional coverage.")
                 if pack_id in OSM_PACKS:
                     west, south, east, north = bbox
                     area = (east - west) * (north - south) * 111.32**2 * max(.01, math.cos(math.radians((south + north) / 2)))
                     area_limit, span_limit = OSM_AREA_LIMIT_KM2[pack_id], OSM_SPAN_LIMIT_DEGREES[pack_id]
                     if area > area_limit or east - west > span_limit or north - south > span_limit:
-                        result = self._empty(pack_id, "zoom_in")
-                        result["note"] = f"Zoom in to an area smaller than {area_limit:,} km² for OpenStreetMap intel."
-                        return result
+                        return self._wide_cached_view(pack_id, bbox, f"Zoom in to an area smaller than {area_limit:,} km² to download additional OpenStreetMap coverage.")
                 credential_hash = self._cache_hash(pack_id, bbox)
                 credentials = dict(self.credentials)
                 gdacs_types = self.gdacs_types
@@ -515,6 +521,13 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None):
                 raise ValueError("Choose aircraft or vessels")
             result = await traffic.load(pack_id, validate_bounds((west, south, east, north)), zoom, client)
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @router.get("/live/{pack_id}/{identity}/route")
+    async def traffic_route(pack_id: str, identity: str):
+        try:
+            return JSONResponse(await traffic.route(pack_id, identity), headers={"Cache-Control": "no-store"})
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

@@ -59,13 +59,41 @@ export class TrafficTracks {
       while (this.tracks.size > TRACK_TARGETS) this.tracks.delete(this.tracks.keys().next().value);
     }
   }
-  route(key, now = Date.now()/1000) {
+  route(key, now = Date.now()/1000, history = null) {
     this.prune(now);
-    const points = this.tracks.get(String(key)) || [], lines = segments(points);
+    let points = this.tracks.get(String(key)) || [];
+    if (history?.points) {
+      const merged = new Map();
+      for (const fix of [...history.points.slice(-12000), ...points]) {
+        if (finite(fix.time) && fix.time >= now - 86400 && fix.time <= now + 30
+            && Array.isArray(fix.point) && finite(fix.point[0]) && finite(fix.point[1])
+            && Math.abs(fix.point[0]) <= 180 && Math.abs(fix.point[1]) <= 90) merged.set(fix.time, fix);
+      }
+      points = [...merged.values()].sort((a,b) => a.time-b.time).map((fix,index,array) => {
+        const previous = array[index-1], gap = previous ? fix.time-previous.time : 0;
+        return {...fix, breakBefore: fix.breakBefore || previous && (gap > (this.pack === "flights" ? 120 : 600)
+          || distance(previous.point,fix.point) > gap*(this.pack === "flights" ? 1100 : 60)+100)};
+      });
+    }
+    const lines = segments(points);
     return {count: points.length, data: {type: "FeatureCollection", features: lines.length ? [{type: "Feature", properties: {traffic_pack: this.pack}, geometry: {type: "MultiLineString", coordinates: lines}}] : []},
-      label: lines.length ? `${points.length} fixes · recent observed track (up to 15 min)` : "Waiting for consecutive position reports",
+      label: history ? `${points.length} fixes · ${history.note || "Available observed track"}` : lines.length ? `${points.length} fixes · recent observed track (up to 15 min)` : "Waiting for consecutive position reports",
     };
   }
+}
+
+export function trafficRouteBounds(data, currentPoint = null) {
+  const points = (data?.features || []).flatMap(f => f.geometry.coordinates.flat());
+  if (points.length < 2) return null;
+  if (Array.isArray(currentPoint) && currentPoint.length >= 2 && currentPoint.every(finite)) points.push(currentPoint);
+  const longitude = points.map(p => (p[0]+360)%360).sort((a,b)=>a-b);
+  let gap = -1, start = 0;
+  for (let i=0;i<longitude.length;i++) {
+    const next = i+1 === longitude.length ? longitude[0]+360 : longitude[i+1];
+    if (next-longitude[i] > gap) { gap=next-longitude[i]; start=next%360; }
+  }
+  const west = start > 180 ? start-360 : start;
+  return [[west,Math.min(...points.map(p=>p[1]))],[west+360-gap,Math.max(...points.map(p=>p[1]))]];
 }
 
 export function showTrafficTrack(map, data) {

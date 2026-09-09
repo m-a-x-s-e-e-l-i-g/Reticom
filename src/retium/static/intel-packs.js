@@ -2,9 +2,11 @@
 import {ROAD_COLOR} from "./outdoor-map.js?v=20260907-5";
 import {GDACS_TYPES, GDACS_COLOR, GDACS_ICON, gdacsCode, gdacsIconSvg, gdacsDisplayData, normalizeGdacsTypes, installGdacsIcons} from "./gdacs-markers.js?v=20260907-1";
 import {prepareContourTiles, contourLayers, contourInterval, CONTOUR_MIN_ZOOM, CONTOUR_MAX_ZOOM} from "./terrain-contours.js?v=20260907-3";
-import {TRAFFIC_IDS, TRAFFIC_TYPES, normalizeTrafficFilters, trafficDisplayData, installTrafficIcons, trafficLayers} from "./traffic-map.js?v=20260907-2";
-import {TrafficMotion, createTrafficAnimator} from "./traffic-motion.js?v=20260907-1";
-import {TrafficTracks, trafficKey, showTrafficTrack, clearTrafficTrack} from "./traffic-tracks.js?v=20260907-2";
+import {TRAFFIC_IDS, TRAFFIC_TYPES, normalizeTrafficFilters, trafficDisplayData, installTrafficIcons, trafficLayers} from "./traffic-map.js?v=20260909-3";
+import {TrafficMotion, createTrafficAnimator} from "./traffic-motion.js?v=20260909-3";
+import {TrafficTracks, trafficKey, showTrafficTrack, clearTrafficTrack} from "./traffic-tracks.js?v=20260909-3";
+import {retainTraffic} from "./traffic-cache.js?v=20260909-3";
+import {retainIntel} from "./intel-cache.js?v=20260909-4";
 const EMPTY = () => ({type: "FeatureCollection", features: []});
 // Trails are always-on basemap data, not a separately fetched/toggled intel pack.
 const IDS = ["military", "acled", "firms", "gdacs", "elevation", ...TRAFFIC_IDS];
@@ -122,7 +124,8 @@ export function intelFeatureHtml(feature, pack, result) {
   if (TRAFFIC_IDS.includes(pack.id)) {
     const altitude = props.altitude_m == null ? props.altitude_reference : `${props.altitude_m} m`;
     const speed = props.speed_knots == null ? "Unknown speed" : `${Number(props.speed_knots).toFixed(0)} kn`;
-    const age = Number.isFinite(Number(props.position_time)) ? `${Math.max(0, Math.floor(Date.now()/1000 - Number(props.position_time)))}s old` : "Time unknown";
+    const seconds = Math.max(0, Math.floor(Date.now()/1000 - Number(props.position_time)));
+    const age = Number.isFinite(seconds) ? `${props.stale ? "Last seen " : ""}${seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`} ${props.stale ? "ago" : "old"}` : "Time unknown";
     const type = pack.id === "flights" && props.aircraft_model
       ? [props.aircraft_manufacturer, props.aircraft_model].filter(Boolean).join(" · ")
       : props.type_code || props.ship_type_code || TRAFFIC_TYPES[pack.id][props.traffic_type] || "Type unknown";
@@ -204,21 +207,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     return types?.length ? types : GDACS_TYPES;
   };
   const visibleData = (id, data) => TRAFFIC_IDS.includes(id) ? trafficDisplayData(id, data, trafficFilters[id]) : id === "gdacs" ? {...gdacsDisplayData(data, gdacsTypes), gdacs_types: [...gdacsTypes]} : data;
-  // A live provider may need a moment to subscribe to a newly moved viewport.
-  // Never replace a valid live picture with an empty "waiting" response: retain
-  // the last observed target positions until they expire in trafficDisplayData.
-  const retainTraffic = (id, previous, incoming) => {
-    if (!previous?.features?.length || !TRAFFIC_IDS.includes(id)) return incoming;
-    if (!["waiting", "stale", "error"].includes(incoming.status) && incoming.features?.length) {
-      const features = new Map(previous.features.map(feature => [trafficKey(feature), feature]));
-      for (const feature of incoming.features) features.set(trafficKey(feature), feature);
-      return {...incoming, features: [...features.values()]};
-    }
-    if (!incoming.features?.length && ["waiting", "stale", "error"].includes(incoming.status)) {
-      return {...previous, status: "stale", error: incoming.error, note: incoming.note || "Showing recent positions while the live view refreshes."};
-    }
-    return incoming;
-  };
   const currentPacks = () => catalogue.packs.map(pack => ({...pack, enabled: enabled.has(pack.id)}));
   const isVisible = context => globalThis.document?.visibilityState !== "hidden" && (!context.map.getContainer?.()?.getClientRects || context.map.getContainer().getClientRects().length > 0);
   const activeMap = () => [...maps.values()].reverse().find(isVisible);
@@ -227,6 +215,13 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   };
   const motionPreference = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)");
   const animatedData = (context, id, data, now = Date.now()/1000) => {
+    const selected = context.selectedTraffic;
+    if (selected?.pack === id) {
+      const reported = data.features.find(feature => trafficKey(feature) === selected.key);
+      if (reported && reported.properties.position_time >= selected.feature.properties.position_time) selected.feature = reported;
+      data = {...data, features: [...data.features.filter(feature => trafficKey(feature) !== selected.key),
+        {...selected.feature, properties: {...selected.feature.properties, traffic_selected: true}}]};
+    }
     const filtered = visibleData(id, data);
     return TRAFFIC_IDS.includes(id) ? context.motion.get(id).sample(filtered, now, !motionPreference?.matches) : {data: filtered, active: false};
   };
@@ -270,7 +265,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     panel.setAttribute("aria-label", "Public intel packs");
     panel.innerHTML = `<header class="intel-packs-head"><div><span class="intel-packs-eyebrow">MAP CONTEXT</span><h2>Intel packs</h2></div><button type="button" data-intel-close aria-label="Close intel packs">×</button></header><p class="intel-packs-intro">Optional public layers. Separate from your team's reports.</p><p class="intel-packs-privacy">Enabling a pack sends the viewed map area to its provider over the Internet. Choices and access keys stay on this device.</p><div class="intel-pack-list"></div><p class="intel-packs-notice" role="status" aria-live="polite"></p><div class="intel-packs-actions"><button type="button" data-intel-refresh>Refresh this view</button></div><p class="intel-packs-footnote">Recently viewed data is cached locally, not included in offline map downloads. Public coverage and freshness vary. Never rely on these layers alone for safety or access.</p>`;
     panel.setAttribute("aria-label", "Map layers and intel packs");
-    panel.querySelector(".intel-packs-footnote").textContent = "Public layers are cached locally, separate from offline maps. Traffic motion is estimated between reports, then pauses if updates stop. Live traffic stays in memory and expires without fresh reports. Coverage varies; never rely on these layers alone for safety or access.";
+    panel.querySelector(".intel-packs-footnote").textContent = "Public layers are cached locally, separate from offline maps. Saved markers and areas stay visible when zooming out; zoom in to download additional coverage. Traffic motion is estimated briefly between reports, then pauses. Last-seen positions remain for 30 minutes; a selected target stays until closed. Wide views keep the last regional feed active. Coverage varies; never rely on these layers alone for safety or access.";
     panel.querySelector("h2").textContent = "Map layers";
     panel.querySelector(".intel-packs-intro").textContent = "Choose your map, terrain and public context.";
     panel.querySelector(".intel-pack-list").insertAdjacentHTML("beforebegin", `<section class="map-layer-options"><h3>Map & terrain</h3>${setMapStyle ? '<label class="map-style-select">Base map<select data-map-style aria-label="Base map"><option value="hiking">Hiking map</option><option value="satellite">Satellite</option></select></label><p>Trails are always shown as dashed lines. Mapped access and conditions can change.</p>' : ''}<div data-map-features></div></section><h3 class="intel-section-title">Intel packs</h3>`);
@@ -606,7 +601,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
             }
             continue;
           }
-          if (TRAFFIC_IDS.includes(id) || id === "gdacs" || !map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer))) installIntelLayers(map, pack, animatedData(context, id, context.data.get(id) || EMPTY()).data, contourUrl);
+          if (id !== "elevation" || !map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer))) installIntelLayers(map, pack, animatedData(context, id, context.data.get(id) || EMPTY()).data, contourUrl);
         }
         catch (error) { results.set(id, {status: "error", error: `Map layer unavailable: ${error.message}`}); }
       }
@@ -619,7 +614,8 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
 
   function schedule(context, delay = 650) {
     clearTimeout(context.timer);
-    invalidate(context);
+    // Let public requests finish into the cache even if we pan. A new viewport
+    // is queued after completion instead of repeatedly restarting slow feeds.
     context.needsRefresh = true;
     context.timer = setTimeout(() => void refreshMap(context), delay);
   }
@@ -632,20 +628,27 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       const interval = contourInterval(map.getZoom());
       results.set("elevation", interval ? {status: "ready", note: `${interval} m contour interval · labels in metres`} : {status: "zoom_in", note: "Zoom in to see contour lines"});
     }
-    await Promise.all(currentPacks().filter(pack => pack.enabled && pack.id !== "elevation" && (!trafficOnly || TRAFFIC_IDS.includes(pack.id) && !context.requests.has(pack.id))).map(async pack => {
+    await Promise.all(currentPacks().filter(pack => pack.enabled && pack.id !== "elevation" && !context.requests.has(pack.id) && (!trafficOnly || TRAFFIC_IDS.includes(pack.id))).map(async pack => {
       if (pack.configured === false) { results.set(pack.id, {status: "needs_key"}); return; }
       if (pack.id === "gdacs" && !gdacsTypes.length) {
         map.getSource(sourceId(pack.id))?.setData(EMPTY());
         results.set(pack.id, {...EMPTY(), status: "filtered", gdacs_types: []});
         return;
       }
-      if (map.getZoom() < Number(pack.min_zoom || 0)) {
-        context.data.set(pack.id, EMPTY());
-        map.getSource(sourceId(pack.id))?.setData(EMPTY());
-        results.set(pack.id, {status: "zoom_in"});
-        return;
+      const traffic = TRAFFIC_IDS.includes(pack.id);
+      const belowZoom = map.getZoom() < Number(pack.min_zoom || (traffic ? 6 : 0));
+      if (belowZoom && !traffic) {
+        // Zoom limits restrict provider downloads, not display of saved areas.
+        // The backend can also return disk-cached geometry at this zoom.
+        results.set(pack.id, {...context.data.get(pack.id), status: "zoom_in", note: "Showing saved areas. Zoom in to download additional coverage."});
       }
-      const urls = intelPackUrls(pack.id, map.getBounds(), map.getZoom()).map((url, index) => TRAFFIC_IDS.includes(pack.id) ? `${url}&client=${context.trafficClient}_${index}` : url);
+      const requestedBoxes = intelViewportBoxes(map.getBounds());
+      const requestedUrls = intelPackUrls(pack.id, map.getBounds(), map.getZoom());
+      const viewport = requestedUrls.join("|");
+      const regional = traffic && (belowZoom || context.rejectedTrafficViews.get(pack.id) === viewport);
+      const urls = (regional ? context.trafficRegions.get(pack.id) || [] : requestedUrls)
+        .map((url, index) => traffic ? `${url}&client=${context.trafficClient}_${index}` : url);
+      if (regional) results.set(pack.id, {status: "zoom_in", note: "Showing cached traffic · last regional feed stays active. Zoom in to load a new area."});
       if (!urls.length) return;
       if (pack.id === "vessels") context.vesselLeased = true;
       const pending = {abort: new AbortController()};
@@ -654,12 +657,21 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       renderStatus();
       const timeout = setTimeout(() => pending.abort.abort(), 65000);
       try {
-        const parts = await Promise.all(urls.map(url => request(url, {signal: pending.abort.signal})));
+        let parts = await Promise.all(urls.map(url => request(url, {signal: pending.abort.signal})));
         if (destroyed || !enabled.has(pack.id) || context.requests.get(pack.id) !== pending) return;
+        if (traffic && parts.some(part => part.status === "zoom_in")) {
+          context.rejectedTrafficViews.set(pack.id, viewport);
+          const fallback = context.trafficRegions.get(pack.id);
+          if (fallback?.length) parts = await Promise.all(fallback.map((url, index) => request(`${url}&client=${context.trafficClient}_${index}`, {signal: pending.abort.signal})));
+          if (destroyed || !enabled.has(pack.id) || context.requests.get(pack.id) !== pending) return;
+        } else if (traffic && !regional && parts.every(part => ["fresh", "stale", "waiting"].includes(part.status))) {
+          context.trafficRegions.set(pack.id, requestedUrls);
+          context.rejectedTrafficViews.delete(pack.id);
+        }
         let data = mergeIntelResults(parts);
         const previous = context.data.get(pack.id);
-        if (TRAFFIC_IDS.includes(pack.id)) data = retainTraffic(pack.id, previous, data);
-        else if (data.status === "error" && previous?.features?.length) data = {...previous, status: "stale", error: data.error, note: data.note};
+        if (traffic) data = retainTraffic(previous, data);
+        else data = retainIntel(previous, data, requestedBoxes);
         results.set(pack.id, visibleData(pack.id, data));
         context.data.set(pack.id, data);
         context.tracks.get(pack.id)?.ingest(data);
@@ -672,7 +684,11 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         results.set(pack.id, visibleData(pack.id, old?.features?.length ? {...old, status: "stale", error: failure} : {status: "error", error: failure}));
       } finally {
         clearTimeout(timeout);
-        if (context.requests.get(pack.id) === pending) context.requests.delete(pack.id);
+        if (context.requests.get(pack.id) === pending) {
+          context.requests.delete(pack.id);
+          const moved = intelPackUrls(pack.id, map.getBounds(), map.getZoom()).join("|") !== viewport;
+          if (!destroyed && enabled.has(pack.id) && (moved || context.needsRefresh)) schedule(context, 0);
+        }
         renderStatus();
       }
     }));
@@ -716,22 +732,41 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const selected = context.selectedTraffic;
     if (!selected) { clearTrafficTrack(context.map); return; }
     const pack = packById(selected.pack);
+    const visible = animatedData(context, selected.pack, context.data.get(selected.pack) || EMPTY()).data.features;
     const feature = enabled.has(selected.pack) && pack?.configured !== false
-      ? animatedData(context, selected.pack, context.data.get(selected.pack) || EMPTY()).data.features.find(item => trafficKey(item) === selected.key) : null;
+      ? visible.find(item => trafficKey(item) === selected.key) : null;
     if (!feature) {
       context.selectedTraffic = null;
       context.popup?.remove(); context.popup = null;
       clearTrafficTrack(context.map);
       return;
     }
-    const route = context.tracks.get(selected.pack).route(selected.key);
+    const route = context.tracks.get(selected.pack).route(selected.key, Date.now()/1000, selected.history);
+    context.map.getSource(sourceId(selected.pack))?.setData({type: "FeatureCollection", features: visible});
     showTrafficTrack(context.map, route.data);
     replaceTrafficPopup(context.popup, intelFeatureHtml(trafficPopupFeature(context, feature, selected.pack, {track_label: route.label}), pack, results.get(selected.pack)));
+    if (selected.history && Date.now() - selected.historyAt > 60000) void loadTrafficRoute(context, selected);
+  }
+
+  async function loadTrafficRoute(context, selected) {
+    selected.historyAt = Date.now();
+    try {
+      const history = await request(`/api/intel-packs/live/${selected.pack}/${encodeURIComponent(selected.key)}/route`);
+      if (!Array.isArray(history.points)) throw new Error("Invalid route history");
+      if (context.selectedTraffic !== selected) return;
+      if (history.points.length || !selected.history?.points?.length) selected.history = history;
+      updateTrafficTrack(context);
+    } catch {
+      if (context.selectedTraffic === selected) {
+        selected.history ||= {points:[],note:"History unavailable · showing locally observed positions"};
+        updateTrafficTrack(context);
+      }
+    }
   }
 
   function attachMap(map, {Popup} = {}) {
     if (maps.has(map)) { if (Popup) maps.get(map).Popup = Popup; return; }
-    const context = {map, Popup, motion: new Map(TRAFFIC_IDS.map(id => [id, new TrafficMotion(id)])), tracks: new Map(TRAFFIC_IDS.map(id => [id, new TrafficTracks(id)])), selectedTraffic: null, aircraftProfiles: new Map(), trafficClient: globalThis.crypto?.randomUUID?.() || `map-${Math.random().toString(36).slice(2)}`, requests: new Map(), data: new Map(), timer: null, popup: null, credit: null, needsRefresh: true};
+    const context = {map, Popup, motion: new Map(TRAFFIC_IDS.map(id => [id, new TrafficMotion(id)])), tracks: new Map(TRAFFIC_IDS.map(id => [id, new TrafficTracks(id)])), selectedTraffic: null, aircraftProfiles: new Map(), trafficRegions: new Map(), rejectedTrafficViews: new Map(), trafficClient: globalThis.crypto?.randomUUID?.() || `map-${Math.random().toString(36).slice(2)}`, requests: new Map(), data: new Map(), timer: null, popup: null, credit: null, needsRefresh: true};
     maps.set(map, context);
     const container = map.getContainer?.();
     if (container?.ownerDocument) {
@@ -774,8 +809,14 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         clearTrafficTrack(map);
       });
       if (TRAFFIC_IDS.includes(id)) {
-        context.selectedTraffic = {pack: id, key: trafficKey(feature)};
+        const observed = context.data.get(id)?.features.find(item => trafficKey(item) === trafficKey(feature));
+        // Rendered IDs may be MapLibre IDs and coordinates may be predicted.
+        const coordinates = [feature.properties.reported_lon, feature.properties.reported_lat];
+        const original = observed || {...feature, geometry: {...feature.geometry, coordinates: coordinates.every(Number.isFinite) ? coordinates : feature.geometry.coordinates}};
+        context.selectedTraffic = {pack: id, key: trafficKey(feature), feature: original};
         updateTrafficTrack(context);
+        map.panTo?.(feature.geometry.coordinates.slice(0, 2), {duration: motionPreference?.matches ? 0 : 300});
+        void loadTrafficRoute(context, context.selectedTraffic);
         if (id === "flights") void loadAircraftProfile(context, feature.properties?.identity);
       }
     };

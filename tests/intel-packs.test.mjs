@@ -174,10 +174,10 @@ test("contour lines and metre labels remain below team data without changing cam
 
 test("explicitly disabled packs make no provider requests, while minimum zoom and missing keys are explicit", async () => {
   const map = new FakeMap(), requests = [];
-  const controller = createIntelPacks({fetchImpl: async url => { requests.push(url); return response(catalogue([pack("trails", false), {...pack("firms"), configured: false}, {...pack("military"), min_zoom: 14}])); }});
+  const controller = createIntelPacks({fetchImpl: async url => { requests.push(url); return response(url === "/api/intel-packs" ? catalogue([pack("trails", false), {...pack("firms"), configured: false}, {...pack("military"), min_zoom: 14}]) : {...empty,status:"zoom_in"}); }});
   try {
     await controller.ready; controller.attachMap(map); await tick();
-    assert.equal(requests.length, 1);
+    assert.equal(requests.length, 2, "A wide enabled view may read locally cached areas; disabled packs never load");
     assert.equal(controller.getState().results.firms.status, "needs_key");
     assert.equal(controller.getState().results.military.status, "zoom_in");
     assert.equal(map.getSource("public-intel-trails"), undefined);
@@ -308,6 +308,75 @@ test("aircraft remain visible while a moved viewport waits for its next refresh"
     assert.equal(map.getSource("public-intel-flights").data.features.length, 1);
     assert.equal(controller.getState().results.flights.status, "stale");
   } finally { controller.destroy(); }
+});
+
+test("military markers and polygons survive zoom limits and returning while a refresh is pending", async () => {
+  const map = new FakeMap(), pending=[];
+  const polygon={...feature("area"),geometry:{type:"Polygon",coordinates:[[[3.95,50.95],[4.05,50.95],[4.05,51.05],[3.95,51.05],[3.95,50.95]]]}};
+  const original=[feature("marker"),polygon];
+  const controller=createIntelPacks({fetchImpl:async url=>{
+    if(url==="/api/intel-packs") return response(catalogue([{...pack("military"),min_zoom:9}]));
+    return new Promise(resolve=>pending.push(resolve));
+  }});
+  const shown=()=>map.getSource("public-intel-military").data.features;
+  try {
+    await controller.ready; controller.attachMap(map); await tick();
+    pending.shift()(response({...empty,status:"fresh",features:original})); await tick();
+    map.zoom=3; map.bounds={west:-10,south:40,east:20,north:60};
+    await controller.refresh(); await tick();
+    assert.deepEqual(shown(),original,"Already loaded geometry stays visible during the wide request");
+    pending.shift()(response({...empty,status:"zoom_in"})); await tick();
+    assert.deepEqual(shown(),original,"A zoom restriction cannot erase cached geometry");
+    map.zoom=12; map.bounds={west:3.9,south:50.9,east:4.1,north:51.1};
+    await controller.refresh(); await tick();
+    assert.deepEqual(shown(),original,"Zooming back needs no provider response to restore the area");
+    pending.shift()(response({...empty,status:"stale",coverage_complete:false})); await tick();
+    assert.deepEqual(shown(),original);
+    map.sources.clear(); map.layers.clear(); map.emit("style.load");
+    assert.deepEqual(shown(),original,"Style recreation restores retained geometry synchronously");
+  } finally {controller.destroy();}
+});
+
+test("wide traffic views reuse the last accepted region without repeatedly requesting impossible coverage", async () => {
+  const map = new FakeMap(), calls=[];
+  const aircraft=feature("abc123");
+  aircraft.properties={identity:"abc123",traffic_pack:"flights",position_time:Date.now()/1000};
+  const controller=createIntelPacks({fetchImpl:async url=>{
+    if(url==="/api/intel-packs") return response(catalogue([pack("flights")]));
+    calls.push(url);
+    return response({...empty,status:url.includes("west=-100")?"zoom_in":"fresh",features:url.includes("west=-100")?[]:[aircraft]});
+  }});
+  try {
+    await controller.ready; controller.attachMap(map); await tick();
+    const regional=calls[0];
+    map.bounds={west:-100,south:-60,east:100,north:60}; map.zoom=6;
+    await controller.refresh(); await tick();
+    assert.equal(calls.length,3,"One rejected wide view immediately falls back to the accepted region");
+    assert.equal(calls[2],regional);
+    await controller.refresh(); await tick();
+    assert.equal(calls.length,4); assert.equal(calls[3],regional);
+    assert.equal(map.getSource("public-intel-flights").data.features.length,1);
+  } finally {controller.destroy();}
+});
+
+test("panning lets an in-flight traffic response populate the cache", async () => {
+  const map=new FakeMap(), pending=[];
+  const aircraft=feature("abc123");
+  aircraft.properties={identity:"abc123",traffic_pack:"flights",position_time:Date.now()/1000};
+  const controller=createIntelPacks({fetchImpl:async (url,options)=>{
+    if(url==="/api/intel-packs") return response(catalogue([pack("flights")]));
+    return new Promise((resolve,reject)=>{
+      pending.push({resolve,signal:options.signal});
+      options.signal.addEventListener("abort",()=>reject(Object.assign(new Error("Aborted"),{name:"AbortError"})),{once:true});
+    });
+  }});
+  try {
+    await controller.ready; controller.attachMap(map); await tick();
+    map.bounds={west:4,south:51,east:5,north:52}; map.emit("moveend");
+    assert.equal(pending[0].signal.aborted,false);
+    pending[0].resolve(response({...empty,status:"fresh",features:[aircraft]})); await tick();
+    assert.equal(map.getSource("public-intel-flights").data.features.length,1);
+  } finally {controller.destroy();}
 });
 
 test("failed refresh keeps previous data visibly stale; failed setting saves roll back", async () => {

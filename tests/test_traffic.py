@@ -67,7 +67,8 @@ def test_vessel_static_enrichment_does_not_refresh_position_or_claim_ownership()
     assert props["position_time"] == NOW
     registry.ingest(ais("ShipStaticData", Type=35), NOW+590)
     assert "restricted" in registry.features(BOUNDS, NOW+591)[0]["properties"]["classification_note"]
-    assert registry.features(BOUNDS, NOW+601) == []
+    assert registry.features(BOUNDS, NOW+601)[0]["properties"]["position_time"] == NOW
+    assert registry.features(BOUNDS, NOW+1801) == []
     assert vessel_kind(55) == ("service", "unknown"), "law enforcement is not automatically military"
 
 
@@ -133,6 +134,8 @@ def test_flights_use_short_cache_expire_stale_and_stop_after_disable(tmp_path):
         failed = await traffic.load("flights", BOUNDS, 12, "map")
         assert failed["status"] == "stale" and "sensitive" not in json.dumps(failed)
         now[0] += 121
+        assert len((await traffic.load("flights", BOUNDS, 12, "map"))["features"]) == 1
+        now[0] += 1800
         assert (await traffic.load("flights", BOUNDS, 12, "map"))["features"] == []
         store.update({"enabled": []})
         await traffic.settings_changed()
@@ -256,6 +259,30 @@ def test_tiny_aircraft_viewport_pan_keeps_recent_global_positions(tmp_path):
         assert snapshot["status"] == "stale"
         assert len(snapshot["features"]) == 1
         assert "recent aircraft" in snapshot["note"]
+        await traffic.close()
+    asyncio.run(scenario())
+
+
+def test_aircraft_pan_replaces_obsolete_demand_and_reuses_regions(tmp_path):
+    async def scenario():
+        now, calls = [NOW], []
+        def fetch(url):
+            calls.append(url)
+            return {"now": now[0]*1000, "ac": [aircraft()]} if len(calls) == 1 else {"now": now[0]*1000, "ac": []}
+        store = IntelPackStore(tmp_path)
+        store.update({"enabled": ["flights"]})
+        traffic = LiveTraffic(store, clock=lambda: now[0], flight_fetch=fetch)
+        await traffic.load("flights", BOUNDS, 12, "map")
+        for step in range(5):
+            await traffic.load("flights", (6+step,51.4,6.5+step,51.8), 12, "map")
+        assert len(traffic.flight_views) == 1, "Panning must not leave obsolete regions in the refresh queue"
+        now[0] += 11
+        await traffic.load("flights", (10,51.4,10.5,51.8), 12, "map")
+        assert len(calls) == 2 and calls[-1] == flight_query((10,51.4,10.5,51.8))
+        returned = await traffic.load("flights", BOUNDS, 12, "map")
+        assert len(returned["features"]) == 1, "Visiting another area must not erase the first region's cache"
+        assert returned["features"][0]["properties"]["position_time"] == NOW-1
+        assert len(calls) == 2, "A cached return view should not spend another provider request"
         await traffic.close()
     asyncio.run(scenario())
 

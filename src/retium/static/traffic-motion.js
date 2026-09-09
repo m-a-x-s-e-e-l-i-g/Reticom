@@ -1,4 +1,5 @@
 // Display-only dead reckoning. Source reports/timestamps are never rewritten.
+import {TRAFFIC_CACHE_SECONDS} from "./traffic-cache.js?v=20260909-3";
 export const PREDICTION_SECONDS = {flights: 30, vessels: 60};
 const RAD = Math.PI / 180, EARTH = 6371008.8;
 const finite = value => typeof value === "number" && Number.isFinite(value);
@@ -68,7 +69,7 @@ export class TrafficMotion {
       const pose = this.pose(track, now, animate);
       active ||= pose.active;
       const original = track.feature, age = now - original.properties.position_time;
-      if (age > (this.id === "flights" ? 120 : 600)) continue;
+      if (age > TRAFFIC_CACHE_SECONDS && !original.properties.traffic_selected) continue;
       features.push({...original, geometry: {...original.geometry, coordinates: pose.point}, properties: {...original.properties,
         heading: pose.heading, stale: age > (this.id === "flights" ? 45 : 120),
         reported_lon: original.geometry.coordinates[0], reported_lat: original.geometry.coordinates[1],

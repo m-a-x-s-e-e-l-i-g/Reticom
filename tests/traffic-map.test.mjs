@@ -15,13 +15,16 @@ test("classification, type and search combine without assuming civilian ownershi
   assert.equal(trafficDisplayData("flights",source,{affiliation:"unknown"},now).features[0].id,"unknown");
   assert.equal(normalizeTrafficFilters({flights:{type:"invalid"}}).flights.type,"all");
 });
-test("old positions fade then disappear even if the source stops sending", () => {
-  const source = data(point("recent"),point("stale",{position_time:now-60}),point("expired",{position_time:now-121}),point("invalid",{position_time:"bad"}));
+test("last-seen positions remain cached for 30 minutes and selected targets stay visible", () => {
+  const source = data(point("recent"),point("stale",{position_time:now-180}),point("expired",{position_time:now-1801}),point("invalid",{position_time:"bad"}));
   const display=trafficDisplayData("flights",source,{},now);
   assert.deepEqual(display.features.map(f=>f.id),["recent","stale"]);
   assert.equal(display.features[1].properties.stale,true);
-  assert.equal(trafficDisplayData("flights",source,{},now+130).features.length,0);
-  assert.equal(trafficDisplayData("vessels",data(point("boat",{traffic_pack:"vessels",position_time:now-601})),{},now).features.length,0);
+  assert.equal(trafficDisplayData("flights",source,{},now+1801).features.length,0);
+  assert.equal(trafficDisplayData("vessels",data(point("boat",{traffic_pack:"vessels",position_time:now-601})),{},now).features.length,1);
+  const selected = data(point("selected",{position_time:now-3600,traffic_selected:true}));
+  assert.equal(trafficDisplayData("flights",selected,{},now).features.length,1);
+  assert.equal(trafficDisplayData("flights",selected,{query:"other"},now).features.length,0);
 });
 test("unknown heading is visibly distinct and sea/air shapes remain separate", () => {
   assert.equal(trafficDisplayData("flights",data(point("x",{heading:null})),{},now).features[0].properties.traffic_icon,"unknown");

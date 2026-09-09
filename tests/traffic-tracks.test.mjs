@@ -1,11 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {TrafficTracks, TRACK_SOURCE, TRACK_POINTS, TRACK_TARGETS} from "../src/retium/static/traffic-tracks.js";
+import {TrafficTracks, TRACK_SOURCE, TRACK_POINTS, TRACK_TARGETS, trafficRouteBounds} from "../src/retium/static/traffic-tracks.js";
 import {TrafficMotion} from "../src/retium/static/traffic-motion.js";
 import {createIntelPacks} from "../src/retium/static/intel-packs.js";
 
 const fix = (time, point=[0,0], pack="flights", id="one") => ({type:"Feature", id, geometry:{type:"Point",coordinates:point}, properties:{identity:id, title:id, traffic_pack:pack, position_time:time, heading:90, course:90, speed_knots:100}});
 const data = (...features) => ({type:"FeatureCollection",features});
+
+test("provider history extends beyond the browser window and dateline bounds stay narrow", () => {
+  const tracks = new TrafficTracks("flights");
+  const route = tracks.route("plane",10000,{note:"Available history",points:[
+    {time:1000,point:[179.99,0]}, {time:1010,point:[-179.99,.01]},
+    {time:1020,point:[999,1]}, {time:10001,point:[NaN,1]},
+  ]});
+  assert.equal(route.count,2);
+  const bounds = trafficRouteBounds(route.data);
+  assert.ok(bounds[1][0]-bounds[0][0]<1);
+  assert.match(route.label,/Available history/);
+});
 
 for (const pack of ["flights", "vessels"]) test(`${pack}: stores real fixes without cached duplicates or older rewinds`, () => {
   const model = new TrafficTracks(pack), first = data(fix(1000,[0,0],pack));
@@ -64,15 +76,15 @@ test("history is time-, point- and target-bounded and can be cleared", () => {
   model.ingest(data(fix(2001)),2001); model.clear(); assert.equal(model.tracks.size,0);
 });
 
-test("click selection, new reports, popup close, style changes and filters manage one dashed track without camera movement", async () => {
-  const originalNow=Date.now; let now=1000, report=fix(now), popup, clicks=[], fetches=0;
+test("selection centers the marker without changing zoom; routes and updates never reframe the map", async () => {
+  const originalNow=Date.now; let now=1000, report=fix(now), popup, clicks=[], fetches=0, historyAvailable=false, pans=[], zoom=12, emptyFeed=false;
   Date.now=()=>now*1000;
   const sources=new Map(),layers=new Map(),events=new Map();
-  const map={getStyle:()=>({layers:[...layers.values()]}),getZoom:()=>12,getBounds:()=>({west:-1,south:-1,east:1,north:1}),
+  const map={getStyle:()=>({layers:[...layers.values()]}),getZoom:()=>zoom,getBounds:()=>({west:-1,south:-1,east:1,north:1}),
     getSource:id=>sources.get(id),addSource:(id,value)=>sources.set(id,{...value,setData(data){this.data=data;}}),removeSource:id=>sources.delete(id),
     getLayer:id=>layers.get(id),addLayer:layer=>layers.set(layer.id,layer),removeLayer:id=>layers.delete(id),
     on:(name,fn)=>events.set(name,fn),off:name=>events.delete(name),queryRenderedFeatures:()=>clicks,
-    jumpTo:()=>assert.fail("Keep camera"),fitBounds:()=>assert.fail("Keep zoom")};
+    jumpTo:()=>assert.fail("Keep zoom"),fitBounds:()=>assert.fail("Never fit the route"),panTo:(center,options)=>{assert.equal(options.zoom,undefined);pans.push(center);}};
   class Popup {
     constructor(){popup=this;this.events=new Map();}
     setLngLat(){return this;} setHTML(html){this.html=html;return this;} addTo(){return this;}
@@ -87,12 +99,18 @@ test("click selection, new reports, popup close, style changes and filters manag
   try {
     controller=createIntelPacks({fetchImpl:async(url,options={})=>{
       fetches++;
+      if (url.includes("/live/") && url.includes("?")) {
+        assert.ok(Number(new URL(url,"http://localhost").searchParams.get("zoom")) >= 6,"Wide route view keeps a regional subscription");
+        if (emptyFeed) return {ok:true,json:async()=>({...data(),status:"fresh"})};
+      }
+      if (url.endsWith("/route") && historyAvailable) return {ok:true,json:async()=>({note:"Provider history",points:[{time:now-300,point:[-.5,0]},{time:now-290,point:[-.49,0]}]})};
       if(options.method==="PATCH") settings={...settings,...JSON.parse(options.body)};
       return {ok:true,json:async()=>url.includes("/live/") ? data({...report,properties:{...report.properties,traffic_pack:url.includes("vessels")?"vessels":"flights"}})
         : {settings,packs:["flights","vessels"].map(id=>({id,configured:true,enabled:settings.enabled.includes(id)}))}};
     }});
     await controller.ready;controller.attachMap(map,{Popup});await wait();
     click();assert.match(popup.html,/Waiting for consecutive/);
+    assert.deepEqual(pans.at(-1),report.geometry.coordinates);assert.equal(zoom,12);
     assert.equal(sources.get(TRACK_SOURCE).data.features.length,0);
     now=1010;report=fix(now,[.001,0]);await controller.refresh();await wait();
     assert.equal(sources.get(TRACK_SOURCE).data.features.length,1);
@@ -100,7 +118,9 @@ test("click selection, new reports, popup close, style changes and filters manag
     assert.match(popup.html,/2 fixes/);
     const count=fetches;click("vessels");
     assert.equal(sources.get(TRACK_SOURCE).data.features[0].properties.traffic_pack,"vessels");
-    assert.equal(fetches,count,"Selecting a track does not call providers");
+    assert.equal(fetches,count+1,"Selecting a track requests its available history");
+    assert.deepEqual(pans.at(-1),report.geometry.coordinates,"Ship selection centers its marker too");
+    assert.equal(zoom,12,"Ship selection preserves zoom");
     sources.clear();layers.clear();events.get("style.load")();await wait();
     assert.equal(sources.get(TRACK_SOURCE).data.features.length,1);
     popup.remove();assert.equal(sources.has(TRACK_SOURCE),false);
@@ -108,8 +128,18 @@ test("click selection, new reports, popup close, style changes and filters manag
     click();await controller.setTrafficFilters("flights",{query:"not-present"});await wait();assert.equal(sources.has(TRACK_SOURCE),false);
     click("vessels");await controller.setEnabled("vessels",false);await wait();assert.equal(sources.has(TRACK_SOURCE),false);
     await controller.setTrafficFilters("flights",{});await wait();click();
-    now=1300;await controller.refresh();await wait();assert.equal(sources.has(TRACK_SOURCE),false,"Expired target clears selection");
+    now=1300;await controller.refresh();await wait();assert.equal(sources.has(TRACK_SOURCE),true,"Last-seen target keeps its selection");
     now=1310;report=fix(now);await controller.refresh();await wait();click();
+    historyAvailable=true;const before=pans.length;click();await wait();
+    assert.equal(pans.length,before+1,"Only the selection centers the marker");assert.equal(zoom,12,"Available history preserves zoom");
+    emptyFeed=true;
+    zoom=3;events.get("moveend")();
+    await controller.refresh();await wait();assert.equal(pans.length,before+1,"Live updates do not repeatedly move the camera");
+    assert.equal(sources.get(TRACK_SOURCE).data.features.length,1,"Route survives zooming below traffic minimum");
+    assert.equal(sources.get("public-intel-flights").data.features.length,1,"Selected aircraft survives empty refresh at zoom 3");
+    now=4000;await controller.refresh();await wait();
+    assert.equal(sources.get("public-intel-flights").data.features.length,1,"Selected aircraft remains beyond normal cache expiry");
+    assert.match(popup.html,/Last seen/);
     events.get("remove")();assert.equal(sources.has(TRACK_SOURCE),false);
   } finally {controller?.destroy();Date.now=originalNow;}
 });

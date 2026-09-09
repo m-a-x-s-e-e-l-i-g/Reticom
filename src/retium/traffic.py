@@ -36,6 +36,8 @@ MAX_LEASES = 6
 LEASE_SECONDS = 35
 FLIGHT_MAX_AGE = 120
 VESSEL_MAX_AGE = 600
+TRAFFIC_CACHE_SECONDS = 1800
+MAX_CACHED_TARGETS = 6000
 AIS_URL = "wss://stream.aisstream.io/v0/stream"
 AIS_POSITION = ("PositionReport", "StandardClassBPositionReport", "ExtendedClassBPositionReport")
 AIS_TYPES = (*AIS_POSITION, "ShipStaticData", "StaticDataReport")
@@ -271,8 +273,9 @@ def ais_timestamp(metadata, now):
 
 
 class VesselRegistry:
-    def __init__(self):
+    def __init__(self, on_position=None):
         self.records = OrderedDict()
+        self.on_position = on_position
 
     def ingest(self, envelope, now):
         if not isinstance(envelope, dict) or envelope.get("MessageType") not in AIS_TYPES:
@@ -318,11 +321,13 @@ class VesselRegistry:
                           speed_knots=number(message.get("Sog"), 0, 102.2))
         # Static reports enrich a target, never refresh its position or resurrect it.
         record["metadata_time"] = now
+        if kind in AIS_POSITION and self.on_position and "position_time" in record:
+            self.on_position(record)
 
     def features(self, bounds, now):
         result = []
         for mmsi, record in list(self.records.items()):
-            if now-record.get("position_time", record["metadata_time"]) > VESSEL_MAX_AGE:
+            if now-record.get("position_time", record["metadata_time"]) > TRAFFIC_CACHE_SECONDS:
                 self.records.pop(mmsi, None)
                 continue
             if "position_time" not in record:
@@ -346,12 +351,17 @@ class LiveTraffic:
         self.flight_lock = asyncio.Lock()
         self.flight_data, self.flight_at, self.flight_next = [], 0, 0
         self.flight_views = OrderedDict()
+        self.flight_clients = OrderedDict()
         self.flight_epoch = 0
         self.flight_capped = False
         self.flight_error = None
         self.aircraft_profiles = OrderedDict()
+        from .traffic_history import TrafficHistory
+        self.history = TrafficHistory(store.directory / "traffic-history.sqlite3", clock=clock)
+        self.route_cache = OrderedDict()
+        self.route_lock = asyncio.Lock()
         self.leases = OrderedDict()
-        self.registry = VesselRegistry()
+        self.registry = VesselRegistry(self.record_vessel)
         self.task = None
         self.closed = False
         self.ais_state = "waiting"
@@ -368,6 +378,7 @@ class LiveTraffic:
         if not self.store.is_enabled("flights"):
             self.flight_data = []
             self.flight_views.clear()
+            self.flight_clients.clear()
             self.flight_epoch += 1
 
     async def stop_vessels(self):
@@ -379,12 +390,45 @@ class LiveTraffic:
             except asyncio.CancelledError:
                 pass
         self.leases.clear()
-        self.registry = VesselRegistry()
+        self.registry = VesselRegistry(self.record_vessel)
         self.ais_state, self.ais_key = "waiting", None
 
     async def close(self):
+        if self.closed:
+            return
         self.closed = True
         await self.stop_vessels()
+        self.history.close()
+
+    def record_vessel(self, record):
+        self.history.add("vessels", record["identity"], record["position_time"], record.get("lon"), record.get("lat"))
+
+    async def route(self, pack, identity):
+        from .traffic_history import valid_identity, fetch_trace, aircraft_trace
+        if pack not in TRAFFIC_IDS or not valid_identity(pack, identity):
+            raise ValueError("Choose a valid aircraft or vessel")
+        if self.closed or not self.store.is_enabled(pack):
+            raise ValueError("Enable this traffic layer to view its route")
+        identity = identity.lower()
+        points = self.history.points(pack, identity)
+        note = "Recorded AIS track · last 24 hours; earlier voyage unavailable" if pack == "vessels" else "Locally recorded aircraft track · provider history unavailable"
+        if pack == "flights":
+            async with self.route_lock:
+                cached = self.route_cache.get(identity)
+                if not cached or self.clock() - cached["at"] > 60:
+                    try:
+                        historical = aircraft_trace(await asyncio.to_thread(fetch_trace, identity), identity, self.clock())
+                    except Exception:
+                        historical = []
+                    cached = {"at": self.clock(), "points": historical}
+                    self.route_cache[identity] = cached
+                    while len(self.route_cache) > 64:
+                        self.route_cache.popitem(last=False)
+                if cached["points"]:
+                    merged = {p["time"]: p for p in [*cached["points"], *points]}
+                    points = sorted(merged.values(), key=lambda p: p["time"])[-12000:]
+                    note = "Available ADSB.lol track · last 24 hours; coverage gaps may remain"
+        return {"points": points, "note": note, "complete": False}
 
     @staticmethod
     def valid_aircraft_identity(identity):
@@ -448,7 +492,7 @@ class LiveTraffic:
             queries = flight_queries(bounds)
             if not queries:
                 return {**empty, "status": "zoom_in", "note": f"Zoom in: aircraft coverage is limited to {MAX_FLIGHT_QUERIES} regional requests."}
-            return await self.flights(bounds, empty, queries)
+            return await self.flights(bounds, empty, queries, client)
         if not vessel_view_allowed(bounds):
             self.release(client)
             return {**empty, "status": "zoom_in", "note": "Zoom in: vessel coverage is limited to a large regional view."}
@@ -469,14 +513,22 @@ class LiveTraffic:
         features = sorted(features, key=lambda feature: feature["properties"].get("position_time", 0), reverse=True)[:MAX_TARGETS]
         note = "AIS connected · waiting for reports in this area" if self.ais_state == "connected" else "Connecting to AISStream…" if self.ais_state == "waiting" else "AISStream unavailable or access rejected; retrying with backoff. Check key, Internet and account limits."
         return {**empty, "status": "fresh" if self.ais_state == "connected" else "stale" if features else "waiting" if self.ais_state == "waiting" else "error",
-                "features": features, "capped": capped, "note": note if not features or self.ais_state != "connected" else "AIS stream · positions expire after 10 minutes", "error": note if self.ais_state == "error" else None}
+                "features": features, "capped": capped, "note": note if not features or self.ais_state != "connected" else "AIS stream · last-seen positions cached for 30 minutes", "error": note if self.ais_state == "error" else None}
 
-    async def flights(self, bounds, empty, queries):
+    async def flights(self, bounds, empty, queries, client):
         async with self.flight_lock:
             now = self.clock()
             bounds = tuple(bounds)
-            for view, entry in list(self.flight_views.items()):
-                if now-entry["demand_at"] > LEASE_SECONDS:
+            self.flight_clients[client] = (bounds, now)
+            self.flight_clients.move_to_end(client)
+            for key, (_view, at) in list(self.flight_clients.items()):
+                if now - at > LEASE_SECONDS:
+                    self.flight_clients.pop(key)
+            while len(self.flight_clients) > MAX_LEASES:
+                self.flight_clients.popitem(last=False)
+            active_views = {view for view, _at in self.flight_clients.values()}
+            for view in list(self.flight_views):
+                if view not in active_views:
                     self.flight_views.pop(view)
             current = self.flight_views.setdefault(bounds, {"demand_at": now, "attempt_at": 0, "features": [], "fetched_at": None, "error": None, "capped": False})
             current["demand_at"] = now
@@ -502,7 +554,20 @@ class LiveTraffic:
                     capped = len(merged) > MAX_TARGETS or any(_capped for _features, _capped in batches)
                     if not self.store.is_enabled("flights") or epoch != self.flight_epoch:
                         return empty
-                    self.flight_data, self.flight_capped = features, capped
+                    # Merge observations across regions, never replace the whole
+                    # cache with the most recently fetched viewport or empty batch.
+                    cached = {feature["id"]: feature for feature in self.flight_data
+                              if self.clock() - feature["properties"]["position_time"] <= TRAFFIC_CACHE_SECONDS}
+                    for feature in features:
+                        old = cached.get(feature["id"])
+                        if not old or feature["properties"]["position_time"] >= old["properties"]["position_time"]:
+                            cached[feature["id"]] = feature
+                    self.flight_data = sorted(cached.values(), key=lambda f: f["properties"]["position_time"], reverse=True)[:MAX_CACHED_TARGETS]
+                    self.flight_capped = capped
+                    for feature in features:
+                        props = feature["properties"]
+                        lon, lat = feature["geometry"]["coordinates"][:2]
+                        self.history.add("flights", props["identity"], props["position_time"], lon, lat)
                     self.flight_at, self.flight_error = self.clock(), None
                     chosen.update(features=features, capped=capped, fetched_at=self.clock(), error=None)
                 except Exception:
@@ -510,12 +575,13 @@ class LiveTraffic:
                     chosen["error"] = "Aircraft feed unavailable; retrying shortly. Coverage is not guaranteed."
             if not self.store.is_enabled("flights"):
                 return empty
-            features = [feature for feature in current["features"] if self.clock()-feature["properties"]["position_time"] <= FLIGHT_MAX_AGE and inside(feature, bounds)]
+            self.flight_data = [feature for feature in self.flight_data if self.clock()-feature["properties"]["position_time"] <= TRAFFIC_CACHE_SECONDS]
+            features = [feature for feature in self.flight_data if inside(feature, bounds)][:MAX_TARGETS]
             if not current["error"] and current["fetched_at"] is None:
                 # Exact viewport cache keys should not make a tiny pan blank the
                 # map. Return a recent compatible global snapshot while this
                 # viewport waits for its own round-robin refresh.
-                recent = [feature for feature in self.flight_data if self.clock()-feature["properties"]["position_time"] <= FLIGHT_MAX_AGE and inside(feature, bounds)]
+                recent = features
                 if recent:
                     return {**empty, "status": "stale", "features": recent, "fetched_at": self.flight_at,
                             "capped": self.flight_capped,
@@ -523,7 +589,7 @@ class LiveTraffic:
                 return {**empty, "status": "waiting", "features": [], "note": "Map moved · waiting for the next aircraft refresh"}
             return {**empty, "status": "stale" if current["error"] and features else "error" if current["error"] else "fresh",
                     "features": features, "fetched_at": current["fetched_at"], "capped": current["capped"], "error": current["error"],
-                    "note": current["error"] or "Refreshes about every 10 seconds · positions expire after 2 minutes"}
+                    "note": current["error"] or "Refreshes about every 10 seconds · last-seen positions cached for 30 minutes"}
 
     async def run_vessels(self, key):
         retry = 2

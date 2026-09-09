@@ -21,13 +21,14 @@ test("speed in knots advances by real distance, preserving original coordinates 
   assert.equal(result.active, true);
 });
 
-test("prediction freezes at its horizon, then expiry removes the target", () => {
-  for (const [id, horizon, expiry] of [["flights", 30, 120], ["vessels", 60, 600]]) {
+test("prediction freezes at its horizon while last-seen positions remain cached", () => {
+  for (const [id, horizon, expiry] of [["flights", 30, 1800], ["vessels", 60, 1800]]) {
     const model = new TrafficMotion(id), report = data(feature({speed_knots: 20, course: 90}));
     const held = model.sample(report, 1000 + horizon);
     assert.equal(held.active, false);
     assert.deepEqual(position(model.sample(report, 1001 + horizon)), position(held));
     assert.match(held.data.features[0].properties.motion_status, /held/);
+    assert.deepEqual(position(model.sample(report, 1700)), position(held));
     assert.equal(model.sample(report, 1001 + expiry).data.features.length, 0);
   }
 });

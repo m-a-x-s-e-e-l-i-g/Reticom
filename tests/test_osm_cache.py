@@ -52,6 +52,30 @@ def test_overlapping_legacy_areas_cover_view_without_fetch_and_deduplicate(tmp_p
     assert not store.usage_path.exists()
 
 
+@pytest.mark.parametrize("zoom", [3, 10])
+def test_wide_view_returns_saved_areas_without_provider_download(tmp_path, zoom):
+    store = IntelPackStore(tmp_path, loader=lambda *a: pytest.fail("Wide views must only read cache"), clock=lambda: NOW)
+    polygon = {"type": "Polygon", "coordinates": [[[4.72,51.52],[4.78,51.52],[4.78,51.58],[4.72,51.58],[4.72,51.52]]]}
+    save_area(store, "military", VIEW, data(geometry=polygon))
+    result = store.load("military", (-10, 40, 20, 60), zoom)
+    assert result["status"] == "cached"
+    assert result["features"][0]["geometry"] == polygon
+    assert result["download_limited"] and not result["coverage_complete"]
+    assert not store.usage_path.exists()
+    assert store.load("military", VIEW, 14)["status"] == "cached"
+
+
+def test_wide_heat_detection_view_merges_saved_regions_and_honors_window(tmp_path):
+    store = IntelPackStore(tmp_path, loader=lambda *a, **k: pytest.fail("No wide download"), clock=lambda: NOW)
+    store.update({"enabled": ["firms"], "credentials": {"firms_key": "fixture"}})
+    save_area(store, "firms", VIEW, data("heat-a"))
+    save_area(store, "firms", (5,51.5,5.1,51.6), data("heat-b", {"type":"Point","coordinates":[5.05,51.55]}))
+    result = store.load("firms", (4,50,6,53), 2)
+    assert len(result["features"]) == 2 and not result["coverage_complete"]
+    store.update({"firms_days": 1})
+    assert store.load("firms", (4,50,6,53), 2)["features"] == []
+
+
 def test_union_with_hole_is_not_complete_and_offline_shows_partial_cache(tmp_path):
     def offline(*args):
         raise OSError("offline")

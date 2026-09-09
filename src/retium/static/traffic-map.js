@@ -1,4 +1,5 @@
 // Device-local public traffic. Classification is context, never friend/foe.
+import {TRAFFIC_CACHE_SECONDS} from "./traffic-cache.js?v=20260909-3";
 export const TRAFFIC_IDS = ["flights", "vessels"];
 export const TRAFFIC_TYPES = {
   flights: {light: "Light aircraft", small: "Small aircraft", medium: "Medium aircraft", heavy: "Heavy aircraft", helicopter: "Helicopters", glider: "Gliders", balloon: "Balloons / airships", drone: "UAV (reported)", ground: "Ground vehicles", other: "Other", unknown: "Unknown type"},
@@ -15,7 +16,7 @@ export function trafficDisplayData(id, data, filters, now = Date.now() / 1000) {
   const selected = normalizeTrafficFilters({[id]: filters})[id], query = selected.query.toLowerCase();
   const features = (data?.features || []).filter(feature => {
     const p = feature.properties || {}, age = now - Number(p.position_time);
-    return feature.geometry?.type === "Point" && p.traffic_pack === id && Number.isFinite(age) && age >= -30 && age <= (id === "flights" ? 120 : 600)
+    return feature.geometry?.type === "Point" && p.traffic_pack === id && Number.isFinite(age) && age >= -30 && (age <= TRAFFIC_CACHE_SECONDS || p.traffic_selected === true)
       && (selected.affiliation === "all" || p.affiliation === selected.affiliation)
       && (selected.type === "all" || p.traffic_type === selected.type)
       && (!query || [p.title, p.callsign, p.identity, p.registration, p.type_code].some(value => String(value || "").toLowerCase().includes(query)));
@@ -50,10 +51,12 @@ export function installTrafficIcons(map) {
 }
 export function trafficLayers(source) {
   const opacity = ["case", ["==", ["get", "stale"], true], .4, 1];
+  const selected = ["==", ["get", "traffic_selected"], true];
   return [
-    {id: `${source}-points`, type: "circle", source, paint: {"circle-radius": 14, "circle-opacity": 0}},
+    {id: `${source}-points`, type: "circle", source, paint: {"circle-radius": 14, "circle-opacity": 0,
+      "circle-stroke-color": "#c2b58d", "circle-stroke-width": ["case", selected, 2, 0], "circle-stroke-opacity": .85}},
     {id: `${source}-icons`, type: "symbol", source, layout: {"icon-image": ["concat", "public-traffic-", ["get", "traffic_icon"]],
-      "icon-size": ["interpolate", ["linear"], ["zoom"], 6, .38, 7, .52, 9, .72, 12, 1], "icon-rotate": ["coalesce", ["get", "heading"], 0], "icon-rotation-alignment": "map", "icon-allow-overlap": true}, paint: {"icon-opacity": opacity}},
+      "icon-size": ["interpolate", ["linear"], ["zoom"], 6, ["case", selected, .85, .38], 7, ["case", selected, .85, .52], 9, ["case", selected, .85, .72], 12, 1], "icon-rotate": ["coalesce", ["get", "heading"], 0], "icon-rotation-alignment": "map", "icon-allow-overlap": true}, paint: {"icon-opacity": opacity}},
     {id: `${source}-labels`, type: "symbol", source, minzoom: 9,
       layout: {"text-field": ["get", "title"], "text-font": ["Noto Sans Regular"], "text-size": 10, "text-anchor": "top", "text-offset": [0, 1.6], "text-max-width": 12},
       paint: {"text-color": "#c5c4ad", "text-halo-color": "#0c120e", "text-halo-width": 1.5, "text-opacity": opacity}},

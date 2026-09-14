@@ -3,6 +3,7 @@ import {ROAD_COLOR} from "./outdoor-map.js?v=20260907-5";
 import {GDACS_TYPES, GDACS_COLOR, GDACS_ICON, gdacsCode, gdacsIconSvg, gdacsDisplayData, normalizeGdacsTypes, installGdacsIcons} from "./gdacs-markers.js?v=20260907-1";
 import {prepareContourTiles, contourLayers, contourInterval, CONTOUR_MIN_ZOOM, CONTOUR_MAX_ZOOM} from "./terrain-contours.js?v=20260907-3";
 import {lidarLayers, lidarModeLabel, lidarModeForProvider, lidarProviderForBounds, lidarSource, lidarTileUrl, normalizeAhnMode, AHN_MODES} from "./ahn-layer.js?v=20260914-2";
+import {environmentLayers, environmentSource, environmentTileUrl, ENVIRONMENT_RASTER_IDS, ENVIRONMENT_RASTERS, ENVIRONMENT_MIN_ZOOM} from "./environment-layers.js?v=20260914-1";
 import {TRAFFIC_IDS, TRAFFIC_TYPES, normalizeTrafficFilters, trafficDisplayData, installTrafficIcons, trafficLayers} from "./traffic-map.js?v=20260909-3";
 import {TrafficMotion, createTrafficAnimator} from "./traffic-motion.js?v=20260909-3";
 import {TrafficTracks, trafficKey, showTrafficTrack, clearTrafficTrack} from "./traffic-tracks.js?v=20260909-3";
@@ -11,8 +12,8 @@ import {retainIntel} from "./intel-cache.js?v=20260909-4";
 import {roadDisplayData, retainRoads, roadLayers, ROAD_IMPACTS, ROAD_TYPES, normalizeRoadFilters, filterRoadReports} from "./road-disruptions.js?v=20260909-7";
 const EMPTY = () => ({type: "FeatureCollection", features: []});
 // Trails are always-on basemap data, not a separately fetched/toggled intel pack.
-const IDS = ["military", "roads", "acled", "firms", "gdacs", "elevation", "ahn", ...TRAFFIC_IDS];
-const CLIENT_RASTER_IDS = new Set(["elevation", "ahn"]);
+const IDS = ["military", "roads", "acled", "firms", "gdacs", "elevation", "ahn", ...ENVIRONMENT_RASTER_IDS, ...TRAFFIC_IDS];
+const CLIENT_RASTER_IDS = new Set(["elevation", "ahn", ...ENVIRONMENT_RASTER_IDS]);
 const COLORS = {trails: "#8f9c77", military: "#ad9774", acled: "#ba8077", firms: "#c49367", gdacs: "#b6a578"};
 const PREFIX = "public-intel-";
 const ACCESS = {
@@ -22,7 +23,8 @@ const ACCESS = {
 };
 const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[char]);
 const sourceId = id => `${PREFIX}${id}`;
-const layerIds = id => (TRAFFIC_IDS.includes(id) ? ["points", "icons", "labels"] : id === "elevation" ? ["lines", "labels", "minor-labels"] : id === "ahn" ? ["raster"] : id === "gdacs" ? ["areas", "lines", "tracks", "points", "icons", "labels"] : id === "trails" ? ["areas", "lines", "points", "labels", "route-labels"] : ["areas", "lines", "points", "labels"]).map(kind => `${PREFIX}${id}-${kind}`);
+const isEnvironmentRaster = id => ENVIRONMENT_RASTER_IDS.includes(id);
+const layerIds = id => (TRAFFIC_IDS.includes(id) ? ["points", "icons", "labels"] : id === "elevation" ? ["lines", "labels", "minor-labels"] : id === "ahn" || ENVIRONMENT_RASTER_IDS.includes(id) ? ["raster"] : id === "gdacs" ? ["areas", "lines", "tracks", "points", "icons", "labels"] : id === "trails" ? ["areas", "lines", "points", "labels", "route-labels"] : ["areas", "lines", "points", "labels"]).map(kind => `${PREFIX}${id}-${kind}`);
 const safeLink = value => {
   try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) ? url.href : ""; } catch { return ""; }
 };
@@ -82,7 +84,7 @@ function stamp(value, withYear = false) {
 export function intelStatusText(pack, result) {
   if (!pack.enabled) return "Off";
   if (pack.configured === false || result?.status === "needs_key") return "Source access needed below";
-  if (!result) return pack.id === "elevation" ? "Contour lines · heights in metres" : pack.id === "ahn" ? "National LiDAR · source chosen by map area" : "Waiting for a map view";
+  if (!result) return pack.id === "elevation" ? "Contour lines · heights in metres" : pack.id === "ahn" ? "National LiDAR · source chosen by map area" : ENVIRONMENT_RASTER_IDS.includes(pack.id) ? `${ENVIRONMENT_RASTERS[pack.id].title} · online only` : "Waiting for a map view";
   if (result.status === "loading") return "Loading this map view…";
   if (result.status === "zoom_in") return result.note || `Zoom in to level ${pack.min_zoom || 10} to load this pack`;
   if (result.status === "error") return result.error || "Source unavailable · try again later";
@@ -96,6 +98,7 @@ export function intelStatusText(pack, result) {
   if (pack.id === "gdacs" && result.gdacs_types?.length === 0) return "No disaster types selected";
   if (pack.id === "elevation") return result.note || "Contour lines · heights in metres";
   if (pack.id === "ahn") return result.note || "National LiDAR · source chosen by map area";
+  if (ENVIRONMENT_RASTER_IDS.includes(pack.id)) return result.note || `${ENVIRONMENT_RASTERS[pack.id].title} · online only`;
   const count = result.features?.length || 0;
   const amount = count ? `${count.toLocaleString()} public feature${count === 1 ? "" : "s"}` : result.coverage_complete === false ? "No saved features · incomplete coverage" : "No public features in this view";
   const state = result.status === "stale" ? "stale cache" : result.status === "cached" ? "cached" : "fetched";
@@ -190,6 +193,11 @@ export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null,
       map.addSource(id, lidarSource(id, provider, ahnMode));
     }
     for (const layer of lidarLayers(id, provider)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
+    return;
+  }
+  if (ENVIRONMENT_RASTER_IDS.includes(pack.id)) {
+    if (!map.getSource(id)) map.addSource(id, environmentSource(id, pack.id));
+    for (const layer of environmentLayers(id, pack.id)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
     return;
   }
   if (pack.id === "gdacs") { installGdacsIcons(map); data = gdacsDisplayData(data); }
@@ -398,7 +406,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const mapFeatures = panel?.querySelector("[data-map-features]");
     if (mapFeatures) {
       mapFeatures.replaceChildren();
-      for (const id of ["elevation", "ahn"]) {
+      for (const id of ["elevation", "ahn", ...ENVIRONMENT_RASTER_IDS]) {
         const row = panel.querySelector(`[data-pack-row="${id}"]`);
         if (row) mapFeatures.append(row);
       }
@@ -493,10 +501,11 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (!destroyed && generation === catalogueGeneration) {
         notice = "";
         // Recreate failed vector tiles so reconnecting retries contour generation.
-        for (const context of maps.values()) if (hasParsedStyle(context)) { removeIntelLayers(context.map, "elevation"); removeIntelLayers(context.map, "ahn"); }
+        for (const context of maps.values()) if (hasParsedStyle(context)) for (const id of ["elevation", "ahn", ...ENVIRONMENT_RASTER_IDS]) removeIntelLayers(context.map, id);
         contourFailed = false;
         results.delete("elevation");
         results.delete("ahn");
+        for (const id of ENVIRONMENT_RASTER_IDS) results.delete(id);
         applyCatalogue(value);
       }
       return value;
@@ -694,12 +703,12 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
           }
           const provider = id === "ahn" ? lidarProviderForBounds(map.getBounds?.()) : null;
           const source = map.getSource(sourceId(id));
-          const desiredTile = id === "ahn" && provider && Number(map.getZoom?.()) >= provider.minzoom ? lidarTileUrl(ahnMode, provider) : null;
-          if (id === "ahn" && source && source.tiles?.[0] !== desiredTile) {
+          const desiredTile = id === "ahn" && provider && Number(map.getZoom?.()) >= provider.minzoom ? lidarTileUrl(ahnMode, provider) : isEnvironmentRaster(id) ? environmentTileUrl(id) : null;
+          if ((id === "ahn" || isEnvironmentRaster(id)) && source && source.tiles?.[0] !== desiredTile) {
             removeIntelLayers(map, id);
           }
-          const lidarReady = id !== "ahn" || (provider && Number(map.getZoom?.()) >= provider.minzoom);
-          const needsInstall = id === "ahn" ? Boolean(lidarReady && (!map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer)))) : !CLIENT_RASTER_IDS.has(id) || !map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer));
+          const rasterReady = id === "ahn" ? Boolean(provider && Number(map.getZoom?.()) >= provider.minzoom) : isEnvironmentRaster(id) ? Number(map.getZoom?.()) >= ENVIRONMENT_MIN_ZOOM[id] : true;
+          const needsInstall = id === "ahn" || isEnvironmentRaster(id) ? Boolean(rasterReady && (!map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer)))) : !CLIENT_RASTER_IDS.has(id) || !map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer));
           if (needsInstall) installIntelLayers(map, pack, animatedData(context, id, context.data.get(id) || EMPTY()).data, contourUrl, ahnMode, provider);
         }
         catch (error) { results.set(id, {status: "error", error: `Map layer unavailable: ${error.message}`}); }
@@ -738,6 +747,11 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (!provider) results.set("ahn", {status: "uncovered", note: "No national high-resolution LiDAR source is available for this map area · global contours remain available"});
       else if (map.getZoom() < provider.minzoom) results.set("ahn", {status: "zoom_in", note: `Zoom in to level ${provider.minzoom} to view ${provider.label} LiDAR`});
       else results.set("ahn", {status: "ready", note: `${provider.label} · ${lidarModeLabel(provider, providerMode)} · ${provider.resolution} raster`});
+    }
+    for (const id of ENVIRONMENT_RASTER_IDS) if (enabled.has(id)) {
+      const pack = packById(id);
+      if (map.getZoom() < Number(pack?.min_zoom || ENVIRONMENT_MIN_ZOOM[id])) results.set(id, {status: "zoom_in", note: `Zoom in to level ${pack?.min_zoom || ENVIRONMENT_MIN_ZOOM[id]} to view ${ENVIRONMENT_RASTERS[id].title.toLowerCase()}`});
+      else results.set(id, {status: "ready", note: `${ENVIRONMENT_RASTERS[id].source} raster · online only`});
     }
     await Promise.all(currentPacks().filter(pack => pack.enabled && !CLIENT_RASTER_IDS.has(pack.id) && !context.requests.has(pack.id) && (!trafficOnly || TRAFFIC_IDS.includes(pack.id))).map(async pack => {
       if (pack.configured === false) { results.set(pack.id, {status: "needs_key"}); return; }
@@ -917,6 +931,10 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       }
       if (enabled.has("ahn") && (event.sourceId === sourceId("ahn") || event.error?.message?.includes("service.pdok.nl/rws/ahn/") || event.error?.message?.includes("environment.data.gov.uk/spatialdata/") || event.error?.message?.includes("elevation.nationalmap.gov/arcgis/"))) {
         results.set("ahn", {status: "error", error: "National LiDAR tiles unavailable here. Try again later or use the global contour layer."});
+        renderStatus();
+      }
+      for (const id of ENVIRONMENT_RASTER_IDS) if (enabled.has(id) && event.sourceId === sourceId(id)) {
+        results.set(id, {status: "error", error: `${ENVIRONMENT_RASTERS[id].title} tiles unavailable here. Try again later.`});
         renderStatus();
       }
     };

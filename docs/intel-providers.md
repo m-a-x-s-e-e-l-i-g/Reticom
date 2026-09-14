@@ -23,6 +23,9 @@ Mapy's official outdoor map/routing API is an alternative for a future configure
 | Live aircraft | Reported aircraft positions, direction, altitude and type filters | No key; regional views, zoom 7+ | About 10 seconds; memory only |
 | Live boats & ships | AIS positions, vessel types and classification filters | Your AISStream key and permitted use; regional views, zoom 7+ | Stream + 5-second UI refresh; memory only |
 | National LiDAR elevation | Netherlands 0.5 m AHN, England 1 m Environment Agency, or USGS 3DEP bare-earth raster selected by map area | No key; supported national coverage only, close zoom | Upstream WMS; online-only |
+| Global bathymetry | GEBCO global seafloor and terrain relief | No key; global coverage, zoom 1+ | Upstream WMS; online-only |
+| Land cover | ESA WorldCover 2021 global 10 m classes | No key; global coverage, zoom 6+ | Terrascope WMTS; online-only |
+| Night lights | NASA VIIRS Black Marble 2016 annual composite | No key; global coverage, zoom 1+ | NASA GIBS WMTS; historical, online-only |
 
 Both traffic packs are off by default. See [live traffic](live-traffic.md) for setup, military/commercial classification caveats, position expiry, privacy and provider limits.
 

@@ -199,6 +199,9 @@ Command uses the map as a desktop canvas instead of forcing the operator through
 - **Military areas & airstrips** — public OSM geometry for military land, bases, training areas, military airfields and separately labelled civilian airstrips.
 - **Disaster alerts** — earthquakes, cyclones, floods, wildfires, volcanoes and tsunamis from GDACS, with reported shapes/tracks when provided.
 - **Satellite heat detections** — NASA FIRMS VIIRS observations for 24 hours, 3 days or 7 days; a thermal anomaly is not treated as a confirmed fire or attack.
+- **Global bathymetry** — GEBCO seafloor and terrain relief as broad ocean context.
+- **Land cover** — ESA WorldCover 2021 at 10 m classes for forests, crops, built-up areas, wetlands and water.
+- **Night lights** — NASA VIIRS Black Marble annual composite for historical illuminated infrastructure and human-activity context.
 - **Conflict & protest reports** — ACLED events from the latest 30 days, preserving report date and location precision.
 - **Road closures & disruptions** — full closures, restrictions, works, accidents, obstructions and weather/flood reports with type and impact filters.
 - **Live aircraft** — regional ADS-B positions with classification/type filters, bounded estimated motion and on-demand recent tracks.

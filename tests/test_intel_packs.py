@@ -418,7 +418,7 @@ def test_endpoints_work_without_any_team_or_rns(setup_store, tmp_path):
     app = FastAPI()
     app.include_router(intel_router(tmp_path, store=store))
     with TestClient(app) as client:
-        assert len(client.get("/api/intel-packs").json()["packs"]) == 10
+        assert len(client.get("/api/intel-packs").json()["packs"]) == 13
         assert client.patch("/api/intel-packs/settings", json={"enabled": ["gdacs"]}).status_code == 200
         response = client.get("/api/intel-packs/gdacs?west=4.7&south=51.5&east=4.8&north=51.6&zoom=14")
         assert response.status_code == 200

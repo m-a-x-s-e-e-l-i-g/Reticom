@@ -14,7 +14,7 @@ import {intelNoteText} from "../src/retium/static/intel-packs.js";
 import {intelLayerWarning} from "../src/retium/static/intel-packs.js";
 
 test("layer picker suppresses routine refresh information but retains actionable failures", () => {
-  for (const id of ["flights", "vessels", "military", "gdacs", "elevation", "ahn", "firms"]) {
+  for (const id of ["flights", "vessels", "military", "gdacs", "elevation", "ahn", "bathymetry", "worldcover", "nightlights", "firms"]) {
     const pack = {id, enabled: true};
     assert.equal(intelLayerWarning(pack), "");
     for (const status of ["loading", "waiting", "ready", "cached", "zoom_in"]) {
@@ -194,6 +194,17 @@ test("international LiDAR switches raster providers with the viewport", () => {
   installIntelLayers(map, pack("ahn"), empty, null, "dsm");
   assert.match(map.getSource("public-intel-ahn").tiles[0], /layers=3DEPElevation/);
   assert.doesNotMatch(map.getSource("public-intel-ahn").tiles[0], /Lidar_Composite/);
+});
+
+test("environment rasters install as bounded client-only map layers", () => {
+  for (const id of ["bathymetry", "worldcover", "nightlights"]) {
+    const map = new FakeMap();
+    installIntelLayers(map, pack(id), empty);
+    assert.equal(map.getSource(`public-intel-${id}`).type, "raster");
+    assert.equal(map.getLayer(`public-intel-${id}-raster`).type, "raster");
+    removeIntelLayers(map, id);
+    assert.equal(map.getSource(`public-intel-${id}`), undefined);
+  }
 });
 
 test("AHN uses only its raster source and waits for the close zoom", async () => {

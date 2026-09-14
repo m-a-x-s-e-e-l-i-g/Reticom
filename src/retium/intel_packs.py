@@ -37,7 +37,25 @@ AHN_PACK = {
     "attribution": "National LiDAR providers", "attribution_url": "https://www.pdok.nl/introductie/-/article/actueel-hoogtebestand-nederland-ahn", "min_zoom": 10,
     "ttl_seconds": 2592000, "credential_fields": [], "client_raster": True,
 }
-CATALOGUE = {p["id"]: p for p in [*PACKS, ROAD_PACK, ELEVATION_PACK, AHN_PACK, *TRAFFIC_PACKS]}
+BATHYMETRY_PACK = {
+    "id": "bathymetry", "title": "Global bathymetry", "description": "Global GEBCO seafloor and terrain relief. Broad context only; depths are modelled and may be interpolated between measurements.",
+    "source": "GEBCO 2026", "source_url": "https://www.gebco.net/data-products/gebco-web-services/web-map-service",
+    "attribution": "GEBCO", "attribution_url": "https://www.gebco.net/", "min_zoom": 1,
+    "ttl_seconds": 2592000, "credential_fields": [], "client_raster": True,
+}
+WORLDCOVER_PACK = {
+    "id": "worldcover", "title": "Land cover · ESA WorldCover", "description": "Global 10 m land-cover classes from ESA WorldCover 2021: forests, crops, built-up areas, wetlands, water and more.",
+    "source": "ESA WorldCover 2021", "source_url": "https://esa-worldcover.org/en/data-access",
+    "attribution": "ESA WorldCover · Contains modified Copernicus Sentinel data", "attribution_url": "https://esa-worldcover.org/en/data-access", "min_zoom": 6,
+    "ttl_seconds": 2592000, "credential_fields": [], "client_raster": True,
+}
+NIGHTLIGHTS_PACK = {
+    "id": "nightlights", "title": "Night lights", "description": "NASA VIIRS Black Marble annual night-light composite. Historical human activity and illuminated infrastructure context, not a live activity feed.",
+    "source": "NASA Black Marble / VIIRS", "source_url": "https://ladsweb.modaps.eosdis.nasa.gov/missions-and-measurements/science-domain/nighttime-lights",
+    "attribution": "NASA Black Marble / VIIRS", "attribution_url": "https://ladsweb.modaps.eosdis.nasa.gov/missions-and-measurements/science-domain/nighttime-lights", "min_zoom": 1,
+    "ttl_seconds": 2592000, "credential_fields": [], "client_raster": True,
+}
+CATALOGUE = {p["id"]: p for p in [*PACKS, ROAD_PACK, ELEVATION_PACK, AHN_PACK, BATHYMETRY_PACK, WORLDCOVER_PACK, NIGHTLIGHTS_PACK, *TRAFFIC_PACKS]}
 GDACS_TYPES = tuple(item["id"] for item in CATALOGUE["gdacs"]["disaster_types"])
 DEFAULT_GDACS_TYPES = tuple(code for code in GDACS_TYPES if code != "DR")
 DEFAULT_ENABLED = ["gdacs", "military"]  # Trails now come from always-on basemap tiles.
@@ -357,7 +375,7 @@ class IntelPackStore:
         return {**result, "note": f"Showing saved areas. {note}", "download_limited": True}
 
     def load(self, pack_id, bbox, zoom):
-        if pack_id not in CATALOGUE or pack_id in {"elevation", "ahn"} or pack_id in TRAFFIC_IDS:
+        if pack_id not in CATALOGUE or CATALOGUE[pack_id].get("client_raster") or pack_id in TRAFFIC_IDS:
             raise ValueError("Choose a public feature pack")
         bbox = validate_bounds(bbox)
         if not math.isfinite(zoom) or not 0 <= zoom <= 24:

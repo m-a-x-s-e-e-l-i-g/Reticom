@@ -14,7 +14,7 @@ import {intelNoteText} from "../src/retium/static/intel-packs.js";
 import {intelLayerWarning} from "../src/retium/static/intel-packs.js";
 
 test("layer picker suppresses routine refresh information but retains actionable failures", () => {
-  for (const id of ["flights", "vessels", "military", "gdacs", "elevation", "firms"]) {
+  for (const id of ["flights", "vessels", "military", "gdacs", "elevation", "ahn", "firms"]) {
     const pack = {id, enabled: true};
     assert.equal(intelLayerWarning(pack), "");
     for (const status of ["loading", "waiting", "ready", "cached", "zoom_in"]) {
@@ -170,6 +170,47 @@ test("contour lines and metre labels remain below team data without changing cam
   assert.equal(map.getSource("public-intel-military"), undefined);
   assert.equal(map.getLayer("public-intel-military-points"), undefined);
   assert.ok(map.getLayer("verified-points"));
+});
+
+test("AHN installs a bounded PDOK raster in DSM mode without a generic feature source", () => {
+  const map = new FakeMap();
+  installIntelLayers(map, pack("ahn"), empty, null, "dsm");
+  const source = map.getSource("public-intel-ahn");
+  assert.equal(source.type, "raster");
+  assert.deepEqual(source.bounds, [3, 50.65, 7.5, 53.7]);
+  assert.match(source.tiles[0], /layers=dsm_05m/);
+  assert.equal(map.getLayer("public-intel-ahn-raster").type, "raster");
+  assert.equal(map.getLayer("public-intel-ahn-raster").minzoom, 12);
+  removeIntelLayers(map, "ahn");
+  assert.equal(map.getSource("public-intel-ahn"), undefined);
+});
+
+test("international LiDAR switches raster providers with the viewport", () => {
+  const map = new FakeMap();
+  map.bounds = {west: -1.5, south: 51.3, east: -1.2, north: 51.6};
+  installIntelLayers(map, pack("ahn"), empty, null, "dsm");
+  assert.match(map.getSource("public-intel-ahn").tiles[0], /Lidar_Composite_LZ_DSM_1m/);
+  map.bounds = {west: -100.2, south: 35.0, east: -99.8, north: 35.3};
+  installIntelLayers(map, pack("ahn"), empty, null, "dsm");
+  assert.match(map.getSource("public-intel-ahn").tiles[0], /layers=3DEPElevation/);
+  assert.doesNotMatch(map.getSource("public-intel-ahn").tiles[0], /Lidar_Composite/);
+});
+
+test("AHN uses only its raster source and waits for the close zoom", async () => {
+  const map = new FakeMap();
+  const requests = [];
+  const controller = createIntelPacks({fetchImpl: async url => {
+    requests.push(url);
+    return response(url === "/api/intel-packs" ? catalogue([pack("ahn")]) : {...empty, status: "fresh"});
+  }});
+  try {
+    await controller.ready; controller.attachMap(map); await tick();
+    assert.deepEqual(requests, ["/api/intel-packs"]);
+    assert.equal(map.getSource("public-intel-ahn").type, "raster");
+    assert.match(controller.getState().results.ahn.note, /AHN · Netherlands.*0\.5 m raster/);
+    map.zoom = 10; map.emit("moveend"); await new Promise(resolve => setTimeout(resolve, 700));
+    assert.match(controller.getState().results.ahn.note, /Zoom in/);
+  } finally { controller.destroy(); }
 });
 
 test("explicitly disabled packs make no provider requests, while minimum zoom and missing keys are explicit", async () => {

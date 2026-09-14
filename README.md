@@ -173,6 +173,11 @@ Command uses the map as a desktop canvas instead of forcing the operator through
   - DEM tiles are cached locally and converted to contours on the device.
   - Useful context, not survey-grade elevation.
 
+- **National LiDAR elevation**
+  - Optional high-resolution airborne-LiDAR raster for the Netherlands, England and the United States, selected automatically by map area.
+  - Switch between bare-earth DTM and surface/building DSM views.
+  - Online-only and bounded to close zooms; not satellite LiDAR or survey advice.
+
 - **MGRS/UPS overlay**
   - Works independently of the Internet.
   - Covers polar UPS as well as normal MGRS zones.
@@ -200,7 +205,7 @@ Command uses the map as a desktop canvas instead of forcing the operator through
 - **Live boats & ships** — AIS positions with classification/type filters, bounded estimated motion and on-demand recent tracks.
 - **Save this view offline** — retain visible public geometry on this device without an expiry where the source permits it.
 
-See [public providers and privacy](docs/intel-providers.md), [public-layer caching](docs/public-layer-cache.md), [live traffic](docs/live-traffic.md), [road disruptions](docs/road-disruptions.md) and [terrain contours](docs/elevation.md).
+See [public providers and privacy](docs/intel-providers.md), [public-layer caching](docs/public-layer-cache.md), [live traffic](docs/live-traffic.md), [road disruptions](docs/road-disruptions.md), [terrain contours](docs/elevation.md) and [international LiDAR elevation](docs/ahn-lidar.md).
 
 ## From a report to the map
 

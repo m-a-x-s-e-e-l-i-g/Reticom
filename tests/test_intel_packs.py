@@ -22,6 +22,16 @@ def test_new_defaults_and_explicit_preferences_survive_restart(tmp_path):
     restarted = IntelPackStore(tmp_path)
     assert restarted.enabled == set()
     assert restarted.gdacs_types == ("DR",)
+    assert restarted.ahn_mode == "dtm"
+
+
+def test_ahn_mode_is_validated_and_persisted(tmp_path):
+    store = IntelPackStore(tmp_path)
+    assert store.update({"ahn_mode": "dsm"})["settings"]["ahn_mode"] == "dsm"
+    assert IntelPackStore(tmp_path).ahn_mode == "dsm"
+    with pytest.raises(ValueError, match="AHN"):
+        store.update({"ahn_mode": "point-cloud"})
+    assert store.ahn_mode == "dsm"
 
 
 def collection(*coordinates):
@@ -408,7 +418,7 @@ def test_endpoints_work_without_any_team_or_rns(setup_store, tmp_path):
     app = FastAPI()
     app.include_router(intel_router(tmp_path, store=store))
     with TestClient(app) as client:
-        assert len(client.get("/api/intel-packs").json()["packs"]) == 9
+        assert len(client.get("/api/intel-packs").json()["packs"]) == 10
         assert client.patch("/api/intel-packs/settings", json={"enabled": ["gdacs"]}).status_code == 200
         response = client.get("/api/intel-packs/gdacs?west=4.7&south=51.5&east=4.8&north=51.6&zoom=14")
         assert response.status_code == 200

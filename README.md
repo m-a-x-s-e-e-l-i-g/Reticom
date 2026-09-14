@@ -44,7 +44,8 @@
   - Numeric compass, waypoint bearing and contact bearing.
   - Live phone-facing direction for deliberate pointing.
   - Dark hiking/vector map for low-light use.
-  - Satellite view for current visual context.
+   - Satellite view for current visual context.
+   - Optional global satellite land-surface temperature from NASA GIBS, with MODIS and VIIRS day/night passes.
   - Metre-labelled contour lines rendered locally from cached elevation tiles.
   - Trails, paths, peaks, parks and labels from the vector basemap.
   - **34 manual tactical marker types** across operations, medical, control, threat, hazard, support and unit categories.
@@ -199,13 +200,14 @@ Command uses the map as a desktop canvas instead of forcing the operator through
 - **Military areas & airstrips** — public OSM geometry for military land, bases, training areas, military airfields and separately labelled civilian airstrips.
 - **Disaster alerts** — earthquakes, cyclones, floods, wildfires, volcanoes and tsunamis from GDACS, with reported shapes/tracks when provided.
 - **Satellite heat detections** — NASA FIRMS VIIRS observations for 24 hours, 3 days or 7 days; a thermal anomaly is not treated as a confirmed fire or attack.
+- **Satellite land-surface temperature** — global NASA GIBS MODIS and VIIRS rasters with selectable daytime/nighttime passes; cloud and revisit gaps remain visible.
 - **Conflict & protest reports** — ACLED events from the latest 30 days, preserving report date and location precision.
 - **Road closures & disruptions** — full closures, restrictions, works, accidents, obstructions and weather/flood reports with type and impact filters.
 - **Live aircraft** — regional ADS-B positions with classification/type filters, bounded estimated motion and on-demand recent tracks.
 - **Live boats & ships** — AIS positions with classification/type filters, bounded estimated motion and on-demand recent tracks.
 - **Save this view offline** — retain visible public geometry on this device without an expiry where the source permits it.
 
-See [public providers and privacy](docs/intel-providers.md), [public-layer caching](docs/public-layer-cache.md), [live traffic](docs/live-traffic.md), [road disruptions](docs/road-disruptions.md), [terrain contours](docs/elevation.md) and [international LiDAR elevation](docs/ahn-lidar.md).
+See [public providers and privacy](docs/intel-providers.md), [public-layer caching](docs/public-layer-cache.md), [live traffic](docs/live-traffic.md), [road disruptions](docs/road-disruptions.md), [terrain contours](docs/elevation.md), [international LiDAR elevation](docs/ahn-lidar.md) and [satellite thermal layers](docs/satellite-thermal.md).
 
 ## From a report to the map
 

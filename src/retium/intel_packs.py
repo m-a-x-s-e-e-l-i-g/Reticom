@@ -37,11 +37,19 @@ AHN_PACK = {
     "attribution": "National LiDAR providers", "attribution_url": "https://www.pdok.nl/introductie/-/article/actueel-hoogtebestand-nederland-ahn", "min_zoom": 10,
     "ttl_seconds": 2592000, "credential_fields": [], "client_raster": True,
 }
-CATALOGUE = {p["id"]: p for p in [*PACKS, ROAD_PACK, ELEVATION_PACK, AHN_PACK, *TRAFFIC_PACKS]}
+THERMAL_PACK = {
+    "id": "thermal", "title": "Satellite land-surface temperature",
+    "description": "Global public thermal raster from NASA GIBS. Choose daytime or nighttime MODIS / VIIRS coverage; clouds and revisit gaps can leave areas blank.",
+    "source": "NASA GIBS · MODIS / VIIRS", "source_url": "https://nasa-gibs.github.io/gibs-api-docs/access-basics/",
+    "attribution": "NASA Earthdata · MODIS / VIIRS", "attribution_url": "https://earthdata.nasa.gov/",
+    "min_zoom": 1, "ttl_seconds": 86400, "credential_fields": [], "client_raster": True,
+}
+CATALOGUE = {p["id"]: p for p in [*PACKS, ROAD_PACK, ELEVATION_PACK, AHN_PACK, THERMAL_PACK, *TRAFFIC_PACKS]}
 GDACS_TYPES = tuple(item["id"] for item in CATALOGUE["gdacs"]["disaster_types"])
 DEFAULT_GDACS_TYPES = tuple(code for code in GDACS_TYPES if code != "DR")
 DEFAULT_ENABLED = ["gdacs", "military"]  # Trails now come from always-on basemap tiles.
 AHN_MODES = ("dtm", "dsm")
+THERMAL_MODES = ("terra_day", "terra_night", "aqua_day", "aqua_night", "viirs_day", "viirs_night")
 GDACS_CACHE_VERSION = 2  # Earlier caches contain point locations, not event outlines.
 SECRET_FIELDS = {"firms_key", "acled_token", "aisstream_key"}
 OSM_PACKS = {"trails", "military"}
@@ -111,6 +119,7 @@ class IntelPackStore:
         self.credentials = {key: value for key, value in credentials.items() if key in SECRET_FIELDS and isinstance(value, str)} if isinstance(credentials, dict) else {}
         self.firms_days = stored.get("firms_days", 3)
         self.ahn_mode = stored.get("ahn_mode", "dtm") if stored.get("ahn_mode", "dtm") in AHN_MODES else "dtm"
+        self.thermal_mode = stored.get("thermal_mode", "terra_day") if stored.get("thermal_mode", "terra_day") in THERMAL_MODES else "terra_day"
         try:
             self.road_filters = validate_road_filters(stored.get("road_filters", {}))
         except ValueError:
@@ -151,14 +160,14 @@ class IntelPackStore:
         with self.lock:
             return {
                 "packs": [{**pack, "enabled": key in self.enabled, "configured": self._configured(pack)} for key, pack in CATALOGUE.items()],
-                "settings": {"enabled": sorted(self.enabled), "gdacs_types": list(self.gdacs_types), "traffic_filters": self.traffic_filters, "firms_days": self.firms_days, "road_filters": self.road_filters, "ahn_mode": self.ahn_mode},
+                "settings": {"enabled": sorted(self.enabled), "gdacs_types": list(self.gdacs_types), "traffic_filters": self.traffic_filters, "firms_days": self.firms_days, "road_filters": self.road_filters, "ahn_mode": self.ahn_mode, "thermal_mode": self.thermal_mode},
                 "credentials": {key: bool(self.credentials.get(key)) for key in sorted(SECRET_FIELDS)},
                 "credential_previews": {key: ("••••••••" + value[-4:] if len(value) > 8 else "••••••••")
                                         for key in sorted(SECRET_FIELDS) if (value := self.credentials.get(key))},
             }
 
     def update(self, body):
-        if not isinstance(body, dict) or set(body) - {"enabled", "credentials", "gdacs_types", "traffic_filters", "firms_days", "road_filters", "ahn_mode"}:
+        if not isinstance(body, dict) or set(body) - {"enabled", "credentials", "gdacs_types", "traffic_filters", "firms_days", "road_filters", "ahn_mode", "thermal_mode"}:
             raise ValueError("Use enabled packs, disaster filters and provider credentials only")
         with self.lock:
             enabled = body.get("enabled", sorted(self.enabled))
@@ -178,8 +187,11 @@ class IntelPackStore:
             ahn_mode = body.get("ahn_mode", self.ahn_mode)
             if ahn_mode not in AHN_MODES:
                 raise ValueError("Choose an AHN elevation mode")
+            thermal_mode = body.get("thermal_mode", self.thermal_mode)
+            if thermal_mode not in THERMAL_MODES:
+                raise ValueError("Choose an available satellite temperature mode")
             credentials = {**self.credentials, **{key: value.strip() for key, value in supplied.items()}}
-            self._write(self.settings_path, {"enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "traffic_filters": traffic_filters, "firms_days": firms_days, "road_filters": road_filters, "ahn_mode": ahn_mode})
+            self._write(self.settings_path, {"enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "traffic_filters": traffic_filters, "firms_days": firms_days, "road_filters": road_filters, "ahn_mode": ahn_mode, "thermal_mode": thermal_mode})
             self.road_filters = road_filters
             if gdacs_types != self.gdacs_types:
                 self.next_fetch = {key: until for key, until in self.next_fetch.items()
@@ -191,6 +203,7 @@ class IntelPackStore:
             self.gdacs_types = gdacs_types
             self.traffic_filters = traffic_filters
             self.ahn_mode = ahn_mode
+            self.thermal_mode = thermal_mode
             if supplied:
                 self.next_fetch.clear()
             return self.catalogue()
@@ -357,7 +370,7 @@ class IntelPackStore:
         return {**result, "note": f"Showing saved areas. {note}", "download_limited": True}
 
     def load(self, pack_id, bbox, zoom):
-        if pack_id not in CATALOGUE or pack_id in {"elevation", "ahn"} or pack_id in TRAFFIC_IDS:
+        if pack_id not in CATALOGUE or CATALOGUE[pack_id].get("client_raster") or pack_id in TRAFFIC_IDS:
             raise ValueError("Choose a public feature pack")
         bbox = validate_bounds(bbox)
         if not math.isfinite(zoom) or not 0 <= zoom <= 24:

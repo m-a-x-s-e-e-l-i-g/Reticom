@@ -14,7 +14,7 @@ import {intelNoteText} from "../src/retium/static/intel-packs.js";
 import {intelLayerWarning} from "../src/retium/static/intel-packs.js";
 
 test("layer picker suppresses routine refresh information but retains actionable failures", () => {
-  for (const id of ["flights", "vessels", "military", "gdacs", "elevation", "ahn", "firms"]) {
+  for (const id of ["flights", "vessels", "military", "gdacs", "elevation", "ahn", "thermal", "firms"]) {
     const pack = {id, enabled: true};
     assert.equal(intelLayerWarning(pack), "");
     for (const status of ["loading", "waiting", "ready", "cached", "zoom_in"]) {
@@ -194,6 +194,18 @@ test("international LiDAR switches raster providers with the viewport", () => {
   installIntelLayers(map, pack("ahn"), empty, null, "dsm");
   assert.match(map.getSource("public-intel-ahn").tiles[0], /layers=3DEPElevation/);
   assert.doesNotMatch(map.getSource("public-intel-ahn").tiles[0], /Lidar_Composite/);
+});
+
+test("satellite thermal installs a global NASA GIBS raster and switches modes", () => {
+  const map = new FakeMap();
+  installIntelLayers(map, pack("thermal"), empty);
+  assert.equal(map.getSource("public-intel-thermal").type, "raster");
+  assert.match(map.getSource("public-intel-thermal").tiles[0], /MODIS_Terra_Land_Surface_Temp_Day/);
+  installIntelLayers(map, pack("thermal"), empty, null, "dtm", null, "viirs_night");
+  assert.match(map.getSource("public-intel-thermal").tiles[0], /VIIRS_NOAA20_Land_Surface_Temp_Night/);
+  assert.deepEqual(map.getSource("public-intel-thermal").bounds, [-180, -85.051129, 180, 85.051129]);
+  removeIntelLayers(map, "thermal");
+  assert.equal(map.getSource("public-intel-thermal"), undefined);
 });
 
 test("AHN uses only its raster source and waits for the close zoom", async () => {

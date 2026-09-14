@@ -200,7 +200,7 @@ test("satellite thermal installs a global NASA GIBS raster and switches modes", 
   const map = new FakeMap();
   installIntelLayers(map, pack("thermal"), empty);
   assert.equal(map.getSource("public-intel-thermal").type, "raster");
-  assert.match(map.getSource("public-intel-thermal").tiles[0], /MODIS_Terra_Land_Surface_Temp_Day/);
+  assert.match(map.getSource("public-intel-thermal").tiles[0], /VIIRS_NOAA20_Land_Surface_Temp_Day/);
   installIntelLayers(map, pack("thermal"), empty, null, "dtm", null, "viirs_night");
   assert.match(map.getSource("public-intel-thermal").tiles[0], /VIIRS_NOAA20_Land_Surface_Temp_Night/);
   assert.deepEqual(map.getSource("public-intel-thermal").bounds, [-180, -85.051129, 180, 85.051129]);

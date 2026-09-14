@@ -36,13 +36,13 @@ def test_ahn_mode_is_validated_and_persisted(tmp_path):
 
 def test_thermal_mode_is_validated_and_persisted(tmp_path):
     store = IntelPackStore(tmp_path)
-    assert store.catalogue()["settings"]["thermal_mode"] == "terra_day"
+    assert store.catalogue()["settings"]["thermal_mode"] == "combined"
     assert store.update({"thermal_mode": "viirs_night"})["settings"]["thermal_mode"] == "viirs_night"
     assert IntelPackStore(tmp_path).thermal_mode == "viirs_night"
     with pytest.raises(ValueError, match="satellite temperature"):
         store.update({"thermal_mode": "not-a-mode"})
     assert store.thermal_mode == "viirs_night"
-    assert set(THERMAL_MODES) == {"terra_day", "terra_night", "aqua_day", "aqua_night", "viirs_day", "viirs_night"}
+    assert set(THERMAL_MODES) == {"combined", "terra_day", "terra_night", "aqua_day", "aqua_night", "viirs_day", "viirs_night"}
 
 
 def collection(*coordinates):

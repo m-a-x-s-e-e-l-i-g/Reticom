@@ -6,7 +6,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from retium.intel_packs import CATALOGUE, GDACS_TYPES, DEFAULT_GDACS_TYPES, DEFAULT_ENABLED, IntelPackStore, THERMAL_MODES, feature_intersects, intel_router, validate_bounds
+from retium.intel_packs import CATALOGUE, GDACS_TYPES, DEFAULT_GDACS_TYPES, DEFAULT_ENABLED, IntelPackStore, feature_intersects, intel_router, validate_bounds
 
 
 BBOX = (4.7, 51.5, 4.8, 51.6)
@@ -32,17 +32,6 @@ def test_ahn_mode_is_validated_and_persisted(tmp_path):
     with pytest.raises(ValueError, match="AHN"):
         store.update({"ahn_mode": "point-cloud"})
     assert store.ahn_mode == "dsm"
-
-
-def test_thermal_mode_is_validated_and_persisted(tmp_path):
-    store = IntelPackStore(tmp_path)
-    assert store.catalogue()["settings"]["thermal_mode"] == "terra_day"
-    assert store.update({"thermal_mode": "viirs_night"})["settings"]["thermal_mode"] == "viirs_night"
-    assert IntelPackStore(tmp_path).thermal_mode == "viirs_night"
-    with pytest.raises(ValueError, match="satellite temperature"):
-        store.update({"thermal_mode": "not-a-mode"})
-    assert store.thermal_mode == "viirs_night"
-    assert set(THERMAL_MODES) == {"terra_day", "terra_night", "aqua_day", "aqua_night", "viirs_day", "viirs_night"}
 
 
 def collection(*coordinates):
@@ -429,7 +418,7 @@ def test_endpoints_work_without_any_team_or_rns(setup_store, tmp_path):
     app = FastAPI()
     app.include_router(intel_router(tmp_path, store=store))
     with TestClient(app) as client:
-        assert len(client.get("/api/intel-packs").json()["packs"]) == 11
+        assert len(client.get("/api/intel-packs").json()["packs"]) == 10
         assert client.patch("/api/intel-packs/settings", json={"enabled": ["gdacs"]}).status_code == 200
         response = client.get("/api/intel-packs/gdacs?west=4.7&south=51.5&east=4.8&north=51.6&zoom=14")
         assert response.status_code == 200

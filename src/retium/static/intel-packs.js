@@ -3,7 +3,6 @@ import {ROAD_COLOR} from "./outdoor-map.js?v=20260907-5";
 import {GDACS_TYPES, GDACS_COLOR, GDACS_ICON, gdacsCode, gdacsIconSvg, gdacsDisplayData, normalizeGdacsTypes, installGdacsIcons} from "./gdacs-markers.js?v=20260907-1";
 import {prepareContourTiles, contourLayers, contourInterval, CONTOUR_MIN_ZOOM, CONTOUR_MAX_ZOOM} from "./terrain-contours.js?v=20260907-3";
 import {lidarLayers, lidarModeLabel, lidarModeForProvider, lidarProviderForBounds, lidarSource, lidarTileUrl, normalizeAhnMode, AHN_MODES} from "./ahn-layer.js?v=20260914-2";
-import {thermalLayers, thermalModeLabel, thermalSource, thermalTileUrl, normalizeThermalMode, THERMAL_MODES, THERMAL_MIN_ZOOM} from "./thermal-layer.js?v=20260914-1";
 import {TRAFFIC_IDS, TRAFFIC_TYPES, normalizeTrafficFilters, trafficDisplayData, installTrafficIcons, trafficLayers} from "./traffic-map.js?v=20260909-3";
 import {TrafficMotion, createTrafficAnimator} from "./traffic-motion.js?v=20260909-3";
 import {TrafficTracks, trafficKey, showTrafficTrack, clearTrafficTrack} from "./traffic-tracks.js?v=20260909-3";
@@ -12,8 +11,8 @@ import {retainIntel} from "./intel-cache.js?v=20260909-4";
 import {roadDisplayData, retainRoads, roadLayers, ROAD_IMPACTS, ROAD_TYPES, normalizeRoadFilters, filterRoadReports} from "./road-disruptions.js?v=20260909-7";
 const EMPTY = () => ({type: "FeatureCollection", features: []});
 // Trails are always-on basemap data, not a separately fetched/toggled intel pack.
-const IDS = ["military", "roads", "acled", "firms", "gdacs", "elevation", "ahn", "thermal", ...TRAFFIC_IDS];
-const CLIENT_RASTER_IDS = new Set(["elevation", "ahn", "thermal"]);
+const IDS = ["military", "roads", "acled", "firms", "gdacs", "elevation", "ahn", ...TRAFFIC_IDS];
+const CLIENT_RASTER_IDS = new Set(["elevation", "ahn"]);
 const COLORS = {trails: "#8f9c77", military: "#ad9774", acled: "#ba8077", firms: "#c49367", gdacs: "#b6a578"};
 const PREFIX = "public-intel-";
 const ACCESS = {
@@ -23,7 +22,7 @@ const ACCESS = {
 };
 const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[char]);
 const sourceId = id => `${PREFIX}${id}`;
-const layerIds = id => (TRAFFIC_IDS.includes(id) ? ["points", "icons", "labels"] : id === "elevation" ? ["lines", "labels", "minor-labels"] : ["ahn", "thermal"].includes(id) ? ["raster"] : id === "gdacs" ? ["areas", "lines", "tracks", "points", "icons", "labels"] : id === "trails" ? ["areas", "lines", "points", "labels", "route-labels"] : ["areas", "lines", "points", "labels"]).map(kind => `${PREFIX}${id}-${kind}`);
+const layerIds = id => (TRAFFIC_IDS.includes(id) ? ["points", "icons", "labels"] : id === "elevation" ? ["lines", "labels", "minor-labels"] : id === "ahn" ? ["raster"] : id === "gdacs" ? ["areas", "lines", "tracks", "points", "icons", "labels"] : id === "trails" ? ["areas", "lines", "points", "labels", "route-labels"] : ["areas", "lines", "points", "labels"]).map(kind => `${PREFIX}${id}-${kind}`);
 const safeLink = value => {
   try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) ? url.href : ""; } catch { return ""; }
 };
@@ -83,7 +82,7 @@ function stamp(value, withYear = false) {
 export function intelStatusText(pack, result) {
   if (!pack.enabled) return "Off";
   if (pack.configured === false || result?.status === "needs_key") return "Source access needed below";
-  if (!result) return pack.id === "elevation" ? "Contour lines · heights in metres" : pack.id === "ahn" ? "National LiDAR · source chosen by map area" : pack.id === "thermal" ? "Global satellite temperature · choose a mode" : "Waiting for a map view";
+  if (!result) return pack.id === "elevation" ? "Contour lines · heights in metres" : pack.id === "ahn" ? "National LiDAR · source chosen by map area" : "Waiting for a map view";
   if (result.status === "loading") return "Loading this map view…";
   if (result.status === "zoom_in") return result.note || `Zoom in to level ${pack.min_zoom || 10} to load this pack`;
   if (result.status === "error") return result.error || "Source unavailable · try again later";
@@ -97,7 +96,6 @@ export function intelStatusText(pack, result) {
   if (pack.id === "gdacs" && result.gdacs_types?.length === 0) return "No disaster types selected";
   if (pack.id === "elevation") return result.note || "Contour lines · heights in metres";
   if (pack.id === "ahn") return result.note || "National LiDAR · source chosen by map area";
-  if (pack.id === "thermal") return result.note || "Global satellite temperature · online only";
   const count = result.features?.length || 0;
   const amount = count ? `${count.toLocaleString()} public feature${count === 1 ? "" : "s"}` : result.coverage_complete === false ? "No saved features · incomplete coverage" : "No public features in this view";
   const state = result.status === "stale" ? "stale cache" : result.status === "cached" ? "cached" : "fetched";
@@ -111,7 +109,7 @@ export function intelLayerWarning(pack, result) {
   if (pack.configured === false || result?.status === "needs_key") return "Source access needed below";
   if (result?.status === "error") return result.error || "Source unavailable · try again later";
   if (pack.id === "roads" && result?.status === "uncovered") return result.note;
-  if (["ahn", "thermal"].includes(pack.id) && result?.status === "uncovered") return result.note;
+  if (pack.id === "ahn" && result?.status === "uncovered") return result.note;
   if (result?.status === "stale") return result.error || "Source unavailable · showing saved data";
   if (result?.coverage_complete === false) return "Incomplete coverage · some areas are not available";
   return "";
@@ -173,7 +171,7 @@ export function replaceTrafficPopup(popup, html) {
 }
 
 // MapLibre keeps the same camera; adding/removing public layers never calls fitBounds.
-export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null, ahnMode = "dtm", lidarProvider = null, thermalMode = "terra_day") {
+export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null, ahnMode = "dtm", lidarProvider = null) {
   const id = sourceId(pack.id);
   const layers = map.getStyle?.()?.layers || [];
   const before = layers.find(layer => isTeamLayer(layer) || (layer.type === "symbol" && !layer.id.startsWith(PREFIX)))?.id;
@@ -192,15 +190,6 @@ export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null,
       map.addSource(id, lidarSource(id, provider, ahnMode));
     }
     for (const layer of lidarLayers(id, provider)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
-    return;
-  }
-  if (pack.id === "thermal") {
-    const tile = thermalTileUrl(thermalMode);
-    if (map.getSource(id)?.tiles?.[0] !== tile) {
-      if (map.getSource(id)) removeIntelLayers(map, pack.id);
-      map.addSource(id, thermalSource(id, thermalMode));
-    }
-    for (const layer of thermalLayers(id)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
     return;
   }
   if (pack.id === "gdacs") { installGdacsIcons(map); data = gdacsDisplayData(data); }
@@ -236,7 +225,7 @@ export function removeIntelLayers(map, id) {
 }
 
 export function createIntelPacks({button = null, panel = null, fetchImpl = globalThis.fetch?.bind(globalThis), getMapStyle = () => "hiking", setMapStyle = null, prepareContours = prepareContourTiles} = {}) {
-  let catalogue = {packs: [], credentials: {}}, enabled = new Set(), gdacsTypes = normalizeGdacsTypes(), firmsDays = 3, ahnMode = "dtm", thermalMode = "terra_day", saving = false, destroyed = false, catalogueGeneration = 0, notice = "";
+  let catalogue = {packs: [], credentials: {}}, enabled = new Set(), gdacsTypes = normalizeGdacsTypes(), firmsDays = 3, ahnMode = "dtm", saving = false, destroyed = false, catalogueGeneration = 0, notice = "";
   let contourUrl = null, contourPending = null, contourFailed = false;
   let trafficFilters = normalizeTrafficFilters();
   let roadFilters = normalizeRoadFilters();
@@ -327,7 +316,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       const id = event.target?.dataset?.intelPack;
       if (id) void setEnabled(id, event.target.checked);
       if (event.target?.matches?.("[data-ahn-mode]")) void setAhnMode(event.target.value);
-      if (event.target?.matches?.("[data-thermal-mode]")) void setThermalMode(event.target.value);
       if (event.target?.matches?.("[data-firms-days]")) void setFirmsDays(Number(event.target.value));
       const type = event.target?.dataset?.gdacsType;
       if (type) void setGdacsTypes(event.target.checked ? [...gdacsTypes, type] : gdacsTypes.filter(id => id !== type));
@@ -395,7 +383,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const focusedPack = panel?.ownerDocument?.activeElement?.dataset?.intelPack;
     const focusedType = panel?.ownerDocument?.activeElement?.dataset?.gdacsType;
     const focusedAhnMode = focusedName === "ahn-mode";
-    const focusedThermalMode = focusedName === "thermal-mode";
     const filtersOpen = Boolean(panel?.querySelector(".intel-disaster-filter")?.open);
     const roadOpen = Boolean(panel?.querySelector("[data-road-filter]")?.open);
     const focusedRoadGroup = active?.dataset?.roadGroup, focusedRoadValue = active?.dataset?.roadValue;
@@ -411,13 +398,12 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const mapFeatures = panel?.querySelector("[data-map-features]");
     if (mapFeatures) {
       mapFeatures.replaceChildren();
-      for (const id of ["elevation", "ahn", "thermal"]) {
+      for (const id of ["elevation", "ahn"]) {
         const row = panel.querySelector(`[data-pack-row="${id}"]`);
         if (row) mapFeatures.append(row);
       }
     }
     panel?.querySelector('[data-pack-row="ahn"]')?.insertAdjacentHTML("beforeend", `<label class="intel-ahn-mode">Elevation view<select name="ahn-mode" data-ahn-mode aria-label="LiDAR elevation view">${Object.entries(AHN_MODES).map(([value, label]) => `<option value="${value}">${escape(label)}</option>`).join("")}</select></label><p class="intel-pack-note">National sources are selected from the map area: Netherlands, England or the United States. Online only.</p>`);
-    panel?.querySelector('[data-pack-row="thermal"]')?.insertAdjacentHTML("beforeend", `<label class="intel-thermal-mode">Satellite pass<select name="thermal-mode" data-thermal-mode aria-label="Satellite thermal mode">${Object.entries(THERMAL_MODES).map(([value, label]) => `<option value="${value}">${escape(label)}</option>`).join("")}</select></label><p class="intel-pack-note">Global NASA GIBS land-surface temperature. Day/night passes are satellite observations, not ground or air temperature. Online only.</p>`);
     if (gdacsRow) gdacsRow.insertAdjacentHTML("beforeend", `<details class="intel-disaster-filter" ${filtersOpen ? "open" : ""}><summary>Disaster types <span data-gdacs-summary></span></summary><div class="intel-disaster-actions"><button type="button" data-gdacs-select="all">All</button><button type="button" data-gdacs-select="none">None</button></div><div class="intel-disaster-grid">${disasterTypes().map(type => `<label><input type="checkbox" data-gdacs-type="${escape(type.id)}"/>${gdacsIconSvg(type.id)}<span>${escape(type.label)}</span></label>`).join("")}</div><p>Icon shows the disaster type. Color shows the GDACS alert level, not whether an area is safe.</p></details>`);
     for (const id of TRAFFIC_IDS) {
       const selected = trafficDrafts.get(id) || trafficFilters[id];
@@ -430,7 +416,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     if (restore && selectionStart != null) restore.setSelectionRange(selectionStart, selectionEnd);
     if (focusedPack && IDS.includes(focusedPack)) panel.querySelector(`[data-intel-pack="${focusedPack}"]`)?.focus();
     if (focusedAhnMode) panel.querySelector("[data-ahn-mode]")?.focus();
-    if (focusedThermalMode) panel.querySelector("[data-thermal-mode]")?.focus();
     if (focusedType && GDACS_TYPES.some(type => type.id === focusedType)) panel.querySelector(`[data-gdacs-type="${focusedType}"]`)?.focus();
     if (["types", "impacts"].includes(focusedRoadGroup) && [...Object.keys(ROAD_TYPES), ...Object.keys(ROAD_IMPACTS)].includes(focusedRoadValue)) panel.querySelector(`[data-road-group="${focusedRoadGroup}"][data-road-value="${focusedRoadValue}"]`)?.focus();
   }
@@ -440,8 +425,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     if (windowSelect) { windowSelect.value = String(firmsDays); windowSelect.disabled = saving; }
     const ahnSelect = panel?.querySelector("[data-ahn-mode]");
     if (ahnSelect) { ahnSelect.value = ahnMode; ahnSelect.disabled = saving; }
-    const thermalSelect = panel?.querySelector("[data-thermal-mode]");
-    if (thermalSelect) { thermalSelect.value = thermalMode; thermalSelect.disabled = saving; }
     const count = enabled.size;
     if (button) {
       button.classList.add("intel-packs-toggle");
@@ -498,7 +481,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     trafficFilters = normalizeTrafficFilters(value.settings?.traffic_filters);
     roadFilters = normalizeRoadFilters(value.settings?.road_filters);
     ahnMode = normalizeAhnMode(value.settings?.ahn_mode);
-    thermalMode = normalizeThermalMode(value.settings?.thermal_mode);
     firmsDays = [1, 3, 7].includes(value.settings?.firms_days) ? value.settings.firms_days : 3;
     renderCatalogue();
     for (const context of maps.values()) { syncLayers(context); schedule(context, 0); }
@@ -511,11 +493,10 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (!destroyed && generation === catalogueGeneration) {
         notice = "";
         // Recreate failed vector tiles so reconnecting retries contour generation.
-        for (const context of maps.values()) if (hasParsedStyle(context)) { removeIntelLayers(context.map, "elevation"); removeIntelLayers(context.map, "ahn"); removeIntelLayers(context.map, "thermal"); }
+        for (const context of maps.values()) if (hasParsedStyle(context)) { removeIntelLayers(context.map, "elevation"); removeIntelLayers(context.map, "ahn"); }
         contourFailed = false;
         results.delete("elevation");
         results.delete("ahn");
-        results.delete("thermal");
         applyCatalogue(value);
       }
       return value;
@@ -574,25 +555,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       renderStatus();
     }
     panel?.querySelector("[data-ahn-mode]")?.focus();
-    return saved;
-  }
-
-  async function setThermalMode(value) {
-    if (!packById("thermal") || !Object.hasOwn(THERMAL_MODES, value) || saving || destroyed) return false;
-    const previous = thermalMode;
-    thermalMode = normalizeThermalMode(value);
-    for (const context of maps.values()) {
-      removeIntelLayers(context.map, "thermal");
-      syncLayers(context);
-    }
-    renderStatus();
-    const saved = await save({thermal_mode: thermalMode});
-    if (!saved) {
-      thermalMode = previous;
-      for (const context of maps.values()) { removeIntelLayers(context.map, "thermal"); syncLayers(context); }
-      renderStatus();
-    }
-    panel?.querySelector("[data-thermal-mode]")?.focus();
     return saved;
   }
 
@@ -732,13 +694,13 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
           }
           const provider = id === "ahn" ? lidarProviderForBounds(map.getBounds?.()) : null;
           const source = map.getSource(sourceId(id));
-          const desiredTile = id === "ahn" && provider && Number(map.getZoom?.()) >= provider.minzoom ? lidarTileUrl(ahnMode, provider) : id === "thermal" && Number(map.getZoom?.()) >= THERMAL_MIN_ZOOM ? thermalTileUrl(thermalMode) : null;
-          if (["ahn", "thermal"].includes(id) && source && source.tiles?.[0] !== desiredTile) {
+          const desiredTile = id === "ahn" && provider && Number(map.getZoom?.()) >= provider.minzoom ? lidarTileUrl(ahnMode, provider) : null;
+          if (id === "ahn" && source && source.tiles?.[0] !== desiredTile) {
             removeIntelLayers(map, id);
           }
-          const rasterReady = id === "ahn" ? Boolean(provider && Number(map.getZoom?.()) >= provider.minzoom) : id === "thermal" ? Number(map.getZoom?.()) >= THERMAL_MIN_ZOOM : true;
-          const needsInstall = ["ahn", "thermal"].includes(id) ? Boolean(rasterReady && (!map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer)))) : !CLIENT_RASTER_IDS.has(id) || !map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer));
-          if (needsInstall) installIntelLayers(map, pack, animatedData(context, id, context.data.get(id) || EMPTY()).data, contourUrl, ahnMode, provider, thermalMode);
+          const lidarReady = id !== "ahn" || (provider && Number(map.getZoom?.()) >= provider.minzoom);
+          const needsInstall = id === "ahn" ? Boolean(lidarReady && (!map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer)))) : !CLIENT_RASTER_IDS.has(id) || !map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer));
+          if (needsInstall) installIntelLayers(map, pack, animatedData(context, id, context.data.get(id) || EMPTY()).data, contourUrl, ahnMode, provider);
         }
         catch (error) { results.set(id, {status: "error", error: `Map layer unavailable: ${error.message}`}); }
       }
@@ -776,10 +738,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (!provider) results.set("ahn", {status: "uncovered", note: "No national high-resolution LiDAR source is available for this map area · global contours remain available"});
       else if (map.getZoom() < provider.minzoom) results.set("ahn", {status: "zoom_in", note: `Zoom in to level ${provider.minzoom} to view ${provider.label} LiDAR`});
       else results.set("ahn", {status: "ready", note: `${provider.label} · ${lidarModeLabel(provider, providerMode)} · ${provider.resolution} raster`});
-    }
-    if (enabled.has("thermal")) {
-      if (map.getZoom() < THERMAL_MIN_ZOOM) results.set("thermal", {status: "zoom_in", note: `Zoom in to level ${THERMAL_MIN_ZOOM} to view satellite temperature`});
-      else results.set("thermal", {status: "ready", note: `${thermalModeLabel(thermalMode)} · NASA GIBS raster · clouds and revisit gaps possible`});
     }
     await Promise.all(currentPacks().filter(pack => pack.enabled && !CLIENT_RASTER_IDS.has(pack.id) && !context.requests.has(pack.id) && (!trafficOnly || TRAFFIC_IDS.includes(pack.id))).map(async pack => {
       if (pack.configured === false) { results.set(pack.id, {status: "needs_key"}); return; }
@@ -961,10 +919,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         results.set("ahn", {status: "error", error: "National LiDAR tiles unavailable here. Try again later or use the global contour layer."});
         renderStatus();
       }
-      if (enabled.has("thermal") && (event.sourceId === sourceId("thermal") || event.error?.message?.includes("gibs.earthdata.nasa.gov"))) {
-        results.set("thermal", {status: "error", error: "Satellite temperature tiles unavailable here. Try again later or use the satellite basemap."});
-        renderStatus();
-      }
     };
     context.onClick = event => {
       if (!context.Popup || event.originalEvent?.target?.closest?.(".maplibregl-marker,button,a")) return;
@@ -1066,7 +1020,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     trafficAnimator.start();
   });
   const ready = refresh();
-  return {ready, attachMap, refresh, setEnabled, setRoadFilters, setFirmsDays, setAhnMode, setThermalMode, setGdacsTypes, setTrafficFilters, updateCredentials, getState: () => ({packs: currentPacks(), settings: {road_filters: roadFilters, firms_days: firmsDays, gdacs_types: [...gdacsTypes], traffic_filters: trafficFilters, ahn_mode: ahnMode, thermal_mode: thermalMode}, results: Object.fromEntries(results)}), destroy() {
+  return {ready, attachMap, refresh, setEnabled, setRoadFilters, setFirmsDays, setGdacsTypes, setTrafficFilters, updateCredentials, getState: () => ({packs: currentPacks(), settings: {road_filters: roadFilters, firms_days: firmsDays, gdacs_types: [...gdacsTypes], traffic_filters: trafficFilters, ahn_mode: ahnMode}, results: Object.fromEntries(results)}), destroy() {
     destroyed = true; ++catalogueGeneration; clearInterval(interval); clearInterval(trafficInterval);
     for (const timer of autosaveTimers.values()) clearTimeout(timer);
     trafficAnimator.destroy();

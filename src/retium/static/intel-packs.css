@@ -126,8 +126,6 @@
 .intel-firms-window select { min-width: 110px; padding: 7px 10px; color: inherit; background: #151b13; border: 1px solid #46513b; border-radius: 4px; font: inherit; }
 .intel-ahn-mode { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 12px; }
 .intel-ahn-mode select { min-width: 110px; padding: 7px 10px; color: inherit; background: #151b13; border: 1px solid #46513b; border-radius: 4px; font: inherit; }
-.intel-thermal-mode { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 12px; }
-.intel-thermal-mode select { min-width: 150px; padding: 7px 10px; color: inherit; background: #151b13; border: 1px solid #46513b; border-radius: 4px; font: inherit; }
 
 .intel-pack-row > .intel-access-section { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .intel-access-field .intel-access-input { display: flex; flex-wrap: nowrap; gap: 8px; }

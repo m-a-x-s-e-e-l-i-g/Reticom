@@ -7,7 +7,6 @@ export const THERMAL_BOUNDS = Object.freeze([-180, -85.051129, 180, 85.051129]);
 export const THERMAL_WMTS_ROOT = "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best";
 
 export const THERMAL_MODES = Object.freeze({
-  combined: "Best available · daytime",
   terra_day: "MODIS Terra · daytime",
   terra_night: "MODIS Terra · nighttime",
   aqua_day: "MODIS Aqua · daytime",
@@ -15,10 +14,6 @@ export const THERMAL_MODES = Object.freeze({
   viirs_day: "VIIRS NOAA-20 · daytime",
   viirs_night: "VIIRS NOAA-20 · nighttime",
 });
-
-// These products are all daytime observations. The first available product
-// wins; Reticom never averages rendered tiles from different overpasses.
-export const THERMAL_COMBINED_PASSES = Object.freeze(["viirs_day", "terra_day", "aqua_day"]);
 
 const THERMAL_LAYERS = Object.freeze({
   terra_day: "MODIS_Terra_Land_Surface_Temp_Day",
@@ -30,7 +25,7 @@ const THERMAL_LAYERS = Object.freeze({
 });
 
 export function normalizeThermalMode(value) {
-  return value === "combined" || Object.hasOwn(THERMAL_LAYERS, value) ? value : "combined";
+  return Object.hasOwn(THERMAL_LAYERS, value) ? value : "terra_day";
 }
 
 export function thermalModeLabel(value) {
@@ -38,13 +33,7 @@ export function thermalModeLabel(value) {
 }
 
 export function thermalLayerId(value = "terra_day") {
-  const mode = normalizeThermalMode(value);
-  return THERMAL_LAYERS[mode === "combined" ? THERMAL_COMBINED_PASSES[0] : mode];
-}
-
-export function thermalFallbackModes(value = "combined") {
-  const mode = normalizeThermalMode(value);
-  return mode === "combined" ? [...THERMAL_COMBINED_PASSES] : [mode];
+  return THERMAL_LAYERS[normalizeThermalMode(value)];
 }
 
 export function thermalDate(now = Date.now()) {
@@ -53,7 +42,7 @@ export function thermalDate(now = Date.now()) {
   return new Date(Number(now) - 86400000).toISOString().slice(0, 10);
 }
 
-export function thermalTileUrl(mode = "combined") {
+export function thermalTileUrl(mode = "terra_day") {
   // GoogleMapsCompatible_Level7 uses normal XYZ row/column ordering for
   // MapLibre. The explicit date avoids a provider-specific default-date 404;
   // it rolls forward automatically each day.

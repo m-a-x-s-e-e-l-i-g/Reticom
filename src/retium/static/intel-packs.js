@@ -3,7 +3,7 @@ import {ROAD_COLOR} from "./outdoor-map.js?v=20260907-5";
 import {GDACS_TYPES, GDACS_COLOR, GDACS_ICON, gdacsCode, gdacsIconSvg, gdacsDisplayData, normalizeGdacsTypes, installGdacsIcons} from "./gdacs-markers.js?v=20260907-1";
 import {prepareContourTiles, contourLayers, contourInterval, CONTOUR_MIN_ZOOM, CONTOUR_MAX_ZOOM} from "./terrain-contours.js?v=20260907-3";
 import {lidarLayers, lidarModeLabel, lidarModeForProvider, lidarProviderForBounds, lidarSource, lidarTileUrl, normalizeAhnMode, AHN_MODES} from "./ahn-layer.js?v=20260914-2";
-import {thermalLayers, thermalModeLabel, thermalSource, thermalTileUrl, thermalFallbackModes, thermalDate, normalizeThermalMode, THERMAL_MODES, THERMAL_MIN_ZOOM} from "./thermal-layer.js?v=20260914-2";
+import {thermalLayers, thermalModeLabel, thermalSource, thermalTileUrl, normalizeThermalMode, THERMAL_MODES, THERMAL_MIN_ZOOM} from "./thermal-layer.js?v=20260914-1";
 import {TRAFFIC_IDS, TRAFFIC_TYPES, normalizeTrafficFilters, trafficDisplayData, installTrafficIcons, trafficLayers} from "./traffic-map.js?v=20260909-3";
 import {TrafficMotion, createTrafficAnimator} from "./traffic-motion.js?v=20260909-3";
 import {TrafficTracks, trafficKey, showTrafficTrack, clearTrafficTrack} from "./traffic-tracks.js?v=20260909-3";
@@ -173,7 +173,7 @@ export function replaceTrafficPopup(popup, html) {
 }
 
 // MapLibre keeps the same camera; adding/removing public layers never calls fitBounds.
-export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null, ahnMode = "dtm", lidarProvider = null, thermalMode = "combined") {
+export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null, ahnMode = "dtm", lidarProvider = null, thermalMode = "terra_day") {
   const id = sourceId(pack.id);
   const layers = map.getStyle?.()?.layers || [];
   const before = layers.find(layer => isTeamLayer(layer) || (layer.type === "symbol" && !layer.id.startsWith(PREFIX)))?.id;
@@ -236,7 +236,7 @@ export function removeIntelLayers(map, id) {
 }
 
 export function createIntelPacks({button = null, panel = null, fetchImpl = globalThis.fetch?.bind(globalThis), getMapStyle = () => "hiking", setMapStyle = null, prepareContours = prepareContourTiles} = {}) {
-  let catalogue = {packs: [], credentials: {}}, enabled = new Set(), gdacsTypes = normalizeGdacsTypes(), firmsDays = 3, ahnMode = "dtm", thermalMode = "combined", saving = false, destroyed = false, catalogueGeneration = 0, notice = "";
+  let catalogue = {packs: [], credentials: {}}, enabled = new Set(), gdacsTypes = normalizeGdacsTypes(), firmsDays = 3, ahnMode = "dtm", thermalMode = "terra_day", saving = false, destroyed = false, catalogueGeneration = 0, notice = "";
   let contourUrl = null, contourPending = null, contourFailed = false;
   let trafficFilters = normalizeTrafficFilters();
   let roadFilters = normalizeRoadFilters();
@@ -244,8 +244,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   const listeners = [];
   const listen = (target, event, handler) => { target?.addEventListener(event, handler); listeners.push(() => target?.removeEventListener(event, handler)); };
   const packById = id => catalogue.packs.find(pack => pack.id === id);
-  const thermalActiveMode = context => thermalFallbackModes(thermalMode)[context.thermalFallbackIndex || 0] || thermalFallbackModes(thermalMode)[0];
-  const thermalDateLabel = () => `observation date ${thermalDate()}`;
   const disasterTypes = () => {
     const types = packById("gdacs")?.disaster_types?.filter(type => GDACS_TYPES.some(known => known.id === type.id));
     return types?.length ? types : GDACS_TYPES;
@@ -419,7 +417,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       }
     }
     panel?.querySelector('[data-pack-row="ahn"]')?.insertAdjacentHTML("beforeend", `<label class="intel-ahn-mode">Elevation view<select name="ahn-mode" data-ahn-mode aria-label="LiDAR elevation view">${Object.entries(AHN_MODES).map(([value, label]) => `<option value="${value}">${escape(label)}</option>`).join("")}</select></label><p class="intel-pack-note">National sources are selected from the map area: Netherlands, England or the United States. Online only.</p>`);
-    panel?.querySelector('[data-pack-row="thermal"]')?.insertAdjacentHTML("beforeend", `<label class="intel-thermal-mode">Satellite source<select name="thermal-mode" data-thermal-mode aria-label="Satellite thermal source">${Object.entries(THERMAL_MODES).map(([value, label]) => `<option value="${value}">${escape(label)}</option>`).join("")}</select></label><p class="intel-pack-note">Best available uses daytime VIIRS, then MODIS Terra, then MODIS Aqua if a provider tile is unavailable. Sources are selected, never color-blended; clouds and revisit gaps can still leave areas blank.</p>`);
+    panel?.querySelector('[data-pack-row="thermal"]')?.insertAdjacentHTML("beforeend", `<label class="intel-thermal-mode">Satellite pass<select name="thermal-mode" data-thermal-mode aria-label="Satellite thermal mode">${Object.entries(THERMAL_MODES).map(([value, label]) => `<option value="${value}">${escape(label)}</option>`).join("")}</select></label><p class="intel-pack-note">Global NASA GIBS land-surface temperature. Day/night passes are satellite observations, not ground or air temperature. Online only.</p>`);
     if (gdacsRow) gdacsRow.insertAdjacentHTML("beforeend", `<details class="intel-disaster-filter" ${filtersOpen ? "open" : ""}><summary>Disaster types <span data-gdacs-summary></span></summary><div class="intel-disaster-actions"><button type="button" data-gdacs-select="all">All</button><button type="button" data-gdacs-select="none">None</button></div><div class="intel-disaster-grid">${disasterTypes().map(type => `<label><input type="checkbox" data-gdacs-type="${escape(type.id)}"/>${gdacsIconSvg(type.id)}<span>${escape(type.label)}</span></label>`).join("")}</div><p>Icon shows the disaster type. Color shows the GDACS alert level, not whether an area is safe.</p></details>`);
     for (const id of TRAFFIC_IDS) {
       const selected = trafficDrafts.get(id) || trafficFilters[id];
@@ -584,7 +582,6 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const previous = thermalMode;
     thermalMode = normalizeThermalMode(value);
     for (const context of maps.values()) {
-      context.thermalFallbackIndex = 0;
       removeIntelLayers(context.map, "thermal");
       syncLayers(context);
     }
@@ -735,13 +732,13 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
           }
           const provider = id === "ahn" ? lidarProviderForBounds(map.getBounds?.()) : null;
           const source = map.getSource(sourceId(id));
-          const desiredTile = id === "ahn" && provider && Number(map.getZoom?.()) >= provider.minzoom ? lidarTileUrl(ahnMode, provider) : id === "thermal" && Number(map.getZoom?.()) >= THERMAL_MIN_ZOOM ? thermalTileUrl(thermalActiveMode(context)) : null;
+          const desiredTile = id === "ahn" && provider && Number(map.getZoom?.()) >= provider.minzoom ? lidarTileUrl(ahnMode, provider) : id === "thermal" && Number(map.getZoom?.()) >= THERMAL_MIN_ZOOM ? thermalTileUrl(thermalMode) : null;
           if (["ahn", "thermal"].includes(id) && source && source.tiles?.[0] !== desiredTile) {
             removeIntelLayers(map, id);
           }
           const rasterReady = id === "ahn" ? Boolean(provider && Number(map.getZoom?.()) >= provider.minzoom) : id === "thermal" ? Number(map.getZoom?.()) >= THERMAL_MIN_ZOOM : true;
           const needsInstall = ["ahn", "thermal"].includes(id) ? Boolean(rasterReady && (!map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer)))) : !CLIENT_RASTER_IDS.has(id) || !map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer));
-          if (needsInstall) installIntelLayers(map, pack, animatedData(context, id, context.data.get(id) || EMPTY()).data, contourUrl, ahnMode, provider, id === "thermal" ? thermalActiveMode(context) : thermalMode);
+          if (needsInstall) installIntelLayers(map, pack, animatedData(context, id, context.data.get(id) || EMPTY()).data, contourUrl, ahnMode, provider, thermalMode);
         }
         catch (error) { results.set(id, {status: "error", error: `Map layer unavailable: ${error.message}`}); }
       }
@@ -782,11 +779,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     }
     if (enabled.has("thermal")) {
       if (map.getZoom() < THERMAL_MIN_ZOOM) results.set("thermal", {status: "zoom_in", note: `Zoom in to level ${THERMAL_MIN_ZOOM} to view satellite temperature`});
-      else {
-        const active = thermalActiveMode(context);
-        const fallback = thermalMode === "combined" && active !== thermalFallbackModes(thermalMode)[0] ? ` · fallback ${thermalModeLabel(active)}` : "";
-        results.set("thermal", {status: "ready", note: `${thermalModeLabel(thermalMode)}${fallback} · NASA GIBS raster · ${thermalDateLabel()} · clouds and revisit gaps possible`});
-      }
+      else results.set("thermal", {status: "ready", note: `${thermalModeLabel(thermalMode)} · NASA GIBS raster · clouds and revisit gaps possible`});
     }
     await Promise.all(currentPacks().filter(pack => pack.enabled && !CLIENT_RASTER_IDS.has(pack.id) && !context.requests.has(pack.id) && (!trafficOnly || TRAFFIC_IDS.includes(pack.id))).map(async pack => {
       if (pack.configured === false) { results.set(pack.id, {status: "needs_key"}); return; }
@@ -942,7 +935,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
 
   function attachMap(map, {Popup} = {}) {
     if (maps.has(map)) { if (Popup) maps.get(map).Popup = Popup; return; }
-    const context = {map, Popup, motion: new Map(TRAFFIC_IDS.map(id => [id, new TrafficMotion(id)])), tracks: new Map(TRAFFIC_IDS.map(id => [id, new TrafficTracks(id)])), selectedTraffic: null, thermalFallbackIndex: 0, aircraftProfiles: new Map(), trafficRegions: new Map(), rejectedTrafficViews: new Map(), trafficClient: globalThis.crypto?.randomUUID?.() || `map-${Math.random().toString(36).slice(2)}`, requests: new Map(), data: new Map(), timer: null, popup: null, credit: null, needsRefresh: true};
+    const context = {map, Popup, motion: new Map(TRAFFIC_IDS.map(id => [id, new TrafficMotion(id)])), tracks: new Map(TRAFFIC_IDS.map(id => [id, new TrafficTracks(id)])), selectedTraffic: null, aircraftProfiles: new Map(), trafficRegions: new Map(), rejectedTrafficViews: new Map(), trafficClient: globalThis.crypto?.randomUUID?.() || `map-${Math.random().toString(36).slice(2)}`, requests: new Map(), data: new Map(), timer: null, popup: null, credit: null, needsRefresh: true};
     maps.set(map, context);
     const container = map.getContainer?.();
     if (container?.ownerDocument) {
@@ -953,7 +946,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       context.credit.addEventListener("pointerdown", event => event.stopPropagation());
     }
     context.onStyle = () => { invalidate(context); syncLayers(context); schedule(context, 0); };
-    context.onMove = () => { if (thermalMode === "combined") context.thermalFallbackIndex = 0; schedule(context); };
+    context.onMove = () => schedule(context);
     // A map may attach before its style is parsed. Idle is only a fallback for that
     // initial case; continuously streaming team data must not block public requests.
     context.onIdle = () => {
@@ -969,15 +962,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         renderStatus();
       }
       if (enabled.has("thermal") && (event.sourceId === sourceId("thermal") || event.error?.message?.includes("gibs.earthdata.nasa.gov"))) {
-        const passes = thermalFallbackModes(thermalMode);
-        if (thermalMode === "combined" && context.thermalFallbackIndex < passes.length - 1) {
-          context.thermalFallbackIndex += 1;
-          removeIntelLayers(context.map, "thermal");
-          syncLayers(context);
-          results.set("thermal", {status: "ready", note: `Best available · trying ${thermalModeLabel(thermalActiveMode(context))} · ${thermalDateLabel()}`});
-        } else {
-          results.set("thermal", {status: "error", error: "Satellite temperature tiles unavailable here. Try again later or use the satellite basemap."});
-        }
+        results.set("thermal", {status: "error", error: "Satellite temperature tiles unavailable here. Try again later or use the satellite basemap."});
         renderStatus();
       }
     };

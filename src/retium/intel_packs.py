@@ -39,7 +39,7 @@ AHN_PACK = {
 }
 THERMAL_PACK = {
     "id": "thermal", "title": "Satellite land-surface temperature",
-    "description": "Global public thermal raster from NASA GIBS. Best available selects daytime VIIRS or MODIS coverage without blending different observations; clouds and revisit gaps can leave areas blank.",
+    "description": "Global public thermal raster from NASA GIBS. Choose daytime or nighttime MODIS / VIIRS coverage; clouds and revisit gaps can leave areas blank.",
     "source": "NASA GIBS · MODIS / VIIRS", "source_url": "https://nasa-gibs.github.io/gibs-api-docs/access-basics/",
     "attribution": "NASA Earthdata · MODIS / VIIRS", "attribution_url": "https://earthdata.nasa.gov/",
     "min_zoom": 1, "ttl_seconds": 86400, "credential_fields": [], "client_raster": True,
@@ -49,7 +49,7 @@ GDACS_TYPES = tuple(item["id"] for item in CATALOGUE["gdacs"]["disaster_types"])
 DEFAULT_GDACS_TYPES = tuple(code for code in GDACS_TYPES if code != "DR")
 DEFAULT_ENABLED = ["gdacs", "military"]  # Trails now come from always-on basemap tiles.
 AHN_MODES = ("dtm", "dsm")
-THERMAL_MODES = ("combined", "terra_day", "terra_night", "aqua_day", "aqua_night", "viirs_day", "viirs_night")
+THERMAL_MODES = ("terra_day", "terra_night", "aqua_day", "aqua_night", "viirs_day", "viirs_night")
 GDACS_CACHE_VERSION = 2  # Earlier caches contain point locations, not event outlines.
 SECRET_FIELDS = {"firms_key", "acled_token", "aisstream_key"}
 OSM_PACKS = {"trails", "military"}
@@ -119,7 +119,7 @@ class IntelPackStore:
         self.credentials = {key: value for key, value in credentials.items() if key in SECRET_FIELDS and isinstance(value, str)} if isinstance(credentials, dict) else {}
         self.firms_days = stored.get("firms_days", 3)
         self.ahn_mode = stored.get("ahn_mode", "dtm") if stored.get("ahn_mode", "dtm") in AHN_MODES else "dtm"
-        self.thermal_mode = stored.get("thermal_mode", "combined") if stored.get("thermal_mode", "combined") in THERMAL_MODES else "combined"
+        self.thermal_mode = stored.get("thermal_mode", "terra_day") if stored.get("thermal_mode", "terra_day") in THERMAL_MODES else "terra_day"
         try:
             self.road_filters = validate_road_filters(stored.get("road_filters", {}))
         except ValueError:
@@ -189,7 +189,7 @@ class IntelPackStore:
                 raise ValueError("Choose an AHN elevation mode")
             thermal_mode = body.get("thermal_mode", self.thermal_mode)
             if thermal_mode not in THERMAL_MODES:
-                raise ValueError("Choose an available satellite temperature source")
+                raise ValueError("Choose an available satellite temperature mode")
             credentials = {**self.credentials, **{key: value.strip() for key, value in supplied.items()}}
             self._write(self.settings_path, {"enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "traffic_filters": traffic_filters, "firms_days": firms_days, "road_filters": road_filters, "ahn_mode": ahn_mode, "thermal_mode": thermal_mode})
             self.road_filters = road_filters

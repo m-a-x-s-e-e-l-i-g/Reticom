@@ -23,7 +23,7 @@ Mapy's official outdoor map/routing API is an alternative for a future configure
 | Live aircraft | Reported aircraft positions, direction, altitude and type filters | No key; regional views, zoom 7+ | About 10 seconds; memory only |
 | Live boats & ships | AIS positions, vessel types and classification filters | Your AISStream key and permitted use; regional views, zoom 7+ | Stream + 5-second UI refresh; memory only |
 | National LiDAR elevation | Netherlands 0.5 m AHN, England 1 m Environment Agency, or USGS 3DEP bare-earth raster selected by map area | No key; supported national coverage only, close zoom | Upstream WMS; online-only |
-| Satellite land-surface temperature | Global NASA GIBS with a daytime Best available fallback (VIIRS, then MODIS Terra/Aqua) and individual day/night rasters | No key; global tile coverage, zoom 1+ | Upstream WMTS; online-only |
+| Satellite land-surface temperature | Global NASA GIBS MODIS Terra/Aqua and VIIRS NOAA-20 day/night rasters | No key; global tile coverage, zoom 1+ | Upstream WMTS; online-only |
 
 Both traffic packs are off by default. See [live traffic](live-traffic.md) for setup, military/commercial classification caveats, position expiry, privacy and provider limits.
 

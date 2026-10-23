@@ -3,6 +3,6 @@ lxmf==1.1.1
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
 qrcode==8.2
-Pillow==12.3.0
+Pillow==13.0.0
 zxing-cpp==3.1.1
 websockets==15.0.1

@@ -4,7 +4,9 @@ export const MAX_AUTOMATIC_ACCURACY_METERS = 100;
 export const MAX_DISPLAY_ACCURACY_METERS = 150;
 
 export function locationTime(event) {
-  return Number(event.network?.received_at || event.created_at || 0);
+  const recorded = Number(event.created_at) || 0;
+  const received = Number(event.network?.received_at) || 0;
+  return recorded && received ? Math.min(recorded, received) : recorded || received;
 }
 
 export function locationAccuracy(event) {

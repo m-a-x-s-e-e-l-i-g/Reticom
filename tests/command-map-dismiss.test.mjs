@@ -69,7 +69,7 @@ test("team changes cannot leak dismissals or replay an old animation into the ne
 
 test("host and joined Command both load read state before rendering, with desktop controls and touch handlers", () => {
   assert.match(app, /role === "gateway" \? state.network.destination : state.team.destination/);
-  assert.ok(app.indexOf("if (mapMessageDestination !== readMapMessageDestination)") < app.indexOf('renderMapMessages(commandEvents, "commandLatestMessages")', app.indexOf("async function refresh()")));
+  assert.ok(app.indexOf("if (mapMessageDestination !== readMapMessageDestination)") < app.indexOf('renderMapMessages(commandEvents, "commandLatestMessages")', app.indexOf("async function refresh(")));
   assert.match(app, /\["latestMessages", "commandLatestMessages"\]\.forEach\(id =>/);
   const css = readFileSync(new URL("../src/retium/static/styles.css", import.meta.url), "utf8");
   assert.match(css, /\.command-latest-messages \.map-message-read\s*\{\s*display: inline-grid/);

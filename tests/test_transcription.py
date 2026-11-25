@@ -5,6 +5,19 @@ import pytest
 from retium.transcription import LocalTranscriber, TranscriptionError
 
 
+def test_faster_whisper_decodes_audio_with_installed_pyav():
+    import io
+    import wave
+
+    audio = pytest.importorskip("faster_whisper.audio")
+    wav = io.BytesIO()
+    with wave.open(wav, "wb") as output:
+        output.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+        output.writeframes(b"\x00\x01" * 800)
+    wav.seek(0)
+    assert audio.decode_audio(wav, sampling_rate=16000).shape == (1600,)
+
+
 class FakeSegment:
     def __init__(self, text: str):
         self.text = text

@@ -188,31 +188,31 @@ final class BackgroundAlertController {
         );
         boolean initialized = preferences.getBoolean(SEEN_INITIALIZED_KEY, false);
         String previousDestination = preferences.getString(TEAM_DESTINATION_KEY, "");
-        LinkedHashSet<String> seen = readSeenEventIds(context);
         if (!initialized || !destination.equals(previousDestination)) {
-            for (JSONObject event : alertable) addSeen(seen, event.optString("id", ""));
-            writeSeenEventIds(context, seen, true);
+            JSONArray ids = new JSONArray();
+            for (JSONObject event : alertable) ids.put(event.optString("id", ""));
+            mergeSeenEventIds(context, ids.toString());
             preferences.edit().putString(TEAM_DESTINATION_KEY, destination).apply();
             return;
         }
 
         for (JSONObject event : alertable) {
             if (stopped || appForeground || !alertsEnabled(context)) return;
-            String eventId = event.optString("id", "");
-            if (eventId.isEmpty() || seen.contains(eventId)) continue;
-            addSeen(seen, eventId);
-            writeSeenEventIds(context, seen, true);
             JSONObject eventNetwork = event.optJSONObject("network");
             String sender = eventNetwork == null ? "" : eventNetwork.optString("sender_hash", "");
-            if (!localIdentity.isEmpty() && localIdentity.equals(sender)) continue;
-            deliver(event);
+            boolean own = !localIdentity.isEmpty() && localIdentity.equals(sender);
+            String type = event.optString("type", "");
+            String clipId = !own && ("ptt.broadcast".equals(type) || "private.ptt".equals(type))
+                    ? event.optString("clip_id", "") : "";
+            if (claimIncomingAlert(context, event.optString("id", ""), clipId) && !own) deliver(event);
         }
     }
 
     private void deliver(JSONObject event) {
+        String type = event.optString("type", "");
+        if (LocationUpdateController.isCommsOnly(context) && !"ptt.broadcast".equals(type) && !"private.ptt".equals(type)) return;
         showIncomingNotification(event);
         if (appForeground || !alertsEnabled(context)) return;
-        String type = event.optString("type", "");
         if ("ptt.broadcast".equals(type) || "private.ptt".equals(type)) {
             playIncomingVoice(event.optString("clip_id", ""));
         } else {
@@ -533,6 +533,17 @@ final class BackgroundAlertController {
                 || "ptt.broadcast".equals(type)
                 || "task.created".equals(type)
                 || "waypoint.arrived".equals(type);
+    }
+
+    private static synchronized boolean claimIncomingAlert(Context context, String eventId, String clipId) {
+        LinkedHashSet<String> seen = readSeenEventIds(context);
+        if (eventId.isEmpty() || seen.contains(eventId)) return false;
+        addSeen(seen, eventId);
+        // The WebView records live playback under this key before the feed item arrives.
+        boolean duplicateVoice = !clipId.isEmpty() && seen.contains("voice:" + clipId);
+        if (!clipId.isEmpty()) addSeen(seen, "voice:" + clipId);
+        writeSeenEventIds(context, seen, true);
+        return !duplicateVoice;
     }
 
     private static synchronized LinkedHashSet<String> readSeenEventIds(Context context) {

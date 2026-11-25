@@ -61,13 +61,15 @@ def test_vessel_static_enrichment_does_not_refresh_position_or_claim_ownership()
     assert feature["properties"]["traffic_type"] == "unknown"
     assert feature["properties"]["heading"] == 91
     assert feature["properties"]["course"] == 91
-    registry.ingest(ais("ShipStaticData", Type=70, Name="Cargo fixture", Destination="Test port"), NOW+20)
+    registry.ingest(ais("ShipStaticData", Type=70, Name="Cargo fixture", Destination="Test port", Dimension={"A": 30, "B": 165}), NOW+20)
     props = registry.features(BOUNDS, NOW+30)[0]["properties"]
     assert props["traffic_type"] == "cargo" and props["affiliation"] == "commercial"
+    assert props["length_m"] == 195
     assert props["position_time"] == NOW
-    registry.ingest(ais("ShipStaticData", Type=35), NOW+590)
+    registry.ingest(ais("ShipStaticData", Type=35, Dimension={"A": 0, "B": 0}), NOW+590)
     assert "restricted" in registry.features(BOUNDS, NOW+591)[0]["properties"]["classification_note"]
     assert registry.features(BOUNDS, NOW+601)[0]["properties"]["position_time"] == NOW
+    assert registry.features(BOUNDS, NOW+601)[0]["properties"]["length_m"] == 195
     assert registry.features(BOUNDS, NOW+1801) == []
     assert vessel_kind(55) == ("service", "unknown"), "law enforcement is not automatically military"
 
@@ -75,7 +77,7 @@ def test_vessel_static_enrichment_does_not_refresh_position_or_claim_ownership()
 def test_class_b_vessel_data_arrives_in_separate_parts():
     registry = VesselRegistry()
     registry.ingest(ais("StaticDataReport", PartNumber=0, ReportA={"Name": "Sailing fixture"}), NOW)
-    registry.ingest(ais("StaticDataReport", PartNumber=1, ReportB={"ShipType": 36, "CallSign": "FIX"}), NOW)
+    registry.ingest(ais("StaticDataReport", PartNumber=1, ReportB={"ShipType": 36, "CallSign": "FIX", "Dimension": {"A": 7, "B": 8}}), NOW)
     assert registry.features(BOUNDS, NOW) == [], "static metadata never invents a position"
     registry.ingest(ais("StandardClassBPositionReport", Latitude=51.6, Longitude=4.8, Sog=102.3, Cog=360, TrueHeading=511), NOW)
     props = registry.features(BOUNDS, NOW)[0]["properties"]
@@ -83,6 +85,7 @@ def test_class_b_vessel_data_arrives_in_separate_parts():
     assert props["speed_knots"] is None and props["heading"] is None
     assert props["course"] is None
     assert props["callsign"] == "FIX"
+    assert props["length_m"] == 15
 
 
 def test_vessel_course_and_bow_heading_are_separate_for_animation():
@@ -144,6 +147,62 @@ def test_flights_use_short_cache_expire_stale_and_stop_after_disable(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("failure, retry", [("quota", 300), ("timeout", 30), ("invalid", 30)])
+def test_aircraft_switches_to_opted_in_fallback_until_retry(tmp_path, monkeypatch, failure, retry):
+    from urllib.error import HTTPError
+    from retium import traffic as module
+
+    monkeypatch.setattr(module, "PERSONAL_FLIGHT_FALLBACK", True)
+
+    async def scenario():
+        now, calls = [NOW], []
+
+        def fetch(url):
+            calls.append(url)
+            if len(calls) == 1:
+                if failure == "quota":
+                    raise HTTPError(url, 429, "quota", {"Retry-After": "300"}, None)
+                if failure == "timeout":
+                    raise TimeoutError
+                return {"unexpected": []}
+            return {"now": now[0] * 1000, "ac": [aircraft()]}
+
+        store = IntelPackStore(tmp_path)
+        store.update({"enabled": ["flights"]})
+        traffic = LiveTraffic(store, clock=lambda: now[0], flight_fetch=fetch)
+        try:
+            result = await traffic.load("flights", BOUNDS, 12, "map")
+            assert result["features"][0]["properties"]["attribution"] == "adsb.fi"
+            now[0] += 11
+            await traffic.load("flights", BOUNDS, 12, "map")
+            assert all(url.startswith("https://opendata.adsb.fi/api/v3/lat/") for url in calls[1:])
+            assert len(calls) == 3
+            now[0] = NOW + retry
+            result = await traffic.load("flights", BOUNDS, 12, "map")
+            assert calls[-1] == flight_query(BOUNDS)
+            assert result["features"][0]["properties"]["attribution"] == "ADSB.lol contributors · ODbL"
+        finally:
+            await traffic.close()
+
+    asyncio.run(scenario())
+
+
+def test_windows_fallback_opt_in_survives_an_old_launcher_environment(monkeypatch):
+    import sys
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from retium import traffic
+
+    environment = {}
+    monkeypatch.setattr(traffic, "os", SimpleNamespace(name="nt", environ=environment))
+    monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(
+        HKEY_CURRENT_USER=object(), OpenKey=lambda *_: nullcontext(), QueryValueEx=lambda *_: ("1", 1)))
+    assert traffic.personal_flight_fallback_enabled()
+    environment["RETICOM_ADSB_FI_PERSONAL"] = "0"
+    assert not traffic.personal_flight_fallback_enabled()
+
+
 def test_ais_one_compressed_socket_with_leases_and_immediate_key_revocation(tmp_path):
     async def scenario():
         sent, connections, closed = [], [], []
@@ -162,10 +221,7 @@ def test_ais_one_compressed_socket_with_leases_and_immediate_key_revocation(tmp_
                 closed.append(True)
         store = IntelPackStore(tmp_path)
         traffic = LiveTraffic(store, clock=lambda: NOW, connector=connector)
-        store.update({"enabled": ["vessels"]})
-        assert (await traffic.load("vessels", BOUNDS, 12, "one"))["status"] == "needs_key"
-        assert traffic.task is None
-        store.update({"credentials": {"aisstream_key": "fixture-key"}})
+        store.update({"enabled": ["vessels"], "credentials": {"aisstream_key": "fixture-key"}})
         await traffic.load("vessels", BOUNDS, 12, "one")
         await traffic.load("vessels", BOUNDS, 12, "two")
         queue.put_nowait(json.dumps({"MessageType": "SubscriptionConfirmation", "Message": {"CompressionEnabled": True}}))
@@ -190,14 +246,15 @@ def test_ais_one_compressed_socket_with_leases_and_immediate_key_revocation(tmp_
 
 def test_traffic_endpoints_are_available_without_reticulum_or_team(tmp_path):
     store = IntelPackStore(tmp_path)
-    traffic = LiveTraffic(store, clock=lambda: NOW, flight_fetch=lambda _url: {"now": NOW*1000, "ac": [aircraft()]})
+    traffic = LiveTraffic(store, clock=lambda: NOW, flight_fetch=lambda _url: {"now": NOW*1000, "ac": [aircraft()]},
+                          snapshot_fetch=lambda _bounds, _key: [])
     app = FastAPI()
     app.include_router(intel_router(tmp_path, store=store, traffic=traffic))
     with TestClient(app) as client:
         client.patch("/api/intel-packs/settings", json={"enabled": ["flights", "vessels"]})
         query = "?west=4.5&south=51.4&east=5&north=51.8&zoom=12&client=test"
         assert len(client.get("/api/intel-packs/live/flights"+query).json()["features"]) == 1
-        assert client.get("/api/intel-packs/live/vessels"+query).json()["status"] == "needs_key"
+        assert client.get("/api/intel-packs/live/vessels"+query).json()["status"] == "waiting"
         assert client.get("/api/intel-packs/live/flights"+query.replace("west=4.5", "west=nan")).status_code == 422
         assert client.delete("/api/intel-packs/live/vessels/lease/test", headers={"origin": "https://evil.example"}).status_code == 403
 
@@ -220,6 +277,99 @@ def test_aircraft_details_are_lazy_bounded_and_photo_is_proxied(tmp_path):
         assert calls == ["abcdef"], "profile metadata is cached across the thumbnail request"
         assert client.get("/api/intel-packs/live/flights/not-hex/profile").status_code == 422
     assert aircraft_profile({"response": {"aircraft": {"url_photo_thumbnail": "https://evil.example/photo.jpg"}}})["photo_url"] is None
+
+
+def test_vessel_photo_uses_exact_mmsi_and_preserves_credit(tmp_path, monkeypatch):
+    photo = {"n": 2, "attribution": "Photo by Example · CC BY 4.0", "source": "https://commons.wikimedia.org/wiki/File:Example.jpg"}
+
+    def metadata(url, _agent):
+        assert url.startswith("https://openvesselphotos.org/v1/mmsi/")
+        return {"mmsi": "227101600", "photos": [photo]}
+
+    def thumbnail(url):
+        assert url == "https://openvesselphotos.org/v1/mmsi/227101600/photos/2.jpg?size=320"
+        return {"data": b"fixture-photo", "content_type": "image/jpeg"}
+
+    monkeypatch.setattr("retium.traffic.fetch_traffic_json", metadata)
+    monkeypatch.setattr("retium.traffic._fetch_traffic_photo", thumbnail)
+    app = FastAPI()
+    app.include_router(intel_router(tmp_path))
+    with TestClient(app) as client:
+        base = "/api/intel-packs/live/vessels/"
+        assert client.get(base + "227101600/photo").json() == {
+            "number": 2, "credit": photo["attribution"], "source_url": photo["source"]}
+        assert client.get(base + "227101601/photo").json() is None
+        image = client.get(base + "227101600/thumbnail/2")
+        assert image.content == b"fixture-photo" and image.headers["content-type"] == "image/jpeg"
+        assert client.get(base + "bad/photo").status_code == 422
+        assert client.get(base + "227101600/thumbnail/0").status_code == 422
+
+
+@pytest.mark.parametrize("primary_key,open_waters_ok", [("", True), ("primary-secret", False)])
+def test_ais_fallbacks_use_separate_credentials_and_position_attribution(tmp_path, primary_key, open_waters_ok):
+    async def scenario():
+        from datetime import datetime, timezone
+
+        calls = []
+
+        @asynccontextmanager
+        async def offline_stream(url, **options):
+            calls.append("stream")
+            raise OSError("offline")
+            yield
+
+        def snapshots(bounds, key):
+            calls.append(key)
+            if not key and not open_waters_ok:
+                raise OSError("Open Waters unavailable")
+            source = "aishub" if key else "station"
+            return [dict(mmsi=244750786, coordinates=[4.8, 51.6],
+                         seen=datetime.fromtimestamp(NOW-90, timezone.utc).isoformat(),
+                         name="Fixture", source=source, credit="Fixture credit")]
+
+        store = IntelPackStore(tmp_path)
+        settings = store.update({"enabled": ["vessels"], "credentials": {"aisstream_key": primary_key, "aishub_key": "hub-secret"}})
+        assert "hub-secret" not in json.dumps(settings)
+        traffic = LiveTraffic(store, clock=lambda: NOW, connector=offline_stream, snapshot_fetch=snapshots)
+        try:
+            assert (await traffic.load("vessels", BOUNDS, 12, "map"))["status"] == "waiting"
+            for _ in range(100):
+                await asyncio.sleep(.005)
+                if traffic.ais_state == "connected":
+                    break
+            result = await traffic.load("vessels", BOUNDS, 12, "map")
+            props = result["features"][0]["properties"]
+            assert props["source"] == ("Open Waters AIS" if open_waters_ok else "AISHub")
+            assert props["attribution"] == "Fixture credit" and props["position_time"] == NOW-90
+            assert calls == ([""] if open_waters_ok else ["stream", "", "hub-secret"])
+            assert "hub-secret" not in json.dumps(result)
+        finally:
+            await traffic.close()
+    asyncio.run(scenario())
+
+
+def test_aishub_snapshot_uses_regional_human_readable_json(monkeypatch):
+    from datetime import datetime, timezone
+    from urllib.parse import parse_qs, urlsplit
+    from retium.traffic import vessel_snapshot
+
+    def fetch(url, agent):
+        parsed = urlsplit(url)
+        assert parsed.hostname == "data.aishub.net"
+        assert parse_qs(parsed.query) == {"username": ["key&value"], "format": ["1"], "output": ["json"],
+                                          "interval": ["10"], "lonmin": ["4.5"], "lonmax": ["5"],
+                                          "latmin": ["51.4"], "latmax": ["51.8"]}
+        return [{"ERROR": False}, [{"MMSI": 244750786, "TIME": "2026-10-27 09:50:33 GMT", "LONGITUDE": 4.8,
+                                    "LATITUDE": 51.6, "SOG": 8.2, "TYPE": 79, "A": 35, "B": 180}]]
+
+    monkeypatch.setattr("retium.traffic.fetch_traffic_json", fetch)
+    registry = VesselRegistry()
+    now = datetime(2026, 10, 27, 9, 50, 34, tzinfo=timezone.utc).timestamp()
+    assert registry.ingest_snapshot(vessel_snapshot(BOUNDS, "key&value")[0], now, "AISHub")
+    props = registry.features(BOUNDS, now)[0]["properties"]
+    assert props["source_url"] == "https://www.aishub.net/" and props["traffic_type"] == "cargo"
+    assert props["attribution"] == "Data: AISHub contributors"
+    assert props["length_m"] == 215
 
 
 def test_flights_share_budget_without_starving_second_view(tmp_path):

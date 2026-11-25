@@ -27,12 +27,31 @@ test("last-seen positions remain cached for 30 minutes and selected targets stay
   assert.equal(trafficDisplayData("flights",selected,{query:"other"},now).features.length,0);
 });
 test("unknown heading is visibly distinct and sea/air shapes remain separate", () => {
-  assert.equal(trafficDisplayData("flights",data(point("x",{heading:null})),{},now).features[0].properties.traffic_icon,"unknown");
+  assert.equal(trafficDisplayData("flights",data(point("x",{heading:null})),{},now).features[0].properties.traffic_icon,"helicopter-no-heading");
   assert.equal(trafficDisplayData("flights",data(point("x")),{},now).features[0].properties.traffic_icon,"helicopter");
-  assert.equal(trafficDisplayData("vessels",data(point("x",{traffic_pack:"vessels"})),{},now).features[0].properties.traffic_icon,"ship");
+  assert.equal(trafficDisplayData("vessels",data(point("x",{traffic_pack:"vessels"})),{},now).features[0].properties.traffic_icon,"sea-ship");
   const layers=trafficLayers("test");
   assert.equal(layers[1].layout["icon-rotation-alignment"],"map");
   assert.deepEqual(layers[1].layout["icon-size"].slice(0, 4),["interpolate",["linear"],["zoom"],6]);
+});
+test("aircraft silhouettes use type codes before the broad feed category", () => {
+  const flights = data(
+    point("Piper", {type_code: "P28A", traffic_type: "unknown"}),
+    point("737", {type_code: "B738", traffic_type: "medium"}),
+    point("Hercules", {type_code: "C30J", traffic_type: "medium", affiliation: "military"}),
+    point("F-16", {type_code: "F16", traffic_type: "medium", affiliation: "military"}),
+    point("787", {type_code: "B789", traffic_type: "unknown"}),
+  );
+  assert.deepEqual(trafficDisplayData("flights", flights, {}, now).features.map(f => f.properties.traffic_icon),
+    ["prop", "airliner", "transport-military", "fighter-military", "widebody"]);
+});
+test("vessels use hull type, reported length and the military or restricted color", () => {
+  const vessels = data(...[
+    ["sailing", 13, "unknown"], ["cargo", 205, "commercial"], ["cargo", undefined, "commercial"],
+    ["tanker", 210, "commercial"], ["military_restricted", 92, "military"], ["service", 92, "unknown"],
+  ].map(([traffic_type, length_m, affiliation], i) => point(String(i), {traffic_pack:"vessels", traffic_type, length_m, affiliation})));
+  const rendered = trafficDisplayData("vessels", vessels, {}, now).features.map(({properties: p}) => [p.traffic_icon, p.traffic_icon_scale]);
+  assert.deepEqual(rendered, [["sea-sailboat", .78], ["sea-cargo", 1.24], ["sea-cargo", 1], ["sea-tanker", 1.24], ["sea-patrol-military", 1], ["sea-service", 1]]);
 });
 test("live queries split date-line views and waiting is not presented as a successful empty feed", () => {
   const urls=intelPackUrls("vessels",{west:179,south:10,east:181,north:11},10);

@@ -15,6 +15,7 @@ from .landmarks import nearest_landmark
 from .protocol import MARKER_TYPES, new_event
 
 MODEL = "qwen3:4b-instruct"
+INFERENCE_TIMEOUT_SECONDS = 240
 MAX_AGE = 30 * 60
 BEARINGS = {"north": 0, "northeast": 45, "east": 90, "southeast": 135, "south": 180, "southwest": 225, "west": 270, "northwest": 315}
 _INFERENCE_LOCK = threading.Lock()
@@ -154,13 +155,15 @@ class LocalInterpreter:
         try:
             with _INFERENCE_LOCK:
                 with urlopen(Request(self.endpoint + "/api/chat", data=json.dumps(body).encode(),
-                    headers={"Content-Type": "application/json"}), timeout=120) as response:
+                    headers={"Content-Type": "application/json"}), timeout=INFERENCE_TIMEOUT_SECONDS) as response:
                     raw = response.read(128001)
             if len(raw) > 128000:
                 raise InterpretationError("Local model response was too large")
             payload = json.loads(raw)
             return validate_interpretation(json.loads(payload["message"]["content"]))
-        except (URLError, TimeoutError, OSError) as exc:
+        except TimeoutError as exc:
+            raise InterpretationError("The local model took too long to respond. It may still be loading.") from exc
+        except (URLError, OSError) as exc:
             raise InterpretationError("Local AI is unavailable. Start the local model service and install " + self.model) from exc
         except (KeyError, ValueError, TypeError) as exc:
             raise InterpretationError("Local AI returned an invalid response") from exc

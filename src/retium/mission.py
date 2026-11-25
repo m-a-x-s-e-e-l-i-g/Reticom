@@ -177,7 +177,15 @@ class MissionInbox:
                 content = {"events": events, "tasks": tasks, "private_events": private, "team": stage["team"]}
                 if hashlib.sha256(encoded(content)).hexdigest() != snapshot:
                     raise ValueError("mission snapshot checksum mismatch")
-                keep = {e["id"] for e in events} | set(stage["protected"])
+                snapshot_ids = {e["id"] for e in events}
+                keep = snapshot_ids | set(stage["protected"])
+                # A snapshot opened before a removal was accepted can still contain the item.
+                for row in self.store._connection.execute(
+                    "SELECT event_id,payload_json FROM events WHERE event_type IN ('marker.deleted','drawing.deleted')"
+                ):
+                    event = json.loads(row["payload_json"])
+                    if (event.get("marker_id") or event.get("drawing_id")) in snapshot_ids:
+                        keep.add(row["event_id"])
                 # A stale backup snapshot must not roll back a newer route or
                 # resurrect one that its sender already stopped. Retain each
                 # latest signed navigation state until a newer revision wins.

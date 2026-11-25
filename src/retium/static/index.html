@@ -7,16 +7,15 @@
   <title>Reticom</title>
   <link rel="icon" href="/favicon.ico?v=20260908-1" sizes="any">
   <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css?v=6.6.0">
-  <link rel="stylesheet" href="/styles.css?v=20260909-7">
-  <link rel="stylesheet" href="/intel-packs.css?v=20260914-2">
-  <link rel="stylesheet" href="/command-workspace.css?v=20260908-3">
+  <link rel="stylesheet" href="/styles.css?v=20261125-3">
+  <link rel="stylesheet" href="/intel-packs.css?v=20261125-10">
+  <link rel="stylesheet" href="/command-workspace.css?v=20261125-1">
 </head>
 <body>
-  <div class="noise"></div>
   <header class="topbar">
     <div class="brand"><span class="brand-mark">R</span><span>RETICOM</span></div>
     <button id="intelPacksToggle" type="button" aria-label="Map layers" aria-expanded="false" aria-controls="intelPacksPanel" title="Map layers and intel packs">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg><span class="intel-packs-toggle-label">MAP LAYERS</span><span data-intel-count hidden></span>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg><span class="intel-packs-toggle-label">Map layers</span><span data-intel-count hidden></span>
     </button>
     <button id="networkToggle" class="connectivity-toggle" type="button" aria-label="Connection details" aria-expanded="false" aria-controls="connectivityPanel" title="Connection details">
       <span class="connectivity-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
@@ -25,6 +24,9 @@
       <svg class="alerts-sound-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4h3l4 3V7L8 10H5Zm10-1.5a5 5 0 0 1 0 7M17.5 6a9 9 0 0 1 0 12"/></svg>
       <svg class="alerts-muted-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4h3l4 3V7L8 10H5"/><path d="m16 9 5 5m0-5-5 5"/></svg>
       <span id="incomingAlertsLabel">ARM ALERTS</span>
+    </button>
+    <button id="commsOnlyToggle" class="comms-only-toggle hidden" type="button" aria-pressed="false" aria-label="Comms-only mode" title="Enter comms-only mode">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="16" height="10" rx="2"/><path d="M21 10v4M7 12h6"/></svg>
     </button>
     <button id="userSettingsToggle" class="user-settings-toggle hidden" aria-expanded="false" aria-label="Open user settings for FIELD-1" title="User settings">
       <svg class="user-settings-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -39,12 +41,19 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 6v5c0 5-3.2 8.3-8 10-4.8-1.7-8-5-8-10V6l8-3Z"/><path d="M9 12h6m-3-3v6"/></svg>
       <span>ADMIN</span>
     </button>
-    <a id="allTeamsLink" class="all-teams-link hidden" href="?team=all">ALL TEAMS</a>
-    <button id="commandTeamsToggle" class="secondary compact hidden" type="button" aria-expanded="false" aria-controls="commandTeamsPanel">TEAMS</button>
+    <a id="allTeamsLink" class="all-teams-link hidden" href="?team=all">All teams</a>
+    <button id="commandTeamsToggle" class="secondary compact hidden" type="button" aria-expanded="false" aria-controls="commandTeamsPanel">Teams</button>
     <div class="role" id="roleLabel">NODE</div>
   </header>
 
-  <aside id="intelPacksPanel" class="intel-packs-panel hidden" aria-label="Intel packs"></aside>
+  <div class="membership-requests">
+    <button id="reviewMembershipRequests" class="membership-review hidden" type="button" data-open-membership aria-controls="membershipPanel"></button>
+    <div id="workspaceMembershipRequests" class="workspace-membership-requests"></div>
+  </div>
+  <p id="membershipRequestStatus" class="visually-hidden" role="status"></p>
+  <p id="workspaceMembershipRequestStatus" class="visually-hidden" role="status"></p>
+
+  <aside id="intelPacksPanel" class="intel-packs-panel hidden" aria-label="Map layers"></aside>
   <aside id="commandTeamsPanel" class="settings-panel command-teams-panel hidden" aria-label="Command teams">
     <div class="settings-head"><div><span class="eyebrow">COMMAND WORKSPACE</span><h2>Teams</h2></div><button id="closeCommandTeams" class="text-button" type="button">CLOSE</button></div>
     <p>Open a saved team, join an existing one, or create your own. Active teams sync in the background.</p>
@@ -263,7 +272,7 @@
 
   <main id="allTeamsView" class="all-teams-view hidden" aria-label="All teams overview">
     <aside class="overview-roster">
-      <header><h2>Teams</h2><button id="showAllTeams" type="button" class="text-button">SHOW ALL</button></header>
+      <header><h2>Teams</h2><button id="showAllTeams" type="button" class="text-button">Show all</button></header>
       <p id="allTeamsHostSummary" class="overview-host-summary">Loading teams…</p>
       <div id="allTeamsRoster"></div>
       <p class="overview-roster-note">Recent fix: within 5 minutes.<br>Dimmed positions are last known.<br>Open a team to transmit or edit.</p>
@@ -276,7 +285,7 @@
       <div id="allTeamsMapCredit" class="overview-map-credit"><a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OSM</a></div>
     </section>
     <aside class="overview-feed">
-      <header><h2>Intel</h2><button id="refreshAllTeams" type="button" class="text-button">REFRESH</button></header>
+      <header><h2>Intel</h2><button id="refreshAllTeams" type="button" class="text-button">Refresh</button></header>
       <p id="allTeamsRefreshState" class="overview-refresh-state" role="status">Loading shared team intel…</p>
       <div id="allTeamsIntel" class="overview-intel"></div>
     </aside>
@@ -287,9 +296,9 @@
       <span class="eyebrow">COMMAND</span>
       <h1>Create a team</h1>
       <p>Name the team, then share its join code with your operators.</p>
-      <label>TEAM NAME<input id="teamNameInput" maxlength="40" placeholder="e.g. North Team" autofocus></label>
+      <label>Team name<input id="teamNameInput" maxlength="40" placeholder="e.g. North Team" autofocus></label>
       <label class="module-choice"><input id="createTasksModule" type="checkbox"><span><b>Tasks</b><small>Assignments and a shared to-do list</small></span></label>
-      <button id="createTeam">CREATE TEAM <span>→</span></button>
+      <button id="createTeam">Create team <span aria-hidden="true">→</span></button>
       <p class="safety-copy">A join code pairs directly with this Reticulum destination. Member approval and revocation come next.</p>
     </section>
   </main>
@@ -390,7 +399,7 @@
             <textarea id="commandMessage" maxlength="160" rows="2" placeholder="Message the team"></textarea>
             <button id="sendCommandMessage" class="compact">SEND <span>→</span></button>
           </div>
-          <button id="commandPttButton" class="ptt-button command-ptt"><span class="ptt-dot"></span><b>HOLD TO BROADCAST</b><small>CONNECTING LIVE · CLIP FALLBACK</small></button>
+            <button id="commandPttButton" class="ptt-button command-ptt" title="Hold or use F9 / F13–F24"><span class="ptt-dot"></span><b>HOLD TO BROADCAST</b><small>CONNECTING LIVE · CLIP FALLBACK</small></button>
         </div>
         <div id="commandDeliveryState" class="delivery-state command-delivery">SIGNED · NEXT RETICULUM SYNC</div>
       </section>
@@ -415,20 +424,20 @@
       <span class="eyebrow">FIELD</span>
       <h1>Join or create a team</h1>
       <p>Join an existing Reticulum team, or host a new one directly on this device.</p>
-      <label>CALLSIGN<input id="joinCallsign" maxlength="24" value="FIELD-1"></label>
-      <label>JOIN CODE<input id="joinCodeInput" maxlength="48" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="RTM1-…"></label>
+      <label>Callsign<input id="joinCallsign" maxlength="24" value="FIELD-1"></label>
+      <label>Join code<input id="joinCodeInput" maxlength="48" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="RTM1-…"></label>
       <div class="join-actions">
-        <button id="joinTeam">JOIN CODE <span>→</span></button>
-        <button id="scanQr" class="secondary">SCAN QR</button>
+        <button id="joinTeam">Join team <span aria-hidden="true">→</span></button>
+        <button id="scanQr" class="secondary">Scan QR code</button>
       </div>
       <div id="qrScanner" class="qr-scanner hidden">
         <video id="qrVideo" autoplay muted playsinline></video>
         <div><span id="qrScanStatus">Point the camera at the team QR code.</span><button id="stopQr" class="text-button">CANCEL</button></div>
       </div>
-      <div class="setup-divider"><span>OR CREATE</span></div>
-      <label>TEAM NAME<input id="fieldTeamNameInput" maxlength="40" placeholder="e.g. North Team"></label>
+      <div class="setup-divider"><span>Or create a team</span></div>
+      <label>Team name<input id="fieldTeamNameInput" maxlength="40" placeholder="e.g. North Team"></label>
       <label class="module-choice"><input id="fieldCreateTasksModule" type="checkbox"><span><b>Tasks</b><small>Start with shared assignments enabled</small></span></label>
-      <button id="fieldCreateTeam">CREATE + HOST TEAM <span>→</span></button>
+      <button id="fieldCreateTeam">Create and host team <span aria-hidden="true">→</span></button>
       <p class="safety-copy">This device becomes the team host and keeps its Reticulum destination available while Reticom is running.</p>
       <div class="nearby-head"><span class="data-label">NEARBY ON RETICULUM</span><button id="refreshNearby" class="text-button">SCAN</button></div>
       <div id="nearbyTeams" class="nearby-list empty-copy">Listening for team announces on this network.</div>
@@ -438,12 +447,19 @@
   </main>
 
   <main id="fieldView" class="field-shell hidden">
+    <section id="fieldRadioPage" class="field-page field-radio-page hidden" aria-labelledby="fieldRadioTitle">
+      <div class="field-radio-content">
+        <h1 id="fieldRadioTitle">Comms only</h1>
+        <p id="fieldRadioTeam"></p>
+        <button id="radioPttButton" class="ptt-button large" type="button" title="Hold to broadcast"><span class="ptt-dot" aria-hidden="true"></span><b>HOLD TO BROADCAST</b><small>CONNECTING LIVE · CLIP FALLBACK</small></button>
+      </div>
+    </section>
     <section id="fieldMapPage" class="field-page field-map-page">
       <div id="fieldMapCanvas" class="field-map-canvas"></div>
       <div id="fieldMapFallback" class="field-map-fallback"><b>LOADING MAP</b><span>The map loads independently from the Reticulum team link.</span></div>
       <div id="fieldMapCredit" class="field-map-credit"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OSM</a></div>
       <div class="field-map-status">
-        <div class="field-map-team"><span class="eyebrow">CURRENT TEAM</span><strong id="fieldTeamName">Joined team</strong></div>
+        <div class="field-map-team"><span class="eyebrow">CURRENT TEAM</span><strong id="fieldTeamName">Joined team</strong><small id="fieldLocationAccuracy" class="field-location-accuracy" hidden></small></div>
         <button id="fieldGridReference" class="map-grid-reference field-grid-reference" type="button" title="Copy MGRS reference at map centre">MGRS LOADING</button>
         <span id="fieldFeedSync" class="module-state">SYNCING</span>
         <code id="fieldTeamDestination">—</code>
@@ -509,12 +525,12 @@
           <button id="mapMovementToggle" class="map-tool movement-toggle" type="button" aria-pressed="false" aria-label="Resume automatic location updates"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18c3-8 6 1 9-7s5-3 7-6"/><circle cx="4" cy="18" r="1.5"/><path d="m17 5 3 0 0 3"/></svg><span>LOC</span></button>
           <button id="mapSharePosition" class="map-tool" aria-label="Share current position">⌖</button>
         </div>
-        <button id="mapPttButton" class="ptt-button"><span class="ptt-dot"></span><b>HOLD TO BROADCAST</b><small>CONNECTING LIVE · CLIP FALLBACK</small></button>
+        <button id="mapPttButton" class="ptt-button" title="Hold or use F9 / F13–F24"><span class="ptt-dot"></span><b>HOLD TO BROADCAST</b><small>CONNECTING LIVE · CLIP FALLBACK</small></button>
       </div>
     </section>
 
     <section id="fieldFeedPage" class="field-page field-feed-page hidden">
-      <header class="page-head"><div><span class="eyebrow">TEAM RECORD</span><h1>Intel feed</h1></div><span id="feedCount" class="module-state">0 EVENTS</span></header>
+      <header class="page-head"><h1>Intel feed</h1><span id="feedCount" class="module-state">0 events</span></header>
       <div class="feed-layout">
         <section><div id="fieldFeedList" class="field-feed-list empty-copy">Fetching verified events over Reticulum…</div></section>
         <section id="fieldTasksModule" class="feed-tasks hidden">
@@ -523,20 +539,20 @@
         </section>
       </div>
       <section class="feed-comms panel">
-        <button id="feedPttButton" class="ptt-button"><span class="ptt-dot"></span><b>HOLD TO BROADCAST</b><small>CONNECTING LIVE · CLIP FALLBACK</small></button>
+        <button id="feedPttButton" class="ptt-button" title="Hold or use F9 / F13–F24"><span class="ptt-dot"></span><b>HOLD TO BROADCAST</b><small>CONNECTING LIVE · CLIP FALLBACK</small></button>
         <div class="feed-message-row">
           <textarea id="message" rows="1" maxlength="160" placeholder="Message the team" aria-label="Message the team"></textarea>
           <button id="sendMessage">SEND <span>→</span></button>
         </div>
-        <div id="deliveryState" class="delivery-state idle">No packet sent in this session.</div>
+        <div id="deliveryState" class="delivery-state idle" role="status">No packet sent in this session.</div>
       </section>
     </section>
 
     <section id="fieldOpsPage" class="field-page field-ops-page hidden">
-      <header class="page-head"><div><span class="eyebrow">TEAM OPERATIONS</span><h1>Operators</h1></div><div class="identity-inline"><span>FIELD IDENTITY</span><code id="fieldIdentity">—</code></div></header>
+      <header class="page-head"><h1>Operators</h1><div class="identity-inline"><span>Field identity</span><code id="fieldIdentity">—</code></div></header>
       <div class="ops-layout">
         <section class="ops-operators panel">
-          <span class="eyebrow">VERIFIED OPERATORS</span><h2>Team</h2>
+          <h2>Team roster</h2>
           <div id="opsOperatorList" class="operator-list empty-copy">Waiting for verified operator events.</div>
           <section class="shared-routes-panel hidden" aria-labelledby="fieldSharedRoutesTitle">
             <h3 id="fieldSharedRoutesTitle">Shared routes</h3>
@@ -570,12 +586,12 @@
   </main>
 
   <nav id="fieldBottomNav" class="field-bottom-nav hidden" aria-label="Field navigation">
-    <button data-field-page="map" class="selected" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Zm6-3v15m6-12v15"/></svg><span>MAP</span></button>
-    <button data-field-page="feed" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M5 12h14M5 19h9"/></svg><span>FEED</span></button>
-    <button data-field-page="ops" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-7 4a8 8 0 0 1 14 0M4 8a10 10 0 0 0 0 8m16-8a10 10 0 0 1 0 8"/></svg><span>OPS</span></button>
+    <button type="button" data-field-page="map" aria-current="page" aria-controls="fieldMapPage"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Zm6-3v15m6-12v15"/></svg><span>Map</span></button>
+    <button type="button" data-field-page="feed" aria-controls="fieldFeedPage"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M5 12h14M5 19h9"/></svg><span>Feed</span></button>
+    <button type="button" data-field-page="ops" aria-controls="fieldOpsPage"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-7 4a8 8 0 0 1 14 0M4 8a10 10 0 0 0 0 8m16-8a10 10 0 0 1 0 8"/></svg><span>Operators</span></button>
   </nav>
 
-  <div id="toast" class="toast"></div>
-  <script type="module" src="/app.js?v=20260914-3"></script>
+  <div id="toast" class="toast" role="status"></div>
+  <script type="module" src="/app.js?v=20261125-31"></script>
 </body>
 </html>

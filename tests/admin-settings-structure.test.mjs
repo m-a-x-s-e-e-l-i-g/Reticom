@@ -8,7 +8,7 @@ const app = readFileSync(new URL("../src/retium/static/app.js", import.meta.url)
 test("Field onboarding can create and host a team", () => {
   assert.match(html, /id="fieldTeamNameInput"/);
   assert.match(html, /id="fieldCreateTasksModule"/);
-  assert.match(html, /id="fieldCreateTeam"[^>]*>CREATE \+ HOST TEAM/);
+  assert.match(html, /id="fieldCreateTeam"[^>]*>Create and host team/);
   assert.match(app, /fieldCreateTeam[\s\S]*?\/api\/team\/create/);
 });
 

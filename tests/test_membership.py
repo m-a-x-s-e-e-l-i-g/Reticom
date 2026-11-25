@@ -64,6 +64,46 @@ def receiver(tmp_path):
     return gateway
 
 
+def test_command_admin_needs_owner_approval_and_survives_replication(tmp_path):
+    gateway = receiver(tmp_path / "owner")
+    gateway.everyone_admin = False
+    command, operator = RNS.Identity(), RNS.Identity()
+    sender = command.hash.hex()
+    request = json.loads(gateway._membership_request(
+        "/membership", {"callsign": "COMMAND", "command": True}, b"r", b"l", command, 0
+    ))
+    assert not request["admin"]
+    assert gateway.membership.listing()["requests"][0]["command"] is True
+    gateway.membership.decide(operator.hash.hex(), "approved", "Operator")
+    gateway.membership.decide(sender, "approved", admin=True)
+    assert not gateway.member_is_admin(operator.hash.hex())
+    assert gateway.member_is_admin(sender)
+    delegation = gateway._membership_admin_request
+    assert "members" in json.loads(delegation("/membership/admin", {"action": "list"}, b"r", b"l", command, 0))
+    assert "error" in json.loads(delegation("/membership/admin", {
+        "action": "decide", "identity": operator.hash.hex(), "status": "approved", "admin": True,
+    }, b"r", b"l", command, 0))
+
+    saved_roles = gateway.membership.roles
+    restored = Membership(tmp_path / "owner", gateway.identity)
+    assert restored.is_admin(sender)
+    replica = Membership(tmp_path / "backup", RNS.Identity(), gateway.membership.root)
+    replica.accept(gateway.membership.envelope)
+    replica.accept_roles(saved_roles)
+    assert replica.is_admin(sender)
+    forged = {**saved_roles, "policy": {**saved_roles["policy"], "admins": [operator.hash.hex()]}}
+    with pytest.raises(ValueError, match="signed by the team owner"):
+        replica.accept_roles(forged)
+    gateway.membership.decide(sender, "revoked")
+    replica.accept(gateway.membership.envelope)
+    assert not replica.is_admin(sender)
+    gateway.membership.decide(sender, "approved")
+    replica.accept(gateway.membership.envelope)
+    assert not replica.is_admin(sender)
+    replica.accept_roles(gateway.membership.roles)
+    assert not replica.accept_roles(saved_roles)
+
+
 @pytest.mark.parametrize("path,method", [("tasks", "_tasks_request"), ("feed", "_feed_request"), ("event", "_event_request"),
     ("ptt", "_ptt_request"), ("audio", "_audio_request"), ("transcription", "_transcription_request"),
     ("private/messages", "_private_messages_request"), ("private/send", "_private_send_request"),

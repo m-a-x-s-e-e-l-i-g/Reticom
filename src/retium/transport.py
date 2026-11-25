@@ -399,7 +399,11 @@ class GatewayReceiver:
                 mime_type=mime_type,
             )
             if state.get("link") is None:
-                self.publish_ptt(event, audio)
+                origin_identity = state.get("origin_identity")
+                if origin_identity is None:
+                    self.publish_ptt(event, audio)
+                else:
+                    self.publish_local_field_ptt(event, audio, origin_identity)
                 return
             sender_hash = str(state["sender_hash"])
             self.save_ptt(stream_id, audio, mime_type)
@@ -429,16 +433,18 @@ class GatewayReceiver:
         except (KeyError, TypeError, ValueError, PTTError, ProtocolError) as exc:
             RNS.log(f"Reticom could not archive live voice: {exc}", RNS.LOG_WARNING)
 
-    def send_live_start(self, stream_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
-        metadata = validate_live_metadata(
-            {**metadata, "sender_hash": self.identity.hash.hex()}
-        )
+    def send_live_start(
+        self, stream_id: str, metadata: dict[str, Any], *, origin_identity: RNS.Identity | None = None
+    ) -> dict[str, Any]:
+        sender_hash = (origin_identity or self.identity).hash.hex()
+        metadata = validate_live_metadata({**metadata, "sender_hash": sender_hash})
         if not self._live_links_except():
             raise TimeoutError("No Field live voice link is connected")
         with self._live_lock:
             self._live_streams[stream_id] = {
                 "link": None,
-                "sender_hash": self.identity.hash.hex(),
+                "sender_hash": sender_hash,
+                "origin_identity": origin_identity,
                 "metadata": metadata,
                 "chunks": [],
                 "started_at": time.monotonic(),
@@ -544,25 +550,24 @@ class GatewayReceiver:
         if remote_identity is None:
             return b'{"error":"Identified link required"}'
         try:
-            if not isinstance(data, dict) or set(data) != {"callsign"}:
+            if not isinstance(data, dict) or "callsign" not in data or set(data) - {"callsign", "command"}:
                 raise ValueError("Invalid membership request")
-            result = self.membership.request(remote_identity.hash.hex(), data["callsign"])
+            identity = remote_identity.hash.hex()
+            result = self.membership.request(identity, data["callsign"], command=data.get("command", False))
+            result["admin"] = self.membership.is_admin(identity)
             return json.dumps(result, separators=(",", ":")).encode()
         except (ValueError, TypeError):
             return b'{"error":"Unable to request membership; check callsign or contact team owner"}'
 
-    def _membership_admin_request(self, path, data, request_id, link_id, remote_identity, requested_at):
-        """Let a verified all-admin member manage the owner-signed roster.
+    def member_is_admin(self, sender):
+        return self.everyone_admin or self.membership.is_admin(sender)
 
-        The team host remains the only signer of the membership policy.  This
-        identified request merely delegates a decision to it after checking
-        that the requester is already an approved team member and that the
-        owner enabled the explicit everyone-admin policy.
-        """
+    def _membership_admin_request(self, path, data, request_id, link_id, remote_identity, requested_at):
+        """Delegate roster decisions to approved admins while retaining owner signatures."""
         del path, request_id, link_id, requested_at
         if remote_identity is None:
             return b'{"error":"Identified link required"}'
-        if not self.member_allowed(remote_identity) or not self.everyone_admin:
+        if not self.member_allowed(remote_identity) or not self.member_is_admin(remote_identity.hash.hex()):
             return b'{"error":"Team admin rights are required"}'
         try:
             if not isinstance(data, dict) or data.get("action") not in {"list", "decide"}:
@@ -702,14 +707,14 @@ class GatewayReceiver:
                 if target is None:
                     raise ProtocolError("automatic report source not found")
                 if target["sender_hash"] != sender_hash:
-                    if not self.everyone_admin:
+                    if not self.member_is_admin(sender_hash):
                         raise ProtocolError("only the reporter or a team admin can remove this automatic report")
                     admin_moderation = True
             if (
                 event["type"] == "message.deleted"
                 and not self.store.message_owned_by(event["message_id"], sender_hash)
             ):
-                if not self.everyone_admin:
+                if not self.member_is_admin(sender_hash):
                     raise ProtocolError("only the original sender can remove this message")
                 if not self.store.event_exists(event["message_id"], "chat.message"):
                     raise ProtocolError("message not found")
@@ -720,7 +725,7 @@ class GatewayReceiver:
                     event["marker_id"], "marker.created", sender_hash
                 )
             ):
-                if not self.everyone_admin:
+                if not self.member_is_admin(sender_hash):
                     raise ProtocolError("only the reporter or a team admin can change this marker")
                 if self.store.map_event(event["marker_id"], "marker.created") is None:
                     raise ProtocolError("marker not found")
@@ -731,7 +736,7 @@ class GatewayReceiver:
                     event["drawing_id"], "drawing.created", sender_hash
                 )
             ):
-                if not self.everyone_admin:
+                if not self.member_is_admin(sender_hash):
                     raise ProtocolError("only the original sender can remove this drawing")
                 if self.store.map_event(event["drawing_id"], "drawing.created") is None:
                     raise ProtocolError("drawing not found")
@@ -885,7 +890,7 @@ class GatewayReceiver:
         try:
             assert remote_identity is not None
             identity_hash = remote_identity.hash.hex()
-            if not self.everyone_admin:
+            if not self.member_is_admin(identity_hash):
                 raise PermissionError("team admin mode is not enabled")
             if not self._known_private_identity(identity_hash):
                 raise PermissionError("operator identity is not part of this team")
@@ -1388,6 +1393,8 @@ class FieldSender:
             self._load_host_directory()
             self.last_delivery = None
             self.membership_status = "unknown"
+            self.membership_admin = False
+            self.command_requests_supported = True
         if not RNS.Transport.has_path(parsed):
             RNS.Transport.request_path(parsed)
         return parsed.hex()
@@ -1405,6 +1412,7 @@ class FieldSender:
             self.gateway_hash = None
             self.host_directory = None
             self.membership_status = "unknown"
+            self.membership_admin = False
             self.last_delivery = None
 
     def _emit_live(self, frame: dict[str, Any]) -> None:
@@ -1628,13 +1636,25 @@ class FieldSender:
         # A packet proof confirms transport reception, not membership acceptance.
         return self.send_link_event(event, timeout=timeout)
 
-    def request_membership(self, callsign, timeout=5.0):
+    def request_membership(self, callsign, timeout=5.0, *, command=False):
         with self._send_lock:
-            response, _ = self._identified_request("/membership", {"callsign": callsign}, timeout=timeout, max_response_size=4096)
-            result = self._json_response(response, "membership")
+            request = {"callsign": callsign}
+            if command and getattr(self, "command_requests_supported", True):
+                request["command"] = True
+            response, _ = self._identified_request("/membership", request, timeout=timeout, max_response_size=4096)
+            try:
+                result = self._json_response(response, "membership")
+            except PermissionError as exc:
+                if "command" not in request or str(exc) != "Unable to request membership; check callsign or contact team owner":
+                    raise
+                request.pop("command")
+                response, _ = self._identified_request("/membership", request, timeout=timeout, max_response_size=4096)
+                result = self._json_response(response, "membership")
             if result.get("identity") != self.identity.hash.hex() or result.get("status") not in {"pending", "approved", "rejected", "revoked", "removed"}:
                 raise ValueError("Invalid membership status")
             self.membership_status = result["status"]
+            self.membership_admin = result.get("admin") is True and self.membership_status == "approved"
+            self.command_requests_supported = "admin" in result
             return result
 
     def request_membership_admin(self, decision: dict[str, Any] | None = None, timeout=12.0) -> dict[str, Any]:

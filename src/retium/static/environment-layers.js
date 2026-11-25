@@ -1,16 +1,14 @@
 // Public global environment rasters. These are optional map context only:
 // they never enter the signed team feed or offline mission data.
-export const ENVIRONMENT_MIN_ZOOM = Object.freeze({bathymetry: 1, worldcover: 6, nightlights: 1});
-export const ENVIRONMENT_MAX_ZOOM = Object.freeze({bathymetry: 9, worldcover: 14, nightlights: 8});
+export const ENVIRONMENT_MIN_ZOOM = Object.freeze({bathymetry: 1, nightlights: 1});
+export const ENVIRONMENT_MAX_ZOOM = Object.freeze({bathymetry: 9, nightlights: 8});
 export const ENVIRONMENT_BOUNDS = Object.freeze({
   bathymetry: Object.freeze([-180, -85.051129, 180, 85.051129]),
-  worldcover: Object.freeze([-180, -60, 180, 83]),
   nightlights: Object.freeze([-180, -85.051129, 180, 85.051129]),
 });
-export const ENVIRONMENT_RASTER_IDS = Object.freeze(["bathymetry", "worldcover", "nightlights"]);
+export const ENVIRONMENT_RASTER_IDS = Object.freeze(["bathymetry", "nightlights"]);
 
 const GEBCO_WMS_ROOT = "https://wms.gebco.net/mapserv";
-const WORLDCOVER_WMTS_ROOT = "https://wmts.terrascope.be/";
 const NIGHTLIGHTS_WMTS_ROOT = "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best";
 
 export const ENVIRONMENT_RASTERS = Object.freeze({
@@ -22,14 +20,6 @@ export const ENVIRONMENT_RASTERS = Object.freeze({
     attribution_url: "https://www.gebco.net/",
     opacity: 0.58,
   }),
-  worldcover: Object.freeze({
-    title: "Land cover · ESA WorldCover",
-    source: "ESA WorldCover 2021",
-    source_url: "https://esa-worldcover.org/en/data-access",
-    attribution: "ESA WorldCover · Contains modified Copernicus Sentinel data",
-    attribution_url: "https://esa-worldcover.org/en/data-access",
-    opacity: 0.62,
-  }),
   nightlights: Object.freeze({
     title: "Night lights",
     source: "NASA VIIRS Black Marble · 2016",
@@ -40,10 +30,6 @@ export const ENVIRONMENT_RASTERS = Object.freeze({
   }),
 });
 
-function raster(id) {
-  return ENVIRONMENT_RASTERS[id] || ENVIRONMENT_RASTERS.bathymetry;
-}
-
 function wmsTileUrl(layer) {
   const query = new URLSearchParams({
     service: "WMS", request: "GetMap", version: "1.3.0", layers: layer,
@@ -53,20 +39,10 @@ function wmsTileUrl(layer) {
   return `${GEBCO_WMS_ROOT}?${query}`.replaceAll("%7B", "{").replaceAll("%7D", "}");
 }
 
-function worldCoverTileUrl() {
-  const query = new URLSearchParams({
-    SERVICE: "WMTS", REQUEST: "GetTile", VERSION: "1.0.0",
-    LAYER: "esa-worldcover-map-10m-2021-v2_map", STYLE: "default", FORMAT: "image/png",
-    TILEMATRIXSET: "EPSG:3857", TILEMATRIX: "{z}", TILEROW: "{y}", TILECOL: "{x}",
-    TIME: "2021-01-01", assets: "Map", colormap_name: "worldcover",
-  });
-  return `${WORLDCOVER_WMTS_ROOT}?${query}`.replaceAll("%7B", "{").replaceAll("%7D", "}");
-}
-
 export function environmentTileUrl(id) {
   if (id === "bathymetry") return wmsTileUrl("GEBCO_LATEST");
-  if (id === "worldcover") return worldCoverTileUrl();
-  return `${NIGHTLIGHTS_WMTS_ROOT}/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png`;
+  if (id === "nightlights") return `${NIGHTLIGHTS_WMTS_ROOT}/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png`;
+  throw new RangeError("Unknown environment raster");
 }
 
 export function environmentSource(source, id) {
@@ -81,6 +57,6 @@ export function environmentLayers(source, id) {
   return [{
     id: `${source}-raster`, type: "raster", source,
     minzoom: ENVIRONMENT_MIN_ZOOM[id], maxzoom: ENVIRONMENT_MAX_ZOOM[id],
-    paint: {"raster-opacity": raster(id).opacity, "raster-fade-duration": 0},
+    paint: {"raster-opacity": ENVIRONMENT_RASTERS[id].opacity, "raster-fade-duration": 0},
   }];
 }

@@ -34,6 +34,43 @@ def test_ahn_mode_is_validated_and_persisted(tmp_path):
     assert store.ahn_mode == "dsm"
 
 
+def test_malta_lidar_tiles_reproject_all_rows_and_only_fetch_inside_coverage(tmp_path, monkeypatch):
+    from io import BytesIO
+    from PIL import Image
+    from urllib.parse import parse_qs, urlsplit
+
+    image = Image.linear_gradient("L").convert("RGBA")
+    raw = BytesIO()
+    image.save(raw, format="PNG")
+    requests = []
+
+    def fetch(url, **options):
+        requests.append(url)
+        parts = urlsplit(url)
+        params = parse_qs(parts.query)
+        assert parts.netloc == "malta.coverage.wetransform.eu"
+        assert params["crs"] == ["CRS:84"] and options["max_bytes"] == 1_000_000
+        return raw.getvalue()
+
+    monkeypatch.setattr("retium.lidar_tiles.fetch_bytes", fetch)
+    store = IntelPackStore(tmp_path)
+    app = FastAPI()
+    app.include_router(intel_router(tmp_path, store=store))
+    base = "/api/intel-packs/lidar/malta"
+    with TestClient(app) as client:
+        assert client.get(f"{base}/dtm/12/2212/1610.png").status_code == 404
+        store.update({"enabled": ["ahn"]})
+        assert client.get(f"{base}/dtm/12/0/0.png").status_code == 404
+        assert not requests
+        for mode in ("dtm", "dsm"):
+            response = client.get(f"{base}/{mode}/12/2212/1610.png")
+            assert response.status_code == 200
+            with Image.open(BytesIO(response.content)) as tile:
+                assert tile.size == (256, 256) and tile.getbbox() == (0, 0, 256, 256)
+                assert tile.getpixel((120, 240))[0] > tile.getpixel((120, 16))[0]
+        assert [urlsplit(url).path for url in requests] == ["/wms/dtm_1m_2018/ows", "/wms/dsm_1m_2018/ows"]
+
+
 def collection(*coordinates):
     return {"type": "FeatureCollection", "features": [
         {"type": "Feature", "id": index, "geometry": {"type": "Point", "coordinates": list(point)}, "properties": {"title": "Public source fixture", "event_type": "WF"}}
@@ -58,9 +95,8 @@ def test_disabled_and_unconfigured_packs_never_fetch(setup_store):
     store, _, calls = setup_store
     store.update({"enabled": []})
     assert store.load("trails", BBOX, 14)["status"] == "disabled"
-    store.update({"enabled": ["firms", "acled"]})
+    store.update({"enabled": ["firms"]})
     assert store.load("firms", BBOX, 14)["status"] == "needs_key"
-    assert store.load("acled", BBOX, 14)["status"] == "needs_key"
     assert calls == []
 
 
@@ -72,6 +108,107 @@ def test_credentials_are_local_and_never_returned(setup_store, tmp_path):
     assert IntelPackStore(tmp_path).catalogue() == result
     store.update({"credentials": {"firms_key": ""}})
     assert store.catalogue()["credentials"]["firms_key"] is False
+
+
+def test_notams_use_one_local_cache_across_category_changes_and_drop_expired_notices(tmp_path):
+    now, calls = [1_780_000_000], []
+
+    def loader(pack, bounds, credentials):
+        calls.append((pack, bounds, credentials))
+        data = collection()
+        data["features"][0]["properties"]["valid_until"] = now[0] + 30
+        return data
+
+    store = IntelPackStore(tmp_path, loader=loader, clock=lambda: now[0])
+    assert store.load("notams", BBOX, 10)["status"] == "disabled"
+    store.update({"enabled": ["notams"]})
+    assert store.load("notams", BBOX, 10)["status"] == "needs_key"
+    settings = store.update({"credentials": {"bravoecho_key": "secret-fixture-token"}})
+    assert "secret-fixture-token" not in json.dumps(settings)
+    assert "runway" in settings["settings"]["notam_categories"]
+    assert settings["settings"]["notam_view"] == "local"
+    assert store.load("notams", BBOX, 5)["status"] == "zoom_in"
+    assert store.load("notams", BBOX, 10)["status"] == "fresh"
+    with pytest.raises(ValueError, match="NOTAM categories"):
+        store.update({"notam_categories": [None]})
+    store.update({"notam_categories": ["airspace", "airspace"], "notam_view": "all"})
+    assert IntelPackStore(tmp_path).catalogue()["settings"]["notam_categories"] == ["airspace"]
+    assert IntelPackStore(tmp_path).catalogue()["settings"]["notam_view"] == "all"
+    assert store.load("notams", BBOX, 10)["status"] == "cached"
+    now[0] += 30
+    assert store.load("notams", BBOX, 10)["features"] == []
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("pack,key,days", [("notams", "fixture-host-token", None), ("firms", "fixture_nasa_firms_key", 7)])
+def test_shared_layers_use_host_cache_even_when_host_map_layer_is_off(tmp_path, pack, key, days):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    entered, release = Event(), Event()
+    calls = []
+
+    def loader(pack_id, bounds, credentials, **kwargs):
+        calls.append((pack_id, kwargs))
+        entered.set()
+        assert release.wait(5)
+        return collection()
+
+    store = IntelPackStore(tmp_path, loader=loader)
+    assert store.shared_view(pack, BBOX, 10, days)["status"] == "needs_key"
+    store.provide_shared_key(pack, key)
+    with pytest.raises(ValueError, match="already configured"):
+        store.provide_shared_key(pack, "replacement")
+    assert store.load(pack, BBOX, 10)["status"] == "disabled"
+    assert store.shared_view(pack, BBOX, 10, days)["status"] == "waiting"
+    try:
+        assert entered.wait(5)
+        assert store.shared_view(pack, BBOX, 10, days)["status"] == "waiting"
+    finally:
+        release.set()
+    # Wait for the bounded provider fetch to write its cache before reading it.
+    with ThreadPoolExecutor() as executor:
+        result = executor.submit(store._load_regional, pack, BBOX, 10, shared=True, firms_days=days).result(timeout=5)
+    assert result["status"] == "cached"
+    assert store.shared_view(pack, BBOX, 10, days)["features"] == result["features"]
+    assert key not in json.dumps(result)
+    assert calls == [(pack, {"firms_days": days} if days else {})]
+
+
+@pytest.mark.parametrize("pack,field", [("notams", "bravoecho_key"), ("firms", "firms_key")])
+def test_field_layers_use_team_host_without_saving_a_local_key(tmp_path, monkeypatch, pack, field):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from retium import intel_packs
+
+    host = (object(), "team-destination", False)
+    calls = []
+
+    def request(remote, pack_id, data):
+        calls.append((remote, pack_id, data))
+        return {"configured": True} if "key" in data else {pack_id: {**collection(), "status": "cached"}}
+
+    monkeypatch.setattr(intel_packs, "request_host_intel", request)
+    app = FastAPI()
+    router = intel_packs.intel_router(tmp_path, intel_host=lambda request: host, local_request=lambda request: request.client.host == "testclient")
+    app.include_router(router)
+    with TestClient(app) as client:
+        root = "/api/intel-packs"
+        saved = client.patch(root + "/settings", json={"enabled": [pack], "firms_days": 7}).json()
+        assert next(item for item in saved["packs"] if item["id"] == pack)["host_access"] is True
+        assert saved["credentials"][field] is False
+        payload = {"credentials": {f"host_{field}": "fixture-host-token"}}
+        assert client.patch(root + "/settings", json=payload).status_code == 403
+        assert not calls
+        view = client.get(root + "/" + pack, params=dict(zip(("west", "south", "east", "north", "zoom"), [*BBOX, 10])))
+        assert view.json()["status"] == "cached"
+        assert calls[0] == (host, pack, {"bounds": list(BBOX), "zoom": 10, **({"firms_days": 7} if pack == "firms" else {})})
+        host = (*host[:2], True)
+        response = client.patch(root + "/settings", json=payload)
+        assert response.status_code == 200
+        assert calls[-1] == (host, pack, {"key": "fixture-host-token"})
+        assert "fixture-host-token" not in response.text
+        assert router.store.catalogue()["credentials"][field] is False
 
 
 def test_gdacs_filter_defaults_are_backward_compatible_and_persist(tmp_path):
@@ -201,7 +338,7 @@ def test_gdacs_filters_api_works_without_a_team(setup_store, tmp_path):
         assert calls == []
 
 
-@pytest.mark.parametrize("body", [[], {"enabled": ["unknown"]}, {"enabled": "trails"}, {"credentials": {"url": "https://example.com"}}, {"credentials": {"acled_token": "bad\nheader"}}, {"credentials": {"firms_key": None}}])
+@pytest.mark.parametrize("body", [[], {"enabled": ["unknown"]}, {"enabled": "trails"}, {"credentials": {"url": "https://example.com"}}, {"credentials": {"firms_key": "bad\nheader"}}, {"credentials": {"firms_key": None}}])
 def test_rejects_invalid_settings_atomically(setup_store, body):
     store, _, _ = setup_store
     previous = store.catalogue()
@@ -355,6 +492,37 @@ def test_saved_military_view_survives_expiry_restart_and_provider_outage(setup_s
     assert restored["features"] == saved["features"]
 
 
+def test_worldwide_military_snapshot_loads_before_regional_cooldown(setup_store):
+    import sqlite3
+    from contextlib import closing
+
+    store, now, calls = setup_store
+    store.update({"enabled": ["military"]})
+    store.next_fetch["military"] = now[0] + 60
+    west, south, east, north = BBOX
+    feature = {"type": "Feature", "id": "world-fixture", "geometry": {"type": "Point", "coordinates": [west, south]}}
+    with closing(sqlite3.connect(store.military_snapshot)) as db, db:
+        db.executescript("CREATE TABLE snapshot(release, built_at); CREATE TABLE features(id, west, south, east, north, size, feature);")
+        db.execute("INSERT INTO snapshot VALUES (?, ?)", ("2026-11-18.0", now[0]))
+        db.execute("INSERT INTO features VALUES (?, ?, ?, ?, ?, ?, ?)", (feature["id"], west, south, east, north, 1, json.dumps(feature)))
+    world = store.load("military", (-180, -85, 180, 85), 2)
+    assert world["status"] == "cached" and world["worldwide_snapshot"]
+    assert world["features"] == [feature]
+    assert store.load("military", (100, -30, 110, -20), 10)["features"] == []
+    assert store.download("military", BBOX, 14)["saved_offline"]
+    assert calls == []
+    station = {**feature, "id": "station", "properties": {"kind": "police_station"}}
+    store.loader = lambda *args, **kwargs: {"type": "FeatureCollection", "features": [station]}
+    store.next_fetch.clear()
+    assert store.load("military", BBOX, 14)["features"] == [feature, station]
+    assert store.download("military", BBOX, 14)["saved_offline"]
+    with closing(sqlite3.connect(store.military_snapshot)) as db, db:
+        db.execute("PRAGMA user_version = 1")
+        db.execute("INSERT INTO features VALUES (?, ?, ?, ?, ?, ?, ?)", (station["id"], west, south, east, north, 0, json.dumps(station)))
+    store.loader = lambda *args, **kwargs: pytest.fail("Updated snapshot must work without a provider request")
+    assert store.load("military", BBOX, 14)["features"] == [feature, station]
+
+
 def test_military_download_endpoint_saves_the_visible_view(setup_store, tmp_path):
     store, _, calls = setup_store
     store.update({"enabled": ["military"]})
@@ -390,11 +558,30 @@ def test_osm_shared_cooldown_survives_restart(setup_store, tmp_path):
     store, now, calls = setup_store
     store.update({"enabled": ["trails", "military"]})
     assert store.load("trails", BBOX, 14)["status"] == "fresh"
-    assert store.load("military", BBOX, 14)["status"] == "error"
+    assert store.load("military", BBOX, 14)["status"] == "deferred"
     restarted = IntelPackStore(tmp_path, loader=store.loader, clock=lambda: now[0])
-    assert restarted.load("military", BBOX, 14)["status"] == "error"
+    waiting = restarted.load("military", BBOX, 14)
+    assert waiting["status"] == "deferred" and waiting["error"] is None and not waiting["coverage_complete"]
     now[0] += 31
     assert restarted.load("military", BBOX, 14)["status"] == "fresh"
+    assert len(calls) == 2
+
+
+def test_military_zoom_reuses_download_and_wider_pending_view_keeps_features(setup_store):
+    store, now, calls = setup_store
+    store.update({"enabled": ["military"]})
+    west, south, east, north = BBOX
+    dx, dy = (east - west) / 2, (north - south) / 2
+    one_step_out = (west - dx * .9, south - dy * .9, east + dx * .9, north + dy * .9)
+    wider = (west - dx * 1.5, south - dy * 1.5, east + dx * 1.5, north + dy * 1.5)
+    original = store.load("military", BBOX, 14)
+    assert original["status"] == "fresh" and original["features"]
+    assert store.load("military", one_step_out, 13)["status"] == "cached"
+    waiting = store.load("military", wider, 12)
+    assert waiting["status"] == "deferred" and waiting["error"] is None
+    assert waiting["features"] == original["features"] and len(calls) == 1
+    now[0] += 31
+    assert store.load("military", wider, 12)["status"] == "fresh"
     assert len(calls) == 2
 
 
@@ -418,13 +605,27 @@ def test_endpoints_work_without_any_team_or_rns(setup_store, tmp_path):
     app = FastAPI()
     app.include_router(intel_router(tmp_path, store=store))
     with TestClient(app) as client:
-        assert len(client.get("/api/intel-packs").json()["packs"]) == 13
+        ids = {pack["id"] for pack in client.get("/api/intel-packs").json()["packs"]}
+        assert {"nightlights", "bathymetry", "firms"} <= ids
+        assert not ids.intersection({"acled", "worldcover", "sentinel1-insar"})
         assert client.patch("/api/intel-packs/settings", json={"enabled": ["gdacs"]}).status_code == 200
         response = client.get("/api/intel-packs/gdacs?west=4.7&south=51.5&east=4.8&north=51.6&zoom=14")
         assert response.status_code == 200
         assert response.json()["status"] == "fresh"
         assert client.get("/api/intel-packs/elevation/tiles/0/0/0.png").status_code == 404
         assert client.patch("/api/intel-packs/settings", json={"enabled": []}, headers={"origin": "https://evil.example"}).status_code == 403
+
+
+def test_restarting_ignores_retired_layers_and_credentials(tmp_path):
+    retired = ["acled", "worldcover", "sentinel1-insar"]
+    path = IntelPackStore(tmp_path).settings_path
+    path.write_text(json.dumps({"enabled": [*retired, "nightlights"], "credentials": {"acled_token": "old-token"}}), encoding="utf-8")
+    restored = IntelPackStore(tmp_path)
+    assert restored.enabled == {"nightlights"}
+    assert "acled_token" not in restored.catalogue()["credentials"]
+    for layer in retired:
+        with pytest.raises(ValueError, match="public feature pack"):
+            restored.load(layer, BBOX, 14)
 
 
 def test_firms_window_persists_and_caches_are_separate(tmp_path):
@@ -460,8 +661,8 @@ def test_cached_firms_detections_age_out_of_selected_window(tmp_path):
 
 def test_credential_previews_only_expose_four_suffix_characters(tmp_path):
     store = IntelPackStore(tmp_path)
-    state = store.update({"credentials": {"firms_key": "private-prefix-abcd", "acled_token": "short", "aisstream_key": "private-vessel-wxyz"}})
-    assert state["credential_previews"] == {"firms_key": "••••••••abcd", "acled_token": "••••••••", "aisstream_key": "••••••••wxyz"}
+    state = store.update({"credentials": {"firms_key": "private-prefix-abcd", "aishub_key": "short", "aisstream_key": "private-vessel-wxyz"}})
+    assert state["credential_previews"] == {"firms_key": "••••••••abcd", "aishub_key": "••••••••", "aisstream_key": "••••••••wxyz"}
     assert "private-prefix" not in json.dumps(state)
     assert "private-vessel" not in json.dumps(state)
     assert "short" not in json.dumps(state)

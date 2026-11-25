@@ -13,10 +13,11 @@ def test_provider_gzip_is_decoded_and_decompressed_size_is_bounded(monkeypatch):
     payload = {"icao":"abcdef","timestamp":100000,"trace":[]}
     body = gzip.compress(json.dumps(payload).encode())
     class Opener:
-        def open(self,*args,**kwargs):
+        def open(self,request,**kwargs):
+            assert request.full_url == "https://api.adsb.lol/1/trace/full/abcdef"
             return io.BytesIO(body)
     monkeypatch.setattr("retium.traffic_history.build_opener",lambda *args:Opener())
-    assert fetch_trace("abcdef") == payload
+    assert fetch_trace("ABCDEF") == payload
     body = gzip.compress(b" " * 4_000_001)
     with pytest.raises(ValueError,match="Decompressed"):
         fetch_trace("abcdef")

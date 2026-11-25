@@ -11,7 +11,7 @@ RUN useradd --create-home --uid 10001 reticom \
     && chown reticom:reticom /var/lib/reticom
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt faster-whisper==1.2.1
+RUN pip install --no-cache-dir -r requirements.txt faster-whisper==1.2.1 av==18.1.1
 COPY src/ ./src/
 COPY docker/entrypoint.py ./docker/entrypoint.py
 COPY LICENSE ./LICENSE

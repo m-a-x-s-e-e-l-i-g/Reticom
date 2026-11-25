@@ -29,11 +29,11 @@ def covers(bounds, rectangles):
     return True
 
 
-def buffered_bounds(bounds, max_area, max_span=2):
-    """Add a 15% pan margin per side, retaining provider/world area limits."""
+def buffered_bounds(bounds, max_area, max_span=2, *, margin=.15):
+    """Add a pan and zoom margin without exceeding provider/world area limits."""
     w, s, e, n = bounds
-    for margin in (.15, .075, .025, 0):
-        dx, dy = (e-w)*margin, (n-s)*margin
+    for padding in (margin, margin/2, margin/6, 0):
+        dx, dy = (e-w)*padding, (n-s)*padding
         candidate = (max(-180, w-dx), max(-90, s-dy), min(180, e+dx), min(90, n+dy))
         cw, cs, ce, cn = candidate
         area = (ce-cw)*(cn-cs)*111.32**2*max(.01, math.cos(math.radians((cs+cn)/2)))

@@ -18,6 +18,8 @@ def data(identifier="way/1", geometry=None, **extra):
 
 
 def save_area(store, pack, bounds, value, at=NOW):
+    if pack == "military":
+        value = {"police_coverage": True, **value}
     store._write(store.cache_dir / f"{pack}-{len(list(store.cache_dir.glob('*.json')))}.json",
                  {"bounds": list(bounds), "fetched_at": at, "credential_hash": store._credential_hash(pack), "data": value})
 
@@ -38,7 +40,7 @@ def test_pan_margin_reuses_nearby_view_and_survives_restart(tmp_path):
     assert len(calls) == 1
 
 
-def test_overlapping_legacy_areas_cover_view_without_fetch_and_deduplicate(tmp_path):
+def test_overlapping_saved_areas_cover_view_without_fetch_and_deduplicate(tmp_path):
     def unexpected(*args):
         pytest.fail("Already downloaded area must not fetch")
     store = IntelPackStore(tmp_path, loader=unexpected, clock=lambda: NOW)

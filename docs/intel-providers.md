@@ -4,9 +4,9 @@ These optional map layers are **external context, not verified team reports**. T
 
 ## Available sources
 
-New installations enable **Disaster alerts** and **Military areas & airstrips**. Droughts are excluded by default; the other six GDACS types are included. Explicitly saved intel choices (including everything off or droughts on) are preserved on upgrades. Trails are now always-on basemap features, not a selectable intel pack; legacy trail-overlay preferences are ignored by the current UI.
+New installations enable **Disaster alerts** and **Military areas, airstrips & police**. Droughts are excluded by default; the other six GDACS types are included. Explicitly saved intel choices (including everything off or droughts on) are preserved on upgrades. Trails are now always-on basemap features, not a selectable intel pack; legacy trail-overlay preferences are ignored by the current UI.
 
-The **Map layers** panel separates **Map & terrain** (base map, metre-labelled contour lines, national LiDAR raster and ground-height lookup) from **Intel packs** (public incident and area overlays). Hiking is the default, including for the old plain-dark preference. Satellite remains selectable and also shows trails. Paths and tracks use the road color with dashed strokes and no solid underlay. Their visibility depends on available map tiles and zoom, not an intel toggle. Path names, peaks and parks use the existing cached OpenFreeMap/OpenMapTiles vector tiles; offline map downloads support this style. There are no additional Overpass trail requests in the current UI. The old trail endpoint/cache remains for compatibility with earlier clients; it is not a second current map layer. Named hiking-route relations not present in the basemap are not separately fetched. Contours use cached elevation tiles; see [elevation](elevation.md). National LiDAR is an online WMS layer for the Netherlands, England and the United States; see [International LiDAR elevation](ahn-lidar.md).
+The **Map layers** panel separates **Map & terrain** (base map, metre-labelled contour lines, national LiDAR raster and ground-height lookup) from **Intel packs** (public incident and area overlays). Hiking is the default, including for the old plain-dark preference. Satellite remains selectable and also shows trails. Paths and tracks use the road color with dashed strokes and no solid underlay. Their visibility depends on available map tiles and zoom, not an intel toggle. Path names, peaks and parks use the existing cached OpenFreeMap/OpenMapTiles vector tiles; offline map downloads support this style. There are no additional Overpass trail requests in the current UI. The old trail endpoint/cache remains for compatibility with earlier clients; it is not a second current map layer. Named hiking-route relations not present in the basemap are not separately fetched. Contours use cached elevation tiles; see [elevation](elevation.md). National LiDAR is an online layer for the Netherlands, England, France, Malta and the United States; see [International LiDAR elevation](ahn-lidar.md).
 
 Waypoint/operator navigation offers **Direct line**, **Walking route** and **Driving route**. Walking uses the actual worldwide foot graph at [FOSSGIS routing](https://routing.openstreetmap.de/about.html), not a driving route with a renamed label. Route requests are separated by at least 1.1 seconds, and movement-based recalculation retains a 15-second minimum interval. New calculated routes need Internet and send the origin/destination to the provider. Routing data can differ from map data; access, conditions and difficult trails require independent checks. Public routing is for light use and has no availability guarantee. Existing route sharing transmits the selected geometry; followers do not recalculate it as a road route.
 
@@ -15,19 +15,41 @@ Mapy's official outdoor map/routing API is an alternative for a future configure
 | Pack | Data shown | Access | Refresh cache |
 | --- | --- | --- | --- |
 | Hiking trails (legacy endpoint only) | OSM paths and walking/hiking route relations for older clients | No key; zoom 12+ | 24 hours |
-| Military areas & airstrips | OSM military land, bases, training grounds, military airfields and general airstrips/airfields/runways | No key; zoom 10+ | 24 hours |
+| Military areas, airstrips & police | Local Overture Maps snapshot, regional OSM Overpass results, or OpenFreeMap military land use | No key. Overpass downloads start at zoom 9. | Worldwide snapshot on disk, 24-hour regional cache, or downloaded basemap tiles |
 | Disaster alerts | Published GDACS app-feed alerts worldwide | No key | 15 minutes |
+| International NOTAMs | Geolocated aviation notices distributed worldwide by FAA NMS, via BravoEcho | BravoEcho API key on the team host or this device, zoom 6+, off by default | 5 minutes |
 | Road closures & disruptions | NDW Netherlands incidents and NCDOT North Carolina work zones; supplied road segments and points | No key; off by default; partial geographic coverage | 2 minutes NL / 5 minutes NC |
-| Satellite heat detections | NASA FIRMS VIIRS NOAA-20 NRT observations, latest 3 days | Free FIRMS MAP_KEY; zoom 4+ | 30 minutes |
-| Conflict & protest reports | ACLED events, latest 30 days | Your ACLED OAuth access token and appropriate account access; zoom 4+ | 6 hours |
+| Satellite heat detections | NASA FIRMS VIIRS NOAA-20 NRT observations, latest 3 days by default | Free FIRMS MAP_KEY on the host or device, zoom 4+ | 24 hours |
 | Live aircraft | Reported aircraft positions, direction, altitude and type filters | No key; regional views, zoom 7+ | About 10 seconds; memory only |
-| Live boats & ships | AIS positions, vessel types and classification filters | Your AISStream key and permitted use; regional views, zoom 7+ | Stream + 5-second UI refresh; memory only |
-| National LiDAR elevation | Netherlands 0.5 m AHN, England 1 m Environment Agency, or USGS 3DEP bare-earth raster selected by map area | No key; supported national coverage only, close zoom | Upstream WMS; online-only |
+| Live boats & ships | AISStream with Open Waters AIS and optional AISHub fallbacks | Regional views, zoom 6+. Open Waters supports anonymous personal use. AISStream and AISHub use their own keys. | Stream or periodic regional snapshots |
+| Public transport | Agency vehicle positions plus estimated positions from Transitous realtime trip updates | No key. Zoom 10+, off by default. Coverage depends on feed availability. | 30–60 seconds in memory |
+| National LiDAR elevation | PDOK AHN, England Environment Agency, France IGN, Malta Planning Authority and USGS 3DEP | No key; supported national coverage only, close zoom | Upstream WMS; online-only |
 | Global bathymetry | GEBCO global seafloor and terrain relief | No key; global coverage, zoom 1+ | Upstream WMS; online-only |
-| Land cover | ESA WorldCover 2021 global 10 m classes | No key; global coverage, zoom 6+ | Terrascope WMTS; online-only |
 | Night lights | NASA VIIRS Black Marble 2016 annual composite | No key; global coverage, zoom 1+ | NASA GIBS WMTS; historical, online-only |
 
 Both traffic packs are off by default. See [live traffic](live-traffic.md) for setup, military/commercial classification caveats, position expiry, privacy and provider limits.
+
+### Public transport
+
+Enable **Map layers → Intel packs → Public transport**. Filled markers show reported positions from [OpenOV](https://gtfs.ovapi.nl/), [HSL](https://realtime.hsl.fi/), [MBTA](https://github.com/mbta/gtfs-documentation) or [Entur](https://developer.entur.org/pages-real-time-api/). Outlined markers show positions estimated from realtime timing along a route. [Transitous](https://transitous.org/api/) supplies estimates for non-commercial use. When both sources identify the same trip, its reported position takes priority. Available sources continue to appear if another source is offline.
+
+Reticom has no verified live public transport feed for Malta.
+
+### International NOTAMs
+
+Open **Map layers → Intel packs → International NOTAMs**. Save a [BravoEcho API key](https://bravoecho.ai/docs/getting-a-key) on Command or the team host. One Command key serves all teams it hosts. Approved members can enable the layer and choose categories without entering a key. An approved admin can set up the first key remotely under **Set up BravoEcho on the team host**. Replace or remove it from the host. The host contacts BravoEcho and sends bounded map results over an authenticated Reticulum link. Shared access needs a connection to the original host, which needs internet access. A key saved on a member's own device takes priority there.
+
+**Local activity** shows small-area parachuting, drone, fireworks, model-aircraft and air-display notices. Pins show the activity at a glance, and boundaries appear as thin outlines at closer zoom. **All notices** adds the other categories and draws regional areas without fill. Category choices and the view are saved locally.
+
+Both views show notices active now or starting within one hour. Upcoming pins appear lighter. Tap a notice for its text, UTC timing, schedule and map placement. The map skips notices whose schedules it cannot interpret, including sunrise- or sunset-based windows. Q-line-only locations appear as approximate points. Zoom in when the layer reports a result limit. Check your official briefing for flight planning.
+
+### Shared NASA FIRMS access
+
+Save the [NASA FIRMS MAP_KEY](https://firms.modaps.eosdis.nasa.gov/api/map_key/) on Command or the team host under **Map layers → Intel packs → Satellite heat detections**. An approved admin can enter the first key remotely under **Set up NASA FIRMS on the team host**. Approved members across all teams hosted by that Command installation can enable the layer and choose their own detection window. The host caches downloads by viewport and window. Team devices receive map features over Reticulum, and the key stays on the host.
+
+### TomoSAR
+
+**TomoSAR** is deliberately not presented as a fake raster toggle. Sentinel-1 TomoSAR needs a multi-baseline SLC stack and an on-demand processing workflow; it is not equivalent to displaying one public WMS image. The Map layers panel includes a direct link to the DINAMIS TomoSAR service so an operator can start that analysis separately. A native TomoSAR overlay can be added once a concrete processing/output endpoint is selected, including its authentication, AOI limits, output format and retention rules.
 
 The road layer is also off by default. See [road disruptions](road-disruptions.md) for coverage, stale/ended report handling, and the Waze/international source investigation.
 
@@ -43,7 +65,16 @@ Area downloads have a **15% pan margin on each side**, reduced near provider are
 
 Hiking queries use [`route=hiking`](https://wiki.openstreetmap.org/wiki/Tag:route%3Dhiking), walking routes, and [`highway=path`](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dpath)/footway/track/steps. Access tags and trail difficulty are retained when present. Mapped trails can be private, impassable, or outdated; showing a line does not authorize entry or guarantee a traversable route.
 
-Military queries use [`landuse=military`](https://wiki.openstreetmap.org/wiki/Tag:landuse%3Dmilitary), military tags and airstrips/runways/aerodromes. Airstrips are not assumed to be military. Multipolygon outlines preserve inner holes; missing geometry is shown as an outline, never fabricated into a filled area. This is existing public community mapping, not an authoritative inventory or live military activity.
+Regional queries use [`landuse=military`](https://wiki.openstreetmap.org/wiki/Tag:landuse%3Dmilitary), military tags, airstrips/runways/aerodromes, [`amenity=police`](https://wiki.openstreetmap.org/wiki/Tag:amenity%3Dpolice), `landuse=police` and [police facility tags](https://wiki.openstreetmap.org/wiki/Key:police). Police features use blue points or outlines, based on the mapped geometry. Multipolygon outlines preserve inner holes. The layer shows public community mapping and has no live activity feed.
+
+For worldwide offline coverage, build a local snapshot from the [Overture Maps base theme](https://docs.overturemaps.org/guides/base/). Install DuckDB in the builder's Python environment and run this from the checkout on Windows.
+
+```powershell
+$env:PYTHONPATH = Join-Path $PWD src
+python tools/build-military-snapshot.py 2026-11-18.0 (Join-Path $env:LOCALAPPDATA 'Reticom/data/intel-packs/military-world.sqlite3')
+```
+
+The builder scans large global Parquet files once and atomically replaces the SQLite snapshot. The app opens it read-only and queries only the visible area. Wide views prioritize larger features and cap response size. Updated snapshots include police station points from [Overture Places](https://docs.overturemaps.org/guides/places/taxonomy-explorer/). Older snapshots use regional OpenStreetMap data for police features at zoom 9 and above. Installations without a snapshot continue using the regional cache. If no regional geometry is available, the overlay can highlight military land use from the existing OpenFreeMap vector basemap, including downloaded tiles. Offline basemaps are downloaded separately.
 
 OSM-derived data remains under the [Open Database License](https://www.openstreetmap.org/copyright), separate from Reticom's software license. Map attribution identifies OpenStreetMap contributors.
 
@@ -64,14 +95,6 @@ Where the source provides them, the map shows actual Polygon/MultiPolygon outlin
 For views no wider or taller than 10 degrees, the adapter also requests details for at most four visible events without an aggregate outline, using official HTTPS `contentdata/resources/{type}/{event}/geojson_{event}_{episode}.geojson` resources. Paths are constructed only from validated event types and numeric IDs; upstream links are never fetched directly. It prioritizes higher alerts, then wildfire/flood/cyclone reports and proximity to the view's center. Large overview maps avoid per-event requests; zoom closer for additional individual-event outlines. Missing or failed geometry does **not** mean an event has no affected area or that a location is safe. Partial and limited results remain labeled instead of suppressing usable alert points.
 
 GDACS requests share a 20-second deadline, a 16 MB total download budget and a 6 MB limit per document. Raw GDACS feeds/details are reused for 15 minutes in-process. Persistent view caches use the same 15-minute freshness interval, with explicitly stale data available for up to one day. Cache identity includes the disaster selection and geometry schema version. Detail views require an exact viewport cache match, so a broader, point-only overview cannot prevent loading a local event perimeter. A filter change during a request cannot reintroduce the previous selection.
-
-### ACLED
-
-ACLED is **not an unrestricted public data feed**. Its [current API](https://acleddata.com/api-documentation/getting-started) requires account authentication; access tokens normally expire after 24 hours. Generate a token using your own account and replace it in the app when it expires. Reticom does not require or store the account password for this integration.
-
-The adapter applies latitude/longitude and 30-day date filters, as described in [ACLED's query documentation](https://acleddata.com/api-documentation/elements-acleds-api). Records retain their event date and geographic precision rather than suggesting every point is exact. Coverage depends on the user's account permissions and reporting availability; these are published event reports, not live tracking.
-
-Use must comply with the [ACLED EULA](https://acleddata.com/eula), [content terms](https://acleddata.com/contentusage), and [attribution policy](https://acleddata.com/attributionpolicy). Corporate and public-sector users may need additional licenses. Raw-data/dashboard redistribution and credential sharing are restricted. Keep this pack private to your authorized local instance; do not expose its API publicly or redistribute it as team Intel. Reticom's license does not grant rights to ACLED data.
 
 ## Developer notes
 

@@ -15,6 +15,7 @@ function harness(preference = null, play = async () => {}) {
     Audio: class { constructor(source) { this.source = source; audio.push(this); } play() { return play(); } pause() {} },
     incomingAlertsEnabled: true, incomingAudioReady: false, incomingAudioUnlock: null, incomingAudioUnlockGeneration: 0,
     incomingTtsSpeaking: false, incomingCuePlaying: false, activeIncomingCue: null, activeIncomingAudio: null,
+    incomingCuePreloads: [{pause() {}}],
     updateIncomingAlertsUi() {}, toast: (...args) => notices.push(args),
   });
   vm.runInContext(preferences + actions, context);
@@ -82,4 +83,89 @@ test("manual enable persists and synchronizes with Android background playback",
   assert.deepEqual(writes, [["retium.incomingAlerts", "on"]]);
   assert.deepEqual(native, [true]);
   assert.match(app, /void armIncomingAlerts\(\{automatic: true\}\);\s*document.addEventListener\("pointerup"/);
+});
+
+function playbackHarness(playLive, nativeHistory = [], playCue = async () => {}, android = true) {
+  const played = [];
+  const persisted = new Set(nativeHistory);
+  const context = vm.createContext({
+    window: {RetiumAndroid: android ? {
+      getSeenIncomingEventIds: () => JSON.stringify([...persisted]),
+      syncSeenIncomingEventIds: ids => JSON.parse(ids).forEach(id => persisted.add(id)),
+    } : undefined},
+    Audio: class {
+      constructor(url) { this.src = url; this.recorded = Boolean(url); this.readyState = 2; this.events = {}; }
+      addEventListener(name, handler) { this.events[name] = handler; }
+      pause() {}
+      play() {
+        played.push(this.recorded ? "archive" : "live");
+        if (!this.recorded) return playLive();
+        setImmediate(() => this.events.ended());
+        return Promise.resolve();
+      }
+    },
+    HTMLMediaElement: {HAVE_CURRENT_DATA: 2}, URL, Blob, setTimeout, clearTimeout,
+    incomingLiveVoice: null, incomingRecordedClipId: null, incomingFeedInitialized: true,
+    incomingAlertsEnabled: true, incomingAlertQueue: Promise.resolve(), activeIncomingAudio: null,
+    seenIncomingEventIds: new Set(), localIdentityHash: "local", commsOnly: false,
+    apiUrl: url => url, requestVoiceTranscript() {}, toast() {}, updateIncomingAlertsUi() {},
+    playIncomingMessageCue: playCue, INCOMING_MESSAGE_CUE_URL: "start",
+    INCOMING_MESSAGE_END_CUE_URL: "end", VOICE_READY_TIMEOUT_MS: 500,
+    incomingCuePreloads: [{currentTime: 5, play() { return playCue("live beep", this.volume, this.currentTime); }}],
+  });
+  vm.runInContext(app.slice(app.indexOf("function waitForIncomingVoiceReady("), app.indexOf("function setLiveVoiceAvailability("))
+    + app.slice(app.indexOf("function readNativeIncomingHistory("), app.indexOf("function shortHash(")), context);
+  const stream = {stream_id: "clip-1", callsign: "Other operator", sender_hash: "other"};
+  const archive = {id: "different-event-id", clip_id: stream.stream_id, type: "ptt.broadcast",
+    created_at: 1, network: {sender_hash: stream.sender_hash}};
+  const finishStream = () => {
+    context.startIncomingLiveVoice(stream);
+    context.receiveIncomingLiveChunk(stream.stream_id, 0, new Uint8Array([1]).buffer);
+    context.finishIncomingLiveVoice(stream.stream_id);
+  };
+  return {context, played, persisted, archive, finishStream};
+}
+
+test("the archive waits for live playback and skips an already heard clip", async () => {
+  let startPlayback;
+  const {context, played, persisted, archive, finishStream} = playbackHarness(() => new Promise(resolve => { startPlayback = resolve; }));
+  finishStream();
+  context.queueIncomingAlerts([archive]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(played, ["live"]);
+  startPlayback();
+  await context.incomingAlertQueue;
+  assert.deepEqual(played, ["live"]);
+  assert.ok(persisted.has("voice:clip-1"));
+});
+
+test("the saved recording still plays when live playback fails", async () => {
+  const {context, played, archive, finishStream} = playbackHarness(async () => { throw new Error("NotAllowedError"); });
+  finishStream();
+  context.queueIncomingAlerts([archive]);
+  await context.incomingAlertQueue;
+  assert.deepEqual(played, ["live", "archive"]);
+});
+
+test("Command plays the preloaded live beep at full volume alongside voice", async () => {
+  const order = [];
+  const {context, played, archive, finishStream} = playbackHarness(async () => { order.push("voice"); }, [], (cue, volume, position) => {
+    order.push(cue);
+    assert.equal(volume, 1);
+    assert.equal(position, 0);
+    return new Promise(() => {});
+  }, false);
+  finishStream();
+  context.queueIncomingAlerts([archive]);
+  await context.incomingAlertQueue;
+  assert.deepEqual(order, ["voice", "live beep"]);
+  assert.deepEqual(played, ["live"]);
+});
+
+test("a clip heard on Android in the background also stays quiet in the WebView", async () => {
+  const {context, played, archive, finishStream} = playbackHarness(async () => {}, ["voice:clip-1"]);
+  finishStream();
+  context.queueIncomingAlerts([archive, {...archive, clip_id: "another-clip", id: "another-event"}]);
+  await context.incomingAlertQueue;
+  assert.deepEqual(played, ["archive"]);
 });

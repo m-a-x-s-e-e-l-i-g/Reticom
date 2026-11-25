@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "retium"
-version = "0.2.2"
+version = "0.3.0"
 description = "Map-first field coordination over Reticulum"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,6 +16,7 @@ dependencies = [
   "Pillow==12.3.0",
   "zxing-cpp==3.1.1",
   "faster-whisper==1.2.1",
+  "av==18.1.1", # faster-whisper 1.2.1 uses the metadata_errors option removed in PyAV 19.
   "websockets==15.0.1",
 ]
 

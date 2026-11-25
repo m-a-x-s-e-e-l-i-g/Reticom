@@ -26,6 +26,7 @@
   - Team text chat.
   - Private text chat between verified operators.
   - Team push-to-talk from Field or Command.
+  - Hardware PTT from laptop keyboards and USB/Bluetooth HID buttons (F9 or F13–F24 mappings), plus Android wired/Bluetooth headset and PTT media buttons, including while Field is backgrounded.
   - Private PTT to an individual operator.
   - Live low-bitrate voice when the route supports it.
   - Reliable recorded fallback clips of up to **8 seconds** when live voice is unavailable.
@@ -66,7 +67,6 @@
   - OpenStreetMap military areas, bases, training grounds, airfields and airstrips.
   - GDACS disaster alerts, affected areas and tracks.
   - NASA FIRMS VIIRS thermal anomalies with a selectable time window.
-  - ACLED conflict and protest reports with the operator's own authorized token.
   - Live aircraft with callsign, altitude, direction, classification and type filters.
   - Live boats and ships with AIS identity, vessel type, classification and track history.
   - Road closures, restrictions and incidents from official NDW and NCDOT feeds.
@@ -93,6 +93,7 @@
   - Approval, rejection, revocation and complete operator/history removal are distinct actions.
   - Callsigns, icons and colors are friendly labels; the identity hash is the cryptographic anchor.
   - Optional shared-admin mode permits approved members to manage team content.
+  - Command is an admin on teams it hosts. On another device's team, the owner can approve a Command request as admin or grant Command admin rights to an existing approved member. Other members retain their own permissions.
   - The local device cannot accidentally remove itself as the last trusted control point.
 
 - **Offline and disrupted-network behavior is designed in**
@@ -174,7 +175,7 @@ Command uses the map as a desktop canvas instead of forcing the operator through
   - Useful context, not survey-grade elevation.
 
 - **National LiDAR elevation**
-  - Optional high-resolution airborne-LiDAR raster for the Netherlands, England and the United States, selected automatically by map area.
+  - Optional high-resolution LiDAR rasters for the Netherlands, England, France, Malta and the United States, selected by map area.
   - Switch between bare-earth DTM and surface/building DSM views.
   - Online-only and bounded to close zooms; not satellite LiDAR or survey advice.
 
@@ -202,7 +203,6 @@ Command uses the map as a desktop canvas instead of forcing the operator through
 - **Global bathymetry** — GEBCO seafloor and terrain relief as broad ocean context.
 - **Land cover** — ESA WorldCover 2021 at 10 m classes for forests, crops, built-up areas, wetlands and water.
 - **Night lights** — NASA VIIRS Black Marble annual composite for historical illuminated infrastructure and human-activity context.
-- **Conflict & protest reports** — ACLED events from the latest 30 days, preserving report date and location precision.
 - **Road closures & disruptions** — full closures, restrictions, works, accidents, obstructions and weather/flood reports with type and impact filters.
 - **Live aircraft** — regional ADS-B positions with classification/type filters, bounded estimated motion and on-demand recent tracks.
 - **Live boats & ships** — AIS positions with classification/type filters, bounded estimated motion and on-demand recent tracks.
@@ -503,8 +503,8 @@ Android changes also require a real build, `adb install -r` and physical-device 
 Push an unused `vMAJOR.MINOR.PATCH` tag. GitHub Actions builds versioned Android and Windows packages in parallel, runs browser/Python tests and the frozen Windows backend smoke test, then publishes both binaries and SHA-256 files together.
 
 ```powershell
-git tag v0.2.2
-git push origin v0.2.2
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The tag sets Android `versionName`; `versionCode = major × 1000000 + minor × 1000 + patch`. Never reuse a release tag.

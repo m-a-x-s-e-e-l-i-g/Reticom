@@ -5,6 +5,8 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.KeyguardManager;
 import android.content.Intent;
+import android.content.BroadcastReceiver;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -15,7 +17,6 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.hardware.GeomagneticField;
 import android.location.Location;
-import android.location.LocationManager;
 import android.media.AudioAttributes;
 import android.net.Uri;
 import android.os.Build;
@@ -28,6 +29,7 @@ import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.Surface;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -57,6 +59,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.function.Consumer;
 
 public final class MainActivity extends Activity {
     private static final String LOCAL_URL = "http://127.0.0.1:8781/";
@@ -69,6 +72,8 @@ public final class MainActivity extends Activity {
     private ValueCallback<Uri[]> pendingFileChooser;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private WebView webView;
+    private boolean locationForeground;
+    private String locationMode = "idle";
     private GmsBarcodeScanner qrScanner;
     private TextToSpeech textToSpeech;
     private volatile boolean textToSpeechReady;
@@ -81,6 +86,14 @@ public final class MainActivity extends Activity {
     private volatile float compassDeclination = Float.NaN;
     private final CompassBearing compassBearing = new CompassBearing();
     private long lastCompassEmit = 0;
+    private boolean hardwarePttReceiverRegistered;
+    private final BroadcastReceiver hardwarePttReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(android.content.Context context, Intent intent) {
+            if (!RetiumNodeService.ACTION_HARDWARE_PTT.equals(intent.getAction())) return;
+            emitHardwarePtt(intent.getStringExtra(RetiumNodeService.EXTRA_HARDWARE_PTT_ACTION));
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -95,6 +108,7 @@ public final class MainActivity extends Activity {
         requestFieldPermissions();
         configureQrScanner();
         configureWebView();
+        registerHardwarePttReceiver();
         configureCompass();
         configureTextToSpeech();
         waitForNode(0);
@@ -104,6 +118,8 @@ public final class MainActivity extends Activity {
     protected void onStart() {
         super.onStart();
         if (RetiumNodeService.isShuttingDown()) return;
+        locationForeground = true;
+        updateLocationUi();
         startCompass();
         updateNodeServiceVisibility(true);
     }
@@ -120,6 +136,7 @@ public final class MainActivity extends Activity {
     protected void onPause() {
         compassForeground = false;
         stopCompass();
+        emitHardwarePtt("up");
         if (webView != null) webView.evaluateJavascript("window.retiumAndroidHeadingPaused&&window.retiumAndroidHeadingPaused()", null);
         super.onPause();
     }
@@ -127,12 +144,14 @@ public final class MainActivity extends Activity {
     private boolean headingForeground() {
         KeyguardManager keyguard = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
         PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
-        return compassForeground && power != null && power.isInteractive()
+        return compassForeground && !LocationUpdateController.isCommsOnly(this) && power != null && power.isInteractive()
                 && keyguard != null && !keyguard.isKeyguardLocked();
     }
 
     @Override
     protected void onStop() {
+        locationForeground = false;
+        updateLocationUi();
         stopCompass();
         updateNodeServiceVisibility(false);
         super.onStop();
@@ -140,6 +159,10 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (hardwarePttReceiverRegistered) {
+            unregisterReceiver(hardwarePttReceiver);
+            hardwarePttReceiverRegistered = false;
+        }
         if (pendingFileChooser != null) {
             pendingFileChooser.onReceiveValue(null);
             pendingFileChooser = null;
@@ -214,8 +237,18 @@ public final class MainActivity extends Activity {
         };
     }
 
+    private void registerHardwarePttReceiver() {
+        IntentFilter filter = new IntentFilter(RetiumNodeService.ACTION_HARDWARE_PTT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(hardwarePttReceiver, filter, RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(hardwarePttReceiver, filter);
+        }
+        hardwarePttReceiverRegistered = true;
+    }
+
     private void startCompass() {
-        if (sensorManager != null && rotationSensor != null && compassListener != null) {
+        if (!LocationUpdateController.isCommsOnly(this) && sensorManager != null && rotationSensor != null && compassListener != null) {
             sensorManager.registerListener(compassListener, rotationSensor, SensorManager.SENSOR_DELAY_UI);
         }
     }
@@ -268,12 +301,37 @@ public final class MainActivity extends Activity {
         startService(service);
     }
 
+    private void updateLocationUi() {
+        LocationUpdateController controller = RetiumNodeService.locationUpdates();
+        if (controller == null) return;
+        controller.setUi(locationForeground ? locationMode : "idle", locationForeground ? location -> {
+            if (webView != null) webView.evaluateJavascript("window.retiumAndroidLocation?.(" + locationJson(location) + ")", null);
+        } : null);
+    }
+
+    private String locationJson(Location location) {
+        if (location == null || !LocationUpdateController.hasPermission(this)) return "null";
+        try {
+            JSONObject result = new JSONObject();
+            result.put("latitude", location.getLatitude());
+            result.put("longitude", location.getLongitude());
+            if (location.hasAccuracy()) result.put("accuracy", location.getAccuracy());
+            if (location.hasAltitude()) result.put("altitude", location.getAltitude());
+            result.put("timestamp", location.getTime());
+            result.put("approximate", !LocationUpdateController.hasPrecisePermission(this));
+            return result.toString();
+        } catch (Exception error) {
+            return "null";
+        }
+    }
+
     private void requestFieldPermissions() {
         List<String> needed = new ArrayList<>();
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             needed.add(Manifest.permission.RECORD_AUDIO);
         }
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        if (!LocationUpdateController.hasPermission(this)) {
+            needed.add(Manifest.permission.ACCESS_COARSE_LOCATION);
             needed.add(Manifest.permission.ACCESS_FINE_LOCATION);
         }
         if (android.os.Build.VERSION.SDK_INT >= 33
@@ -293,11 +351,7 @@ public final class MainActivity extends Activity {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == PERMISSIONS_REQUEST) {
-            boolean granted = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                    == PackageManager.PERMISSION_GRANTED;
-            updateAutomaticLocationPreference(
-                    granted && LocationUpdateController.isEnabled(this)
-            );
+            updateNodeServiceVisibility(locationForeground);
         }
         if (requestCode == PERMISSIONS_REQUEST || requestCode == MICROPHONE_PERMISSION_REQUEST) {
             resolvePendingAudioPermissionRequest();
@@ -422,8 +476,7 @@ public final class MainActivity extends Activity {
             ) {
                 callback.invoke(
                         origin,
-                        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                                == PackageManager.PERMISSION_GRANTED,
+                        LocationUpdateController.hasPermission(MainActivity.this),
                         false
                 );
             }
@@ -634,6 +687,36 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (isHardwarePttKey(event)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                if (event.getRepeatCount() == 0) emitHardwarePtt("down");
+            } else if (event.getAction() == KeyEvent.ACTION_UP) {
+                emitHardwarePtt("up");
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    private boolean isHardwarePttKey(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        // Android 36 introduced the F13–F24 constants; the app compiles against 35.
+        return keyCode == KeyEvent.KEYCODE_HEADSETHOOK || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                || keyCode == KeyEvent.KEYCODE_F9 || (keyCode >= 326 && keyCode <= 337);
+    }
+
+    private void emitHardwarePtt(String action) {
+        runOnUiThread(() -> {
+            if (webView == null) return;
+            String function = "down".equals(action)
+                    ? "retiumHardwarePttDown"
+                    : "retiumHardwarePttUp";
+            webView.evaluateJavascript("window." + function + "?.()", null);
+        });
+    }
+
+    @Override
     public void onBackPressed() {
         if (webView != null && webView.canGoBack()) webView.goBack();
         else super.onBackPressed();
@@ -660,27 +743,64 @@ public final class MainActivity extends Activity {
 
         @JavascriptInterface
         public String getLastKnownLocation() {
-            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                    != PackageManager.PERMISSION_GRANTED) return "";
-            try {
-                LocationManager manager = (LocationManager) getSystemService(LOCATION_SERVICE);
-                if (manager == null) return "";
-                Location best = null;
-                for (String provider : new String[]{LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER}) {
-                    Location candidate = manager.getLastKnownLocation(provider);
-                    if (candidate != null && (best == null || candidate.getTime() > best.getTime())) best = candidate;
-                }
-                // A stale last-known point is worse than no immediate center.
-                if (best == null || System.currentTimeMillis() - best.getTime() > 5 * 60_000L) return "";
-                JSONObject result = new JSONObject();
-                result.put("latitude", best.getLatitude());
-                result.put("longitude", best.getLongitude());
-                if (best.hasAccuracy()) result.put("accuracy", best.getAccuracy());
-                if (best.hasAltitude()) result.put("altitude", best.getAltitude());
-                return result.toString();
-            } catch (Exception error) {
-                return "";
-            }
+            LocationUpdateController controller = RetiumNodeService.locationUpdates();
+            return locationJson(controller == null ? null : controller.getBestRecentLocation());
+        }
+
+        @JavascriptInterface
+        public String getCommsLocation() {
+            LocationUpdateController controller = RetiumNodeService.locationUpdates();
+            return locationJson(controller == null || !LocationUpdateController.isCommsOnly(MainActivity.this)
+                    ? null : controller.getLatestCachedLocation());
+        }
+
+        @JavascriptInterface
+        public boolean isCommsOnly() {
+            return LocationUpdateController.isCommsOnly(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void setCommsOnly(boolean enabled) {
+            LocationUpdateController.setCommsOnly(MainActivity.this, enabled);
+            runOnUiThread(() -> {
+                updateLocationUi();
+                if (enabled) stopCompass();
+                else if (compassForeground) startCompass();
+                updateNodeServiceVisibility(locationForeground);
+            });
+        }
+
+        @JavascriptInterface
+        public boolean hasPreciseLocation() {
+            return LocationUpdateController.hasPrecisePermission(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public boolean hasLocationPermission() {
+            return LocationUpdateController.hasPermission(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void setLocationDemand(boolean joined, String mode) {
+            runOnUiThread(() -> {
+                locationMode = "navigation".equals(mode) ? "navigation" : "map".equals(mode) ? "map" : "idle";
+                LocationUpdateController controller = RetiumNodeService.locationUpdates();
+                if (controller != null) controller.setTeamJoined(joined);
+                updateLocationUi();
+            });
+        }
+
+        @JavascriptInterface
+        public void requestFreshLocation(long requestId) {
+            runOnUiThread(() -> {
+                Consumer<Location> reply = location -> {
+                    if (webView != null) webView.evaluateJavascript(
+                            "window.retiumAndroidFreshLocation?.(" + requestId + "," + locationJson(location) + ")", null);
+                };
+                LocationUpdateController controller = RetiumNodeService.locationUpdates();
+                if (controller != null && locationForeground) controller.requestFresh(reply);
+                else reply.accept(null);
+            });
         }
 
         @JavascriptInterface

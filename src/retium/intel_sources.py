@@ -20,6 +20,7 @@ from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from .notam_activity import NOTAM_FETCH_LOOKAHEAD, activity_periods, local_activity, utc_timestamp
 from .road_disruptions import ROAD_URLS
 
 
@@ -48,8 +49,21 @@ GDACS_DETAIL_MAX_SPAN = 10
 GDACS_DEADLINE_SECONDS = 20
 _GDACS_CACHE = {}
 _GDACS_CACHE_LOCK = threading.Lock()
-ACLED_URL = "https://acleddata.com/api/acled/read"
 FIRMS_ROOT = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
+NOTAM_URL = "https://api.bravoecho.ai/v1/notams"
+TRANSITOUS_URL = "https://api.transitous.org/api/v6/map/trips"
+TRANSIT_POSITION_URLS = {
+    "openov": "https://gtfs.ovapi.nl/nl/vehiclePositions.pb",
+    "hsl": "https://realtime.hsl.fi/realtime/vehicle-positions/v2/hsl",
+    "mbta": "https://cdn.mbta.com/realtime/VehiclePositions.pb",
+    "entur": "https://api.entur.io/realtime/v1/gtfs-rt/vehicle-positions",
+}
+NOTAM_CATEGORIES = {
+    "airspace": "Airspace", "warning": "Warnings", "runway": "Runways",
+    "taxiway": "Taxiways", "aerodrome": "Aerodromes", "lighting": "Lighting",
+    "navaid": "Navigation aids", "procedure": "Procedures", "obstacle": "Obstacles",
+    "service": "Services", "other": "Other",
+}
 
 PACKS = [
     {
@@ -60,11 +74,18 @@ PACKS = [
         "min_zoom": 12, "ttl_seconds": 86400, "credential_fields": [],
     },
     {
-        "id": "military", "title": "Military areas & airstrips", "source": "OpenStreetMap",
-        "description": "Publicly mapped military land, bases, training grounds and airfields; civilian airstrips are labeled separately.",
+        "id": "military", "title": "Military areas, airstrips & police", "source": "OpenStreetMap",
+        "description": "Publicly mapped military areas, airfields, police stations and police properties.",
         "source_url": "https://wiki.openstreetmap.org/wiki/Tag:landuse%3Dmilitary",
         "attribution": "© OpenStreetMap contributors · ODbL",
         "min_zoom": 9, "ttl_seconds": 86400, "credential_fields": [], "offline_downloadable": True,
+    },
+    {
+        "id": "notams", "title": "International NOTAMs", "source": "BravoEcho",
+        "description": "FAA-distributed aviation notices worldwide. Coverage varies. Check your official briefing for flight planning.",
+        "source_url": "https://bravoecho.ai/docs/notams", "attribution": "BravoEcho · FAA NMS",
+        "min_zoom": 6, "ttl_seconds": 300, "credential_fields": ["bravoecho_key"],
+        "notam_categories": NOTAM_CATEGORIES,
     },
     {
         "id": "gdacs", "title": "Disaster alerts", "source": "GDACS",
@@ -84,13 +105,6 @@ PACKS = [
         # repeatedly spending the user's FIRMS quota on the same view.
         "min_zoom": 4, "ttl_seconds": 86400, "credential_fields": ["firms_key"],
     },
-    {
-        "id": "acled", "title": "Conflict & protest reports", "source": "ACLED",
-        "description": "Published events from the last 30 days, subject to your ACLED access. Reporting dates and locations can be approximate.",
-        "source_url": "https://acleddata.com/",
-        "attribution": "ACLED · Subject to ACLED terms of use",
-        "min_zoom": 4, "ttl_seconds": 21600, "credential_fields": ["acled_token"],
-    },
 ]
 _PACK_BY_ID = {pack["id"]: pack for pack in PACKS}
 
@@ -104,7 +118,6 @@ ProviderError = IntelSourceError
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # In particular, never forward an ACLED bearer token to another origin.
         raise IntelSourceError("The provider redirected its API. Try again later.")
 
 
@@ -130,7 +143,10 @@ def fetch_bytes(url: str, *, data: bytes | None = None, headers: dict | None = N
     parts = urlsplit(url)
     allowed = (
         url == OVERPASS_URL or _gdacs_endpoint(url) or url in ROAD_URLS
-        or (parts.scheme == "https" and parts.netloc == "acleddata.com" and parts.path == "/api/acled/read")
+        or url in TRANSIT_POSITION_URLS.values() or url.partition("?")[0] == TRANSITOUS_URL
+        or (parts.scheme == "https" and parts.netloc == "api.bravoecho.ai" and parts.path == "/v1/notams")
+        or (parts.scheme == "https" and parts.netloc == "malta.coverage.wetransform.eu"
+            and parts.path in {"/wms/dtm_1m_2018/ows", "/wms/dsm_1m_2018/ows"})
         or (parts.scheme == "https" and parts.netloc == "firms.modaps.eosdis.nasa.gov" and parts.path.startswith("/api/area/csv/"))
     )
     if not allowed or parts.username or parts.password or parts.fragment:
@@ -351,6 +367,10 @@ def _osm_geometry(element, pack_id):
 def _osm_kind(tags, pack_id):
     if pack_id == "trails":
         return ("hiking_route", "Hiking route") if tags.get("route") == "hiking" else ("trail", "Walking route" if tags.get("route") == "foot" else _text(tags.get("highway", "Path")).replace("_", " ").title())
+    if tags.get("amenity") == "police" or tags.get("police") == "station":
+        return "police_station", "Police station"
+    if tags.get("landuse") == "police" or tags.get("police") not in (None, "", "no", "disused", "abandoned"):
+        return "police_property", "Police property"
     military = tags.get("military")
     if military or tags.get("landuse") == "military":
         labels = {
@@ -374,7 +394,9 @@ def _load_osm(pack_id, bbox, fetch):
     if pack_id == "trails":
         query = f'[out:json][timeout:18][maxsize:33554432];(way["highway"~"^(path|footway|track|steps)$"]({extent});relation["route"~"^(hiking|foot)$"]({extent}););out body geom({extent}) {MAX_FEATURES + 1};'
     else:
-        query = f'[out:json][timeout:18][maxsize:33554432];(nwr["landuse"="military"]({extent});nwr["military"]({extent});nwr["aeroway"~"^(airstrip|runway|aerodrome)$"]({extent}););out body geom {MAX_FEATURES + 1};'
+        query = (f'[out:json][timeout:18][maxsize:33554432];(nwr["landuse"="military"]({extent});nwr["military"]({extent});'
+                 f'nwr["aeroway"~"^(airstrip|runway|aerodrome)$"]({extent});nwr["amenity"="police"]({extent});'
+                 f'nwr["landuse"="police"]({extent});nwr["police"]["police"!~"^(no|disused|abandoned)$"]({extent}););out body geom {MAX_FEATURES + 1};')
     payload = _json(fetch(OVERPASS_URL, data=urlencode({"data": query}).encode(), headers={"Content-Type": "application/x-www-form-urlencoded"}))
     if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
         raise IntelSourceError("OpenStreetMap returned an unexpected response.")
@@ -780,43 +802,87 @@ def _load_firms(bbox, credentials, fetch, days=3):
     return _collection("firms", features, truncated=truncated, note=f"Last {'24 hours' if days == 1 else str(days) + ' days'} · NOAA-20 NRT only. Overpass timing, clouds and sensor resolution limit coverage.")
 
 
-def _load_acled(bbox, credentials, fetch):
-    token = str(credentials.get("acled_token") or "").strip()
-    if not token:
-        raise IntelSourceError("Add an ACLED access token in Intel pack settings. An ACLED account is required.")
-    if len(token) > 8192 or any(ord(ch) < 33 or ord(ch) > 126 for ch in token):
-        raise IntelSourceError("The ACLED access token format is invalid.")
-    end = datetime.now(timezone.utc).date()
-    start = end - timedelta(days=29)
-    query = {
-        "_format": "json", "limit": MAX_FEATURES + 1,
-        "latitude": f"{bbox[1]}|{bbox[3]}", "latitude_where": "BETWEEN",
-        "longitude": f"{bbox[0]}|{bbox[2]}", "longitude_where": "BETWEEN",
-        "event_date": f"{start}|{end}", "event_date_where": "BETWEEN",
-        "fields": "event_id_cnty|event_date|event_type|sub_event_type|country|location|latitude|longitude|geo_precision|notes|timestamp",
-    }
-    payload = _json(fetch(f"{ACLED_URL}?{urlencode(query)}", headers={"Authorization": f"Bearer {token}"}))
-    if not isinstance(payload, dict) or str(payload.get("status", 200)) != "200" or not isinstance(payload.get("data"), list):
-        raise IntelSourceError("ACLED did not return event data. Check your access token, account access and quota.")
-    rows = payload["data"]
+def _notam_geometry(notice):
+    area_source = notice.get("area_source")
+    if area_source in ("faa", "text"):
+        area = _gdacs_geometry(notice.get("area"))
+        if area and area[0]["type"] in ("Polygon", "MultiPolygon"):
+            note = "FAA-reported area" if area_source == "faa" else "Area inferred by BravoEcho from notice text"
+            return area[0], area[1], note
+    original = _gdacs_geometry(notice.get("geometry"))
+    if original:
+        note = "FAA reference point" if original[0]["type"] == "Point" else "FAA-reported geometry"
+        return original[0], original[1], note
+    match = re.fullmatch(r"([0-9]{2})([0-5][0-9])([NS])\s*([0-9]{3})([0-5][0-9])([EW])",
+                         str(notice.get("coordinates") or ""))
+    if match:
+        lat, lat_min, ns, lon, lon_min, ew = match.groups()
+        point = _coord([(int(lon) + int(lon_min) / 60) * (-1 if ew == "W" else 1),
+                        (int(lat) + int(lat_min) / 60) * (-1 if ns == "S" else 1)])
+        if point:
+            return {"type": "Point", "coordinates": point}, None, "Approximate position from the Q-line"
+    return None, None, ""
+
+
+def _load_notams(bbox, credentials, fetch):
+    key = credentials.get("bravoecho_key", "")
+    if not key:
+        raise IntelSourceError("Add a BravoEcho API key in Map layers.")
+    now = time.time()
+    query = urlencode({
+        "bbox": ",".join(map(str, bbox)), "include": "area,geometry", "limit": 500,
+        "from": datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "to": datetime.fromtimestamp(now + NOTAM_FETCH_LOOKAHEAD, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
+    document = _json(fetch(f"{NOTAM_URL}?{query}", headers={"Authorization": f"Bearer {key}"}))
+    if not isinstance(document, dict) or not isinstance(document.get("notams"), list):
+        raise IntelSourceError("BravoEcho returned an unexpected NOTAM response.")
     features = []
-    for row in rows[:MAX_FEATURES]:
-        if not isinstance(row, dict):
+    unresolved = 0
+    for notice in document["notams"][:500]:
+        if not isinstance(notice, dict) or notice.get("is_active") is not True or notice.get("cancelled_at") or notice.get("type") == "C":
             continue
-        point = _coord([row.get("longitude"), row.get("latitude")])
-        identifier = _text(row.get("event_id_cnty"), 80)
-        if not point or not _inside(point, bbox) or not identifier:
+        identity = notice.get("nms_id")
+        if not isinstance(identity, str) or not re.fullmatch(r"[0-9]{16}", identity):
             continue
-        precision = _text(row.get("geo_precision"), 1)
-        precision_text = {"1": "Reported location", "2": "Approximate nearby location", "3": "Approximate administrative area"}.get(precision, "Location precision unknown")
-        subtype = _text(row.get("sub_event_type") or row.get("event_type"), 100)
-        location = _text(row.get("location"), 100)
-        detail = f"{precision_text}. {_text(row.get('notes'), 700)}"
-        features.append(_feature("acled", identifier, {"type": "Point", "coordinates": point},
-                                 f"{subtype} · {location}" if location else subtype, detail, "acled_event", row.get("event_date"),
-                                 precision=int(precision) if precision in ("1", "2", "3") else 0))
-    return _collection("acled", features, truncated=len(rows) > MAX_FEATURES,
-                       note="Last 30 days · Published reporting, not live tracking. Locations can be approximate; account access may limit coverage. ACLED terms apply.")
+        geometry, bounds, location_note = _notam_geometry(notice)
+        if not geometry:
+            continue
+        category = notice.get("category")
+        if not isinstance(category, str) or category not in NOTAM_CATEGORIES:
+            category = "other"
+        start, end = (_text(notice.get(field), 40) for field in ("effective_start", "effective_end"))
+        estimated = notice.get("estimated") is True
+        begins = utc_timestamp(start)
+        expires = None if estimated else utc_timestamp(end)
+        if begins is None or (end and not estimated and expires is None):
+            unresolved += 1
+            continue
+        if begins > now + NOTAM_FETCH_LOOKAHEAD or expires is not None and (expires <= now or begins >= expires):
+            continue
+        raw_schedule = notice.get("schedule")
+        schedule = " ".join(raw_schedule.split()) if isinstance(raw_schedule, str) else ""
+        periods = activity_periods(schedule, begins, expires, now) if len(schedule) <= 1000 else None
+        if periods is None:
+            unresolved += 1
+            continue
+        if not periods:
+            continue
+        text = notice.get("text")
+        text = text[:8000] if isinstance(text, str) else ""
+        activity = local_activity(notice.get("selection_code"), category, text, geometry["type"], bounds, notice.get("radius_nm"))
+        number = _text(notice.get("number"), 32)
+        features.append(_feature(
+            "notams", identity, geometry, _text(notice.get("title"), 100) or number or "Aviation notice",
+            "", category, notice.get("issued_at"), notice_number=number,
+            notice_text=text, local_activity=activity, notam_periods=periods,
+            category_label=NOTAM_CATEGORIES[category], location=_text(notice.get("icao_location") or notice.get("location"), 24),
+            valid_from=start, valid_to=end, estimated=estimated, valid_until=expires,
+            schedule=schedule, geometry_note=location_note,
+        ))
+    meta = document.get("meta")
+    truncated = len(document["notams"]) > 500 or isinstance(meta, dict) and bool(meta.get("truncated") or meta.get("next_cursor"))
+    return {**_collection("notams", features, truncated=truncated), "unresolved_schedules": unresolved}
 
 
 def load_pack(pack_id: str, bbox, credentials: dict | None = None, *, fetch: Callable | None = None,
@@ -855,11 +921,11 @@ def load_pack(pack_id: str, bbox, credentials: dict | None = None, *, fetch: Cal
             else:
                 selected = tuple(dict.fromkeys(gdacs_types))
             result = _load_gdacs(bbox, fetch, selected, cache_enabled=transport is fetch_bytes)
-        elif pack_id == "firms":
+        elif pack_id == "notams":
+            result = _load_notams(bbox, credentials, fetch)
+        else:
             result = _load_firms(bbox, credentials, fetch, firms_days)
             result["firms_days"] = firms_days
-        else:
-            result = _load_acled(bbox, credentials, fetch)
         result["source_bytes"] = source_bytes
         return result
     except IntelSourceError:

@@ -41,13 +41,17 @@ class Membership:
         self.directory = Path(directory) / "membership" / self.root
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "policy.json"
+        self.roles_path = self.directory / "admin-roles.json"
         self.pending_path = self.directory / "requests.json"
         self.lock = threading.RLock()
         self.envelope = None
+        self.roles = None
         self.owner_hash = identity.hash.hex() if self.owner else None
         self.pending = {}
         if self.path.exists():
             self.accept(json.loads(self.path.read_text()), save=False)
+        if self.roles_path.exists() and self.envelope is not None:
+            self.accept_roles(json.loads(self.roles_path.read_text()), save=False)
         if self.pending_path.exists():
             value = json.loads(self.pending_path.read_text())
             if not isinstance(value, dict) or len(value) > MAX_PENDING:
@@ -114,23 +118,64 @@ class Membership:
     def approved(self, sender):
         return self.status(sender) == "approved"
 
-    def request(self, sender, callsign):
+    def accept_roles(self, envelope, save=True):
+        # Keep the existing signed roster format readable by older backup hosts.
+        with self.lock:
+            if not self.envelope or not isinstance(envelope, dict) or set(envelope) != {"policy", "signature"}:
+                raise ValueError("Invalid admin roles")
+            policy = envelope["policy"]
+            if (not isinstance(policy, dict) or set(policy) != {"team", "revision", "admins"}
+                    or policy["team"] != self.root or type(policy["revision"]) is not int or policy["revision"] < 1
+                    or not isinstance(policy["admins"], list) or len(policy["admins"]) > MAX_MEMBERS):
+                raise ValueError("Invalid admin role policy")
+            for key in policy["admins"]:
+                identity_hash(key)
+            public = RNS.Identity(create_keys=False)
+            public.load_public_key(bytes.fromhex(self.envelope["policy"]["owner"]))
+            if not public.validate(bytes.fromhex(envelope["signature"]), canonical(policy)):
+                raise ValueError("Admin roles must be signed by the team owner")
+            if self.roles:
+                old = self.roles["policy"]
+                if policy["revision"] < old["revision"]:
+                    return False
+                if policy["revision"] == old["revision"]:
+                    if policy != old:
+                        raise ValueError("Conflicting admin roles")
+                    return False
+            if save:
+                self.write(self.roles_path, envelope)
+            self.roles = json.loads(json.dumps(envelope))
+            return True
+
+    def is_admin(self, sender):
+        with self.lock:
+            return bool(self.approved(sender) and self.roles and self.envelope
+                        and self.roles["policy"]["revision"] == self.envelope["policy"]["revision"]
+                        and sender in self.roles["policy"]["admins"])
+
+    def request(self, sender, callsign, *, command=False):
         identity_hash(sender); callsign = label(callsign)
+        if type(command) is not bool:
+            raise ValueError("Invalid Command request")
         with self.lock:
             status = self.status(sender)
-            if status == "pending" and sender not in self.pending:
-                if len(self.pending) >= MAX_PENDING:
+            if status == "pending" and (sender not in self.pending or command and not self.pending[sender].get("command")):
+                if sender not in self.pending and len(self.pending) >= MAX_PENDING:
                     raise ValueError("Membership request list is full; contact the team owner")
                 self.pending[sender] = {"callsign": callsign, "requested_at": int(time.time())}
+                if command:
+                    self.pending[sender]["command"] = True
                 self.write(self.pending_path, self.pending)
             return {"status": status, "identity": sender, "approval_required": True}
 
-    def decide(self, sender, status, callsign=None):
+    def decide(self, sender, status, callsign=None, *, admin=None):
         identity_hash(sender)
         if not self.owner:
             raise PermissionError("Only the original team owner can change membership")
         if status not in {"approved", "rejected", "revoked", "removed"}:
             raise ValueError("Choose approve, reject, revoke or remove")
+        if admin is not None and (type(admin) is not bool or status != "approved"):
+            raise ValueError("Only an approved member can receive admin rights")
         if sender == self.identity.hash.hex():
             raise ValueError("The team owner cannot revoke itself")
         with self.lock:
@@ -142,6 +187,15 @@ class Membership:
             policy["members"][sender] = {"status": status, "callsign": "Removed operator" if status == "removed" else name}
             policy["revision"] += 1
             self._sign(policy)
+            if self.roles or admin is True:
+                admins = set(self.roles["policy"]["admins"]) if self.roles else set()
+                if status != "approved" or admin is False or previous.get("status") != "approved":
+                    admins.discard(sender)
+                if admin is True:
+                    admins.add(sender)
+                roles = {"team": self.root, "revision": policy["revision"],
+                         "admins": sorted(key for key in admins if policy["members"].get(key, {}).get("status") == "approved")}
+                self.accept_roles({"policy": roles, "signature": self.identity.sign(canonical(roles)).hex()})
             self.pending.pop(sender, None)
             self.write(self.pending_path, self.pending)
 
@@ -154,5 +208,6 @@ class Membership:
         with self.lock:
             members = self.envelope["policy"]["members"] if self.envelope else {}
             return {"owner": self.owner, "approval_required": True,
-                "members": [{"identity": key, **value} for key, value in members.items() if value["status"] != "removed"],
+                "members": [{"identity": key, **value, **({"admin": True} if self.is_admin(key) else {})}
+                            for key, value in members.items() if value["status"] != "removed"],
                 "requests": [{"identity": key, **value} for key, value in self.pending.items() if key not in members]}

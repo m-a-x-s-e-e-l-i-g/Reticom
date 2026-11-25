@@ -27,10 +27,66 @@ def osm(*elements):
 
 def test_catalog_has_real_sources_and_explicit_credentials():
     packs = {pack["id"]: pack for pack in source.PACKS}
-    assert set(packs) == {"trails", "military", "gdacs", "firms", "acled"}
+    assert set(packs) == {"trails", "military", "gdacs", "firms", "notams"}
     assert packs["firms"]["credential_fields"] == ["firms_key"]
-    assert packs["acled"]["credential_fields"] == ["acled_token"]
     assert packs["military"]["source"] == "OpenStreetMap"
+
+
+def test_notams_request_and_geometry_provenance(monkeypatch):
+    monkeypatch.setattr(source.time, "time", lambda: 1795608000)  # 2026-11-25 12:00 UTC
+    default = {"is_active": True, "number": "A1234/26", "category": "runway", "type": "N",
+               "text": "RWY 18 CLSD\nEXC APPROVED ACFT", "effective_end": "2027-01-01T00:00:00Z",
+               "effective_start": "2026-11-25T11:00:00Z", "coordinates": "5203N00451E", "icao_location": "EHAM"}
+    def notice(index, **fields):
+        return {**default, "nms_id": f"{index:016}", **fields}
+
+    polygon = {"type": "Polygon", "coordinates": [[[4.8, 52.0], [4.9, 52.0], [4.9, 52.1], [4.8, 52.0]]]}
+    calls = []
+    result = source.load_pack("notams", AREA, {"bravoecho_key": "example-key"}, fetch=transport({
+        "notams": [notice(1, area=polygon, area_source="faa"),
+                   notice(2, category="new-provider-category", area=polygon, area_source="radius", estimated=True),
+                   notice(3, type="C"), notice(4, is_active=False), notice(5, coordinates="9999N00450E"),
+                   notice(6, effective_end="unreadable"), notice(7, cancelled_at="2026-11-25T00:00:00Z"),
+                   notice(8, effective_start="2026-11-25T18:00:00Z"),
+                   notice(9, category="warning", selection_code="QWULW", area=polygon, area_source="faa", schedule="DAILY 1230-1300"),
+                   notice(10, category="warning", text="FIREWORKS", schedule="SUNSET TO 2300")],
+        "meta": {"next_cursor": "fixture"},
+    }, calls))
+    [(url, options)] = calls
+    request_url = urlsplit(url)
+    assert request_url.path == "/v1/notams"
+    assert parse_qs(request_url.query) == {"bbox": ["4.8,52.0,4.9,52.1"], "include": ["area,geometry"], "limit": ["500"],
+                                          "from": ["2026-11-25T12:00:00Z"], "to": ["2026-11-25T13:30:00Z"]}
+    assert options["headers"] == {"Authorization": "Bearer example-key"}
+    assert "example-key" not in json.dumps(result)
+    assert result["truncated"] is True
+    area, reference, drones = result["features"]
+    assert area["geometry"] == polygon
+    assert area["properties"]["kind"] == "runway"
+    assert area["properties"]["notice_text"] == default["text"]
+    assert area["properties"]["valid_until"] == 1798761600
+    assert reference["geometry"]["type"] == "Point"
+    assert reference["properties"]["kind"] == "other"
+    assert reference["properties"]["valid_until"] is None
+    assert "Approximate" in reference["properties"]["geometry_note"]
+    assert result["unresolved_schedules"] == 2
+    assert drones["properties"]["local_activity"] == "drones"
+    assert drones["properties"]["notam_periods"] == [[1795609800, 1795611600]]
+
+
+def test_local_notam_selection_and_overnight_schedule():
+    from retium.notam_activity import activity_periods, local_activity, utc_timestamp
+
+    now = utc_timestamp("2026-11-25T00:30:00Z")
+    start = utc_timestamp("2026-11-24T23:00:00Z")
+    end = utc_timestamp("2026-11-27T00:00:00Z")
+    assert activity_periods("TUE 2300-0100, WED 0800-0930", start, end, now) == [[start, now + 1800]]
+    assert activity_periods("NOV 25 0100-0145", start, end, now) == [[now + 1800, now + 4500]]
+    assert activity_periods("DAILY SR-SS", start, end, now) is None
+    assert local_activity("QWMLW", "warning", "FIREWORK DISPLAY", "Point", None, 2) == "fireworks"
+    assert local_activity("QWMLW", "warning", "ARTILLERY", "Point", None, 2) == ""
+    assert local_activity("QWPLW", "warning", "", "Point", None, 999) == ""
+    assert local_activity("QWPLW", "warning", "", "Polygon", (4, 51, 5, 52), None) == ""
 
 
 @pytest.mark.parametrize("bbox", [(0, 0, 0, 1), (170, -5, -170, 5), (0, -91, 1, 1), (0, 0, float("nan"), 1), (False, 0, 1, 1), (1, 2, 3)])
@@ -48,26 +104,31 @@ def test_rejects_huge_osm_queries_before_network():
     assert not calls
 
 
-def test_osm_preserves_military_polygon_and_labels_civilian_airstrip():
+def test_osm_preserves_military_and_police_polygons_and_labels_airstrip_and_station():
     square = [(4.81, 52.01), (4.83, 52.01), (4.83, 52.03), (4.81, 52.03), (4.81, 52.01)]
     calls = []
     payload = osm(
         {"type": "way", "id": 10, "tags": {"landuse": "military", "military": "training_area", "name": "Example range", "access": "no"}, "geometry": geom(square)},
         {"type": "node", "id": 11, "lat": 52.02, "lon": 4.85, "tags": {"aeroway": "airstrip", "name": "Civil airstrip"}},
+        {"type": "node", "id": 12, "lat": 52.03, "lon": 4.85, "tags": {"amenity": "police"}},
+        {"type": "way", "id": 13, "tags": {"landuse": "police", "name": "Example police property"}, "geometry": geom(square)},
     )
     result = source.load_pack("military", AREA, fetch=transport(payload, calls))
-    training, airstrip = result["features"]
+    training, airstrip, station, police = result["features"]
     assert training["geometry"]["type"] == "Polygon"
     assert training["properties"]["kind"] == "training_area"
     assert "Access: no" in training["properties"]["detail"]
     assert airstrip["properties"]["kind"] == "airstrip"
     assert "Military" not in airstrip["properties"]["detail"]
+    assert station["properties"]["kind"] == "police_station" and station["geometry"]["type"] == "Point"
+    assert police["properties"]["kind"] == "police_property" and police["geometry"]["type"] == "Polygon"
     assert training["properties"]["source_url"] == "https://www.openstreetmap.org/way/10"
     assert result["updated_at"] == "2026-09-06T12:00:00Z"
     assert result["source_bytes"] == len(json.dumps(payload).encode())
     query = parse_qs(calls[0][1]["data"].decode())["data"][0]
     assert "52.000000,4.800000,52.100000,4.900000" in query
     assert "[timeout:18]" in query
+    assert '["amenity"="police"]' in query and '["landuse"="police"]' in query and '["police"]' in query
 
 
 def test_osm_multipolygon_joins_reversed_members_and_preserves_holes():
@@ -133,11 +194,10 @@ def test_gdacs_repairs_official_nested_points_filters_bbox_and_sanitizes():
     assert feature["properties"]["source_url"] == "https://www.gdacs.org/report.aspx?eventtype=EQ&eventid=1"
 
 
-@pytest.mark.parametrize("pack", ["firms", "acled"])
-def test_keyed_providers_are_not_silently_called_without_credentials(pack):
+def test_firms_is_not_called_without_credentials():
     calls = []
     with pytest.raises(source.ProviderError, match="settings"):
-        source.load_pack(pack, AREA, fetch=transport({}, calls))
+        source.load_pack("firms", AREA, fetch=transport({}, calls))
     assert not calls
 
 
@@ -162,37 +222,6 @@ def test_firms_bad_key_response_is_safe():
     assert "ExampleSecret123" not in str(exc.value)
 
 
-def test_acled_filters_bbox_and_date_and_preserves_approximation():
-    calls = []
-    rows = [{"event_id_cnty": "TEST1", "latitude": "52.05", "longitude": "4.85", "event_date": "2026-09-06", "geo_precision": "3", "sub_event_type": "Peaceful protest", "location": "Example", "notes": "Published report"}]
-    result = source.load_pack("acled", AREA, {"acled_token": "private-token"}, fetch=transport({"status": 200, "data": rows}, calls))
-    props = result["features"][0]["properties"]
-    assert props["precision"] == 3
-    assert "Approximate administrative area" in props["detail"]
-    assert props["title"] == "Peaceful protest · Example"
-    assert "private-token" not in json.dumps(result)
-    query = parse_qs(urlsplit(calls[0][0]).query)
-    assert query["latitude"] == ["52.0|52.1"]
-    assert query["longitude_where"] == ["BETWEEN"]
-    assert query["event_date_where"] == ["BETWEEN"]
-    assert "private-token" not in calls[0][0]
-    assert calls[0][1]["headers"]["Authorization"] == "Bearer private-token"
-
-
-def test_acled_expired_token_response_does_not_echo_secret():
-    with pytest.raises(source.ProviderError) as exc:
-        source.load_pack("acled", AREA, {"acled_token": "private-token"}, fetch=transport({"status": 401, "error": "expired private-token"}))
-    assert "private-token" not in str(exc.value)
-    assert "access token" in str(exc.value)
-
-
-def test_refuses_secret_header_injection():
-    calls = []
-    with pytest.raises(source.ProviderError, match="format"):
-        source.load_pack("acled", AREA, {"acled_token": "foo\r\nBad: header"}, fetch=transport({}, calls))
-    assert not calls
-
-
 def test_oversize_response_is_rejected_before_parse(monkeypatch):
     monkeypatch.setattr(source, "GDACS_MAX_BYTES", 20)
     with pytest.raises(source.ProviderError, match="too large"):
@@ -200,7 +229,7 @@ def test_oversize_response_is_rejected_before_parse(monkeypatch):
 
 
 def test_transport_refuses_arbitrary_urls_before_network():
-    for url in ("http://127.0.0.1/", "https://example.com/", "https://acleddata.com@127.0.0.1/api/acled/read", "https://acleddata.com/api/acled/read#secret"):
+    for url in ("http://127.0.0.1/", "https://example.com/", "https://www.gdacs.org@127.0.0.1/contentdata/xml/gdacsAPP_Home.geojson", source.GDACS_URL + "#fragment"):
         with pytest.raises(source.ProviderError, match="Unsupported"):
             source.fetch_bytes(url)
 

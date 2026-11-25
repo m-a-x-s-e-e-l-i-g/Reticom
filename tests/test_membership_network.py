@@ -33,6 +33,9 @@ def test_real_membership_queue_admission_and_revocation(tmp_path):
         api(phone_port,"/api/team/join",{"join_code":team["join_code"],"callsign":"Phone"})
         key=api(phone_port,"/api/state")["network"]["identity"]
         eventually(lambda:any(item["identity"]==key for item in api(host_port,"/api/team/members")["requests"]))
+        assert api(host_port,"/api/command/membership-requests")["teams"] == [
+            {"id": "default", "name": "Approval test", "count": 1}
+        ]
         blocked=api(phone_port,"/api/feed")
         assert not any(e["id"]==secret["id"] for e in blocked["events"])
         assert blocked["network"]["online"] is False
@@ -43,6 +46,7 @@ def test_real_membership_queue_admission_and_revocation(tmp_path):
             denied=client.post(f"http://127.0.0.1:{phone_port}/api/team/members",json={"identity":key,"status":"approved"})
             assert denied.status_code==403
         api(host_port,"/api/team/members",{"identity":key,"status":"approved"})
+        assert api(host_port,"/api/command/membership-requests")["teams"] == []
         eventually(lambda:api(phone_port,"/api/state")["team"]["membership_status"]=="approved")
         eventually(lambda:any(e["id"]==queued["id"] for e in api(host_port,"/api/state")["events"]))
         eventually(lambda:any(e["id"]==secret["id"] for e in api(phone_port,"/api/feed")["events"]))

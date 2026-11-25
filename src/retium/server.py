@@ -23,7 +23,7 @@ from .live_voice import LIVE_VOICE_MAX_CHUNK, LiveVoiceError
 from .live_heading import HeadingClient, clock_ms, interval as heading_interval, TTL_MS
 from .offline_maps import OfflineMapError, OfflineMapStore
 from .offline_routing import offline_routing_router
-from .intel_packs import intel_router
+from .intel_packs import SHARED_INTEL_BYTES, SHARED_INTEL_KEYS, intel_router
 from .landmarks import landmark_router
 from .outbox import FieldOutbox
 from .protocol import ProtocolError, new_event
@@ -63,7 +63,7 @@ def create_app(
         from .command import create_command_app
 
         from functools import partial
-        return create_command_app(config_dir, data_dir, partial(create_node_app, command_ai=True))
+        return create_command_app(config_dir, data_dir, partial(create_node_app, command_ai=True), local_membership_request)
     return create_node_app(role, config_dir, data_dir, gateway_hash)
 
 
@@ -131,6 +131,17 @@ def create_node_app(
             and (hosted_service.continuity is None or hosted_service.continuity.ready())
         )
 
+    def field_has_admin() -> bool:
+        return field_hosts_team() or bool(
+            team_membership and isinstance(service, FieldSender) and service.membership_status == "approved"
+            and (team_membership.everyone_admin or getattr(service, "membership_admin", False))
+        )
+
+    def intel_host():
+        if isinstance(service, FieldSender) and team_membership and team_membership.joined and not field_hosts_team():
+            return service.identity, team_membership.destination, field_has_admin()
+        return None
+
     def field_team_state(
         discovered_name: str | None = None,
         discovered_modules: Any = None,
@@ -142,7 +153,7 @@ def create_node_app(
         )
         state["hosted"] = field_hosts_team()
         state["membership_status"] = "approved" if field_hosts_team() else getattr(service, "membership_status", "unknown")
-        state["admin"] = field_hosts_team() or (state["everyone_admin"] and state["membership_status"] == "approved")
+        state["admin"] = field_has_admin()
         return state
 
     def field_event_store(destination: str | None = None) -> EventStore | None:
@@ -422,6 +433,49 @@ def create_node_app(
             everyone_admin=team_profile.everyone_admin,
         )
         gateway.continuity = TeamContinuity(gateway, profile, task_store, private_store, ptt_store, replication_root)
+
+        def shared_intel(path, data, request_id, link_id, remote_identity, requested_at):
+            pack_id = path.rsplit("/", 1)[-1]
+            error = gateway._identity_error(remote_identity)
+            if error is not None:
+                return error
+            intel = getattr(app.state, "host_intel", public_intel.store)
+            try:
+                if not isinstance(data, dict):
+                    raise ValueError("Invalid shared map request")
+                if set(data) == {"key"}:
+                    if not gateway.member_is_admin(remote_identity.hash.hex()):
+                        return b'{"error":"Team admin rights are required"}'
+                    intel.provide_shared_key(pack_id, data["key"])
+                    return b'{"configured":true}'
+                fields = {"bounds", "zoom", "firms_days"} if pack_id == "firms" else {"bounds", "zoom"}
+                if set(data) != fields:
+                    raise ValueError("Invalid shared map request")
+                result = intel.shared_view(pack_id, data["bounds"], data["zoom"], data.get("firms_days"))
+                if pack_id == "notams" and result.get("waiting_for_host"):
+                    result["waiting_for_notams"] = True
+            except (ValueError, TypeError) as exc:
+                return json.dumps({"error": str(exc)}).encode()
+            except OSError:
+                return b'{"error":"The team host could not save provider settings"}'
+            if not gateway.member_allowed(remote_identity):
+                return b'{"error":"Team membership approval required"}'
+            features = result.pop("features")
+            packed = []
+            size = 2048
+            for feature in features:
+                item = json.dumps(feature, ensure_ascii=True, separators=(",", ":"))
+                if size + len(item) + 1 > SHARED_INTEL_BYTES:
+                    result["truncated"] = True
+                    continue
+                packed.append(item)
+                size += len(item) + 1
+            header = json.dumps(result, separators=(",", ":"))[:-1]
+            reply = (f'{{"{pack_id}":{header},"features":[{",".join(packed)}]}}}}').encode()
+            return reply if len(reply) <= SHARED_INTEL_BYTES else b'{"error":"Shared map response is too large"}'
+
+        for pack_id in SHARED_INTEL_KEYS:
+            gateway.destination.register_request_handler(f"/intel/{pack_id}", response_generator=shared_intel, allow=RNS.Destination.ALLOW_ALL)
         if role == "field" and not replication_root:
             local_identity = _load_or_create_identity(data_dir / "field.identity")
             if not gateway.membership.approved(local_identity.hash.hex()):
@@ -461,24 +515,32 @@ def create_node_app(
         destination = team_membership.destination
         cache = field_event_store(destination)
         assert cache is not None
-        report_admin = False
+        map_admin = False
         if event["type"] == "report.dismissed":
             target = cache.automatic_report_source(event["message_id"])
             if target is None:
                 raise ProtocolError("automatic report source not found in the local team feed")
-            report_admin = target["sender_hash"] != service.identity.hash.hex()
-            if report_admin and not team_membership.everyone_admin:
+            map_admin = target["sender_hash"] != service.identity.hash.hex()
+            if map_admin and not field_has_admin():
                 raise ProtocolError("only the reporter or a team admin can remove this automatic report")
+        if event["type"] in {"marker.deleted", "drawing.deleted"}:
+            kind = event["type"].split(".", 1)[0]
+            target = cache.map_event(event[f"{kind}_id"], f"{kind}.created")
+            if target is None:
+                raise FileNotFoundError("Map item not found")
+            map_admin = target["sender_hash"] != service.identity.hash.hex()
+            if map_admin and not field_has_admin():
+                raise PermissionError("Only the author or a team admin can remove this map item")
         if event["type"] == "marker.status":
             target = cache.map_event(event["marker_id"], "marker.created")
             if target is None:
                 raise ProtocolError("marker not found in the local team feed")
-            if target["sender_hash"] != service.identity.hash.hex() and not team_membership.everyone_admin:
+            if target["sender_hash"] != service.identity.hash.hex() and not field_has_admin():
                 raise ProtocolError("only the reporter or a team admin can change this marker")
         cache.insert(
             event,
             service.identity.hash.hex(),
-            interface_name="Local team admin · Reticulum outbox" if report_admin else "Local device · Reticulum outbox",
+            interface_name="Local team admin · Reticulum outbox" if map_admin else "Local device · Reticulum outbox",
             delivery_status="queued",
         )
         field_outbox.add(destination, event, linked=linked)
@@ -512,10 +574,11 @@ def create_node_app(
                 break
             field_outbox.remove(event["id"])
             if cache is not None:
+                moderated = event["type"] in {"report.dismissed", "marker.deleted", "drawing.deleted"}
                 cache.mark_verified(
                     event["id"],
                     packet_hash=delivery.get("packet_hash"),
-                    interface_name="Team admin · Authenticated Reticulum Link" if event["type"] == "report.dismissed" else "Authenticated Reticulum delivery",
+                    interface_name="Team admin · Authenticated Reticulum Link" if moderated else "Authenticated Reticulum delivery",
                 )
 
     def schedule_field_outbox_flush() -> None:
@@ -527,7 +590,8 @@ def create_node_app(
             or not team_membership.destination
             or field_outbox is None
             or field_outbox.count(team_membership.destination) == 0
-            or (not field_hosts_team() and getattr(service, "membership_status", "unknown") != "approved")
+            or field_hosts_team()
+            or getattr(service, "membership_status", "unknown") != "approved"
         ):
             return
         destination = team_membership.destination
@@ -592,9 +656,11 @@ def create_node_app(
         while not continuity_stopping:
             try:
                 if isinstance(service, FieldSender) and team_membership is not None and team_membership.joined:
+                    if not field_hosts_team():
+                        schedule_field_outbox_flush()
                     if not field_hosts_team() and (checked_team != team_membership.destination or time.monotonic() - checked_at > 15):
                         checked_team, checked_at = team_membership.destination, time.monotonic()
-                        await asyncio.to_thread(service.request_membership, user_profile.callsign)
+                        await asyncio.to_thread(service.request_membership, user_profile.callsign, command=command_ai)
                     directory = service.host_directory
                     if directory is not None:
                         gateway = active_gateway()
@@ -623,8 +689,6 @@ def create_node_app(
                             else:
                                 hosted_service.publish_local_field_event(event, service.identity, admin=True)
                             field_outbox.remove(event["id"])
-                    else:
-                        schedule_field_outbox_flush()
             except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
                 # Connectivity failure is expected; keep local work and retry.
                 if active_gateway() and active_gateway().continuity:
@@ -808,8 +872,9 @@ def create_node_app(
             field_outbox.close()
 
     app = FastAPI(title="Reticom", version="0.1.0", lifespan=lifespan)
-    public_intel = intel_router(data_dir)
+    public_intel = intel_router(data_dir, intel_host=lambda request: intel_host(), local_request=local_membership_request)
     app.include_router(public_intel)
+    app.state.intel_host = intel_host
     app.include_router(landmark_router())
     offline_routes = offline_routing_router(data_dir)
     app.include_router(offline_routes)
@@ -830,8 +895,7 @@ def create_node_app(
         if (
             role != "field" or not isinstance(service, FieldSender)
             or team_membership is None or not team_membership.joined
-            or not team_membership.everyone_admin
-            or service.membership_status != "approved"
+            or not field_has_admin()
         ):
             raise HTTPException(403, "Team admin rights are required")
         return service
@@ -841,10 +905,18 @@ def create_node_app(
         candidates = [{"identity": item["sender_hash"], "callsign": item["callsign"]}
             for item in gateway.store.operators(since=gateway.team_created_at)
             if item["sender_hash"] != gateway.identity.hash.hex() and gateway.membership.status(item["sender_hash"]) == "pending"]
-        state = gateway.membership.listing()
+        state = {**gateway.membership.listing(), "can_grant_admin": True}
         known = {item["identity"] for item in state["requests"]}
         state["requests"].extend({**item, "previously_seen": True} for item in candidates if item["identity"] not in known)
         return state
+
+    def pending_membership_count() -> int:
+        gateway = active_gateway()
+        if gateway is None or not gateway.membership.owner or not team_profile or not team_profile.name:
+            return 0
+        return len(gateway.membership.listing()["requests"])
+
+    app.state.pending_membership_count = pending_membership_count
 
     @app.get("/api/team/members")
     async def members(request: Request):
@@ -874,13 +946,15 @@ def create_node_app(
                 if len(raw) > 2048:
                     raise ValueError("Membership decision is too large")
             body = json.loads(raw)
-            if not isinstance(body, dict) or set(body) - {"identity", "status", "callsign"}:
+            if not isinstance(body, dict) or set(body) - {"identity", "status", "callsign", "admin"}:
                 raise ValueError("Invalid membership decision")
             try:
                 gateway = membership_owner(request)
             except HTTPException as owner_error:
                 if owner_error.status_code != 403:
                     raise
+                if "admin" in body:
+                    raise HTTPException(403, "Only the team owner can grant or remove Command admin rights")
                 sender = field_membership_admin(request)
                 try:
                     state = await asyncio.to_thread(sender.request_membership_admin, body)
@@ -894,7 +968,8 @@ def create_node_app(
                 return JSONResponse(state, headers={"Cache-Control": "no-store"})
             if isinstance(service, FieldSender) and body.get("identity") == service.identity.hash.hex():
                 raise ValueError("The hosting device cannot revoke itself")
-            await asyncio.to_thread(gateway.membership.decide, body.get("identity"), body.get("status"), body.get("callsign"))
+            await asyncio.to_thread(gateway.membership.decide, body.get("identity"), body.get("status"), body.get("callsign"),
+                                    admin=body.get("admin"))
             gateway.enforce_membership()
             return JSONResponse(membership_listing(gateway), headers={"Cache-Control": "no-store"})
         except (ValueError, TypeError, UnicodeDecodeError) as exc:
@@ -1139,7 +1214,8 @@ def create_node_app(
             else:
                 destination = team_membership.destination
                 cache = field_event_store(destination)
-                if not service.state().get("path_known"):
+                path_known = service.state().get("path_known")
+                if not path_known and not command_ai:
                     return JSONResponse(
                         {
                             "events": cache.mission_events() if cache is not None else [],
@@ -1157,7 +1233,7 @@ def create_node_app(
                     )
                 async with field_mission_lock:
                     inbox = mission_inbox(destination)
-                    payload = await asyncio.to_thread(service.request_feed, 20.0, inbox.request())
+                    payload = await asyncio.to_thread(service.request_feed, 20.0 if path_known else 4.0, inbox.request())
                     if team_membership.destination != destination:
                         raise ValueError("Team changed during mission sync")
                     if "mission" in payload or payload.get("mission_restart"):
@@ -1166,6 +1242,8 @@ def create_node_app(
                         payload["team"] = saved["team"]
                         payload["private_events"] = saved["private_events"]
                         payload["mission_sync"] = mission_status(destination)
+                        if command_ai and payload.get("mission", {}).get("complete"):
+                            publish_from_reticulum({"type": "mission.synced"})
                         payload.pop("records", None)
                         payload.pop("mission", None)
                     else:
@@ -1280,7 +1358,7 @@ def create_node_app(
                 or not isinstance(service, FieldSender)
                 or team_membership is None
                 or not team_membership.joined
-                or not team_membership.everyone_admin
+                or not field_has_admin()
             ):
                 raise PermissionError("team admin rights are required")
             result = await asyncio.to_thread(
@@ -1551,7 +1629,7 @@ def create_node_app(
                     not isinstance(service, FieldSender)
                     or team_membership is None
                     or not team_membership.joined
-                    or not team_membership.everyone_admin
+                    or not field_has_admin()
                 ):
                     raise PermissionError("team admin rights are required")
                 result = await asyncio.to_thread(
@@ -1596,7 +1674,7 @@ def create_node_app(
                     not isinstance(service, FieldSender)
                     or team_membership is None
                     or not team_membership.joined
-                    or not team_membership.everyone_admin
+                    or not field_has_admin()
                 ):
                     raise PermissionError("team admin rights are required")
                 result = await asyncio.to_thread(
@@ -2010,7 +2088,12 @@ def create_node_app(
                 delivery = await asyncio.to_thread(
                     publish_field_event_sync, event, linked=True
                 )
+                schedule_field_outbox_flush()
             return JSONResponse({"event": event, "delivery": delivery})
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except (ProtocolError, TypeError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except TimeoutError as exc:
@@ -2125,6 +2208,7 @@ def create_node_app(
                 delivery = await asyncio.to_thread(
                     publish_field_event_sync, event, linked=True
                 )
+                schedule_field_outbox_flush()
             fixed = command_position() if command_ai else None
             if kind == "marker" and fixed and fixed.get("marker_id") == map_event_id:
                 command_position_path.unlink(missing_ok=True)
@@ -2226,7 +2310,7 @@ def create_node_app(
 
     @app.websocket("/api/live")
     async def live(websocket: WebSocket) -> None:
-        if role != "gateway":
+        if role != "gateway" and not command_ai:
             await websocket.close(code=1008, reason="Command stream only")
             return
         await websocket.accept()
@@ -2265,6 +2349,7 @@ def create_node_app(
         voice_transport: GatewayReceiver | FieldSender = (
             hosted_service if field_hosts_team() and hosted_service is not None else service
         )
+        live_origin = {"origin_identity": service.identity} if voice_transport is not service else {}
 
         await websocket.accept()
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=96)
@@ -2327,7 +2412,7 @@ def create_node_app(
                                 "color": user_profile.color,
                             }
                             delivery = await asyncio.to_thread(
-                                voice_transport.send_live_start, stream_id, metadata
+                                voice_transport.send_live_start, stream_id, metadata, **live_origin
                             )
                             active_stream = stream_id
                             chunk_sequence = 0

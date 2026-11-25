@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from retium.speech_markers import InterpretationError, SpeechMarkerProcessor, resolve_location, validate_interpretation
+from retium.speech_markers import InterpretationError, LocalInterpreter, SpeechMarkerProcessor, resolve_location, validate_interpretation
 from retium.protocol import validate_event
 
 SOURCE = {"id": "00112233-4455-6677-8899-aabbccddeeff", "type": "ptt.broadcast", "callsign": "Scout",
@@ -19,6 +19,16 @@ RESULT = {"decision": "markers", "reason": "Reported heat signature", "markers":
 @pytest.fixture(autouse=True)
 def current_time(monkeypatch):
     monkeypatch.setattr("retium.speech_markers.time.time", lambda: 1005)
+
+
+def test_local_model_timeout_reports_a_slow_model(monkeypatch):
+    def timed_out(request, *, timeout):
+        assert timeout == 240
+        raise TimeoutError
+
+    monkeypatch.setattr("retium.speech_markers.urlopen", timed_out)
+    with pytest.raises(InterpretationError, match="took too long"):
+        LocalInterpreter().interpret("All right.")
 
 
 def test_reference_positions_are_grounded_in_sender_and_recent_fixes():

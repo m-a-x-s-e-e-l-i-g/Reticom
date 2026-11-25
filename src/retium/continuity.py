@@ -303,10 +303,12 @@ class TeamContinuity:
                 incoming = data.get("membership")
                 if incoming and self.gateway.membership.accept(incoming):
                     self.gateway.enforce_membership()
+                if data.get("admin_roles"):
+                    self.gateway.membership.accept_roles(data["admin_roles"])
                 # Pending requests are untrusted display labels, never approvals.
                 for item in data.get("requests", [])[:128]:
-                    self.gateway.membership.request(item["identity"], item["callsign"])
-                return canonical({"membership": self.gateway.membership.envelope})
+                    self.gateway.membership.request(item["identity"], item["callsign"], command=item.get("command", False))
+                return canonical({"membership": self.gateway.membership.envelope, "admin_roles": self.gateway.membership.roles})
             if path == "/continuity/page":
                 return canonical(self.tables[data["table"]].page(data.get("after", 0)))
             if path == "/continuity/audio":
@@ -330,9 +332,12 @@ class TeamContinuity:
         common = {"team": self.root, "policy": policy}
         access = json_rpc(self.gateway.identity, peer["destination"], "/continuity/membership", {
             **common, "membership": self.gateway.membership.envelope,
+            "admin_roles": self.gateway.membership.roles,
             "requests": self.gateway.membership.listing()["requests"]}, public_key=peer["public_key"], max_response_size=150000)
         if access.get("membership") and self.gateway.membership.accept(access["membership"]):
             self.gateway.enforce_membership()
+        if access.get("admin_roles"):
+            self.gateway.membership.accept_roles(access["admin_roles"])
         heads = {}
         for name, table in self.tables.items():
             if self.stop_event.is_set():

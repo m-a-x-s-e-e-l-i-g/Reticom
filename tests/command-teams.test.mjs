@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import {runInNewContext} from 'node:vm';
 import {teamApiUrl, teamPageUrl} from '../src/retium/static/command-teams.js';
 
 test('Command position is scoped to the selected team, including when default is stopped', () => {
@@ -21,6 +22,33 @@ test('Field, legacy Command, external routes and workspace management remain uns
 });
 test('switching team preserves unrelated app flags', () => {
   assert.equal(teamPageUrl('bravo', 'http://localhost:8780/?live-ptt=1&team=alpha'), 'http://localhost:8780/?live-ptt=1&team=bravo');
+});
+
+test('Command opens All Teams at startup when a saved or nearby team exists', async () => {
+  const js = readFileSync(new URL('../src/retium/static/app.js', import.meta.url), 'utf8');
+  const start = js.indexOf('async function loadCommandTeams(');
+  const code = js.slice(start, js.indexOf('let workspaceMembershipLoading', start));
+  for (const [query, teams, nearby, expected] of [
+    ['', [{id: 'bravo', hosting: false}], false, '?team=all'],
+    ['?live-ptt=1', [], true, '?live-ptt=1&team=all'],
+    ['', [], false, null],
+    ['?team=default', [{id: 'default'}], true, null],
+    ['?team=none', [{id: 'bravo'}], true, null],
+  ]) {
+    const origin = 'http://localhost:8780/';
+    let redirected = null;
+    const result = await runInNewContext(`${code}\nloadCommandTeams(true)`, {
+      URL, teamPageUrl, commandWorkspace: false, commandAllTeams: false,
+      commandOverview: query === '?team=none', selectedCommandTeam: 'default',
+      location: {href: origin + query, replace: url => { redirected = url; }},
+      fetch: async () => ({ok: true, json: async () => ({teams})}),
+      loadCommandNearby: async () => nearby,
+      $: () => ({classList: {remove() {}, toggle() {}}}),
+      escapeHtml: value => value,
+    });
+    assert.equal(redirected, expected ? origin + expected : null);
+    assert.equal(result, Boolean(expected));
+  }
 });
 
 test('Command exposes code entry, real discovery and recoverable local removal', () => {

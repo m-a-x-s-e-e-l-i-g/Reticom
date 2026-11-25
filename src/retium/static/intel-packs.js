@@ -2,33 +2,98 @@
 import {ROAD_COLOR} from "./outdoor-map.js?v=20260907-5";
 import {GDACS_TYPES, GDACS_COLOR, GDACS_ICON, gdacsCode, gdacsIconSvg, gdacsDisplayData, normalizeGdacsTypes, installGdacsIcons} from "./gdacs-markers.js?v=20260907-1";
 import {prepareContourTiles, contourLayers, contourInterval, CONTOUR_MIN_ZOOM, CONTOUR_MAX_ZOOM} from "./terrain-contours.js?v=20260907-3";
-import {lidarLayers, lidarModeLabel, lidarModeForProvider, lidarProviderForBounds, lidarSource, lidarTileUrl, normalizeAhnMode, AHN_MODES} from "./ahn-layer.js?v=20260914-2";
-import {environmentLayers, environmentSource, environmentTileUrl, ENVIRONMENT_RASTER_IDS, ENVIRONMENT_RASTERS, ENVIRONMENT_MIN_ZOOM} from "./environment-layers.js?v=20260914-1";
-import {TRAFFIC_IDS, TRAFFIC_TYPES, normalizeTrafficFilters, trafficDisplayData, installTrafficIcons, trafficLayers} from "./traffic-map.js?v=20260909-3";
+import {lidarLayers, lidarModeLabel, lidarModeForProvider, lidarProviderForBounds, lidarSource, lidarTileUrl, normalizeAhnMode, AHN_MODES} from "./ahn-layer.js?v=20261125-1";
+import {environmentLayers, environmentSource, environmentTileUrl, ENVIRONMENT_RASTER_IDS, ENVIRONMENT_RASTERS, ENVIRONMENT_MIN_ZOOM} from "./environment-layers.js?v=20261125-1";
+import {TRAFFIC_IDS, TRAFFIC_TYPES, normalizeTrafficFilters, trafficDisplayData, installTrafficIcons, trafficLayers} from "./traffic-map.js?v=20261125-1";
 import {TrafficMotion, createTrafficAnimator} from "./traffic-motion.js?v=20260909-3";
-import {TrafficTracks, trafficKey, showTrafficTrack, clearTrafficTrack} from "./traffic-tracks.js?v=20260909-3";
+import {TrafficTracks, trafficKey, showTrafficTrack, showTrafficEstimate, clearTrafficTrack} from "./traffic-tracks.js?v=20261125-2";
 import {retainTraffic} from "./traffic-cache.js?v=20260909-3";
 import {retainIntel} from "./intel-cache.js?v=20260909-4";
 import {roadDisplayData, retainRoads, roadLayers, ROAD_IMPACTS, ROAD_TYPES, normalizeRoadFilters, filterRoadReports} from "./road-disruptions.js?v=20260909-7";
 const EMPTY = () => ({type: "FeatureCollection", features: []});
 // Trails are always-on basemap data, not a separately fetched/toggled intel pack.
-const IDS = ["military", "roads", "acled", "firms", "gdacs", "elevation", "ahn", ...ENVIRONMENT_RASTER_IDS, ...TRAFFIC_IDS];
+const IDS = ["military", "roads", "firms", "gdacs", "notams", "transit", "elevation", "ahn", ...ENVIRONMENT_RASTER_IDS, ...TRAFFIC_IDS];
 const CLIENT_RASTER_IDS = new Set(["elevation", "ahn", ...ENVIRONMENT_RASTER_IDS]);
-const COLORS = {trails: "#8f9c77", military: "#ad9774", acled: "#ba8077", firms: "#c49367", gdacs: "#b6a578"};
+const COLORS = {trails: "#8f9c77", military: "#ad9774", firms: "#c49367", gdacs: "#b6a578", notams: "#c4a3ff"};
 const PREFIX = "public-intel-";
 const ACCESS = {
   firms_key: {pack: "firms", title: "NASA FIRMS map key", url: "https://firms.modaps.eosdis.nasa.gov/api/map_key/", link: "Get a NASA FIRMS map key"},
-  acled_token: {pack: "acled", title: "ACLED access token", url: "https://acleddata.com/api-documentation/getting-started", link: "Account and token instructions"},
   aisstream_key: {pack: "vessels", title: "AISStream API key", url: "https://aisstream.io/", link: "Create an AISStream key / check access terms"},
+  aishub_key: {pack: "vessels", title: "AISHub contributor key", url: "https://www.aishub.net/join-us", link: "AISHub contributor access"},
+  bravoecho_key: {pack: "notams", title: "BravoEcho API key", url: "https://bravoecho.ai/docs/getting-a-key", link: "Get a BravoEcho API key"},
+  host_bravoecho_key: {pack: "notams", title: "Set up BravoEcho on the team host", url: "https://bravoecho.ai/docs/getting-a-key", link: "Get a BravoEcho API key"},
+  host_firms_key: {pack: "firms", title: "Set up NASA FIRMS on the team host", url: "https://firms.modaps.eosdis.nasa.gov/api/map_key/", link: "Get a NASA FIRMS map key"},
 };
+const SHARED_LAYERS = ["notams", "firms"];
 const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[char]);
 const sourceId = id => `${PREFIX}${id}`;
+const TRAFFIC_SOURCES = new Set(TRAFFIC_IDS.map(sourceId));
 const isEnvironmentRaster = id => ENVIRONMENT_RASTER_IDS.includes(id);
-const layerIds = id => (TRAFFIC_IDS.includes(id) ? ["points", "icons", "labels"] : id === "elevation" ? ["lines", "labels", "minor-labels"] : id === "ahn" || ENVIRONMENT_RASTER_IDS.includes(id) ? ["raster"] : id === "gdacs" ? ["areas", "lines", "tracks", "points", "icons", "labels"] : id === "trails" ? ["areas", "lines", "points", "labels", "route-labels"] : ["areas", "lines", "points", "labels"]).map(kind => `${PREFIX}${id}-${kind}`);
+const layerIds = id => (TRAFFIC_IDS.includes(id) ? ["points", "icons", "labels"] : id === "transit" ? ["points", "labels"] : id === "notams" ? ["lines", "local-lines", "points"] : id === "elevation" ? ["lines", "labels", "minor-labels"] : id === "ahn" || ENVIRONMENT_RASTER_IDS.includes(id) ? ["raster"] : id === "gdacs" ? ["areas", "lines", "tracks", "points", "icons", "labels"] : id === "military" ? ["areas", "lines", "points", "police-stations", "labels"] : id === "trails" ? ["areas", "lines", "points", "labels", "route-labels"] : ["areas", "lines", "points", "labels"]).map(kind => `${PREFIX}${id}-${kind}`);
+const MILITARY_BASEMAP = `${PREFIX}military-basemap`;
+const POLICE_COLOR = "#8db9d0";
+const POLICE_ICON = "public-police-shield";
+const POLICE_STATION = ["==", ["get", "kind"], "police_station"];
+const POLICE_LAYOUT = {"icon-image": POLICE_ICON, "icon-size": .85, "icon-allow-overlap": true, "icon-ignore-placement": true};
+const NOTAM_ICONS = {
+  parachuting: "M4 11a8 8 0 0 1 16 0ZM4 11l8 8 8-8M8 11l4 8 4-8",
+  drones: "M9 12h6m-3-3v6M6 6l4 4m8-4-4 4m-8 8 4-4m8 4-4-4M4 5h4M16 5h4M4 19h4m8 0h4",
+  fireworks: "M12 4v4m0 8v4M4 12h4m8 0h4M6 6l3 3m6 6 3 3M18 6l-3 3m-6 6-3 3",
+  model: "M4 13h16M12 4v16m-4-2 4-2 4 2m-9-5 5-4 5 4",
+  airshow: "M4 17l8-12 8 12-8-3ZM12 14v5",
+  other: "M12 6v7m0 4h.01",
+};
+const NOTAM_ACTIVITY_LABELS = {parachuting: "Parachuting", drones: "Drone activity", fireworks: "Fireworks", model: "Model aircraft", airshow: "Air display"};
+
+function installNotamIcons(map) {
+  if (!map.addImage || !globalThis.document || typeof Path2D === "undefined") return;
+  const canvas = document.createElement("canvas"); canvas.width = canvas.height = 48;
+  const ctx = canvas.getContext("2d"); if (!ctx) return;
+  ctx.scale(2, 2);
+  for (const [activity, path] of Object.entries(NOTAM_ICONS)) {
+    const key = `public-notam-${activity}`;
+    if (map.hasImage(key)) continue;
+    ctx.clearRect(0, 0, 24, 24);
+    ctx.beginPath(); ctx.arc(12, 12, 11, 0, Math.PI * 2);
+    ctx.fillStyle = "#191326"; ctx.fill();
+    ctx.strokeStyle = COLORS.notams; ctx.lineWidth = 1.3; ctx.stroke();
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.stroke(new Path2D(path));
+    map.addImage(key, ctx.getImageData(0, 0, 48, 48), {pixelRatio: 2});
+  }
+}
+const MILITARY_FALLBACK_LAYERS = [
+  {id: MILITARY_BASEMAP, type: "fill", "source-layer": "landuse", filter: ["==", ["get", "class"], "military"],
+    paint: {"fill-color": COLORS.military, "fill-opacity": .24, "fill-outline-color": COLORS.military}},
+  {id: `${MILITARY_BASEMAP}-airfield`, type: "line", "source-layer": "aeroway",
+    filter: ["in", ["get", "class"], ["literal", ["aerodrome", "airstrip", "runway"]]],
+    paint: {"line-color": COLORS.military, "line-width": 2, "line-dasharray": [3, 2]}},
+  {id: `${MILITARY_BASEMAP}-police`, type: "symbol", "source-layer": "poi",
+    filter: ["==", ["coalesce", ["get", "subclass"], ["get", "class"]], "police"],
+    layout: POLICE_LAYOUT},
+];
+
+function installPoliceIcon(map) {
+  if (!map.addImage || !globalThis.document || typeof Path2D === "undefined" || map.hasImage(POLICE_ICON)) return;
+  const canvas = document.createElement("canvas"); canvas.width = canvas.height = 48;
+  const ctx = canvas.getContext("2d"); if (!ctx) return;
+  ctx.scale(2, 2);
+  const shield = new Path2D("M12 2 20 5V11C20 16 17 19 12 22 7 19 4 16 4 11V5Z");
+  ctx.lineWidth = 1.7;
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#10171b";
+  ctx.fillStyle = POLICE_COLOR;
+  ctx.fill(shield);
+  ctx.stroke(shield);
+  ctx.fillStyle = "#10171b";
+  ctx.fill(new Path2D("M12 6 13.5 9.6 17.4 10 14.5 12.6 15.4 16.5 12 14.4 8.6 16.5 9.5 12.6 6.6 10 10.5 9.6Z"));
+  map.addImage(POLICE_ICON, ctx.getImageData(0, 0, 48, 48), {pixelRatio: 2});
+}
 const safeLink = value => {
   try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) ? url.href : ""; } catch { return ""; }
 };
 const safeAircraftThumbnail = value => /^\/api\/intel-packs\/live\/flights\/[0-9a-f]{6}\/thumbnail$/.test(String(value || "")) ? value : "";
+const safeVesselThumbnail = value => /^\/api\/intel-packs\/live\/vessels\/[0-9]{9}\/thumbnail\/[1-9][0-9]{0,3}$/.test(String(value || "")) ? value : "";
 const isTeamLayer = layer => /^(verified-|field-|all-team|live-pointing|waypoint-|map-draw|navigation-|shared-navigation)/.test(layer?.id || "") || /^(verified-|field-|all-teams$|shared-navigation)/.test(layer?.source || "");
 
 export function intelViewportBoxes(bounds) {
@@ -64,14 +129,18 @@ export function mergeIntelResults(results) {
     if (!seen.has(key)) { seen.add(key); features.push(feature); }
   }
   const warning = results.find(result => ["error", "needs_key", "zoom_in", "stale", "disabled", "waiting"].includes(result.status));
+  const deferred = results.find(result => result.status === "deferred");
   const timestamps = results.map(result => result.fetched_at).filter(Boolean);
   return {...results[0], ...EMPTY(), features,
-    status: warning ? (features.length ? "stale" : warning.status) : results.every(result => result.status === "uncovered") ? "uncovered" : results.every(result => result.status === "cached") ? "cached" : "fresh",
+    status: warning ? (features.length ? "stale" : warning.status) : deferred ? "deferred" : results.every(result => result.status === "uncovered") ? "uncovered" : results.every(result => result.status === "cached") ? "cached" : "fresh",
     ...(results.some(result => result.replaced_sources) ? {replaced_sources: [...new Set(results.flatMap(result => result.replaced_sources || []))]} : {}),
+    ...(results.some(result => result.waiting_for_host || result.waiting_for_notams) ? {waiting_for_host: true} : {}),
+    ...(results.some(result => result.unresolved_schedules) ? {unresolved_schedules: true} : {}),
     capped: results.some(result => result.capped), truncated: results.some(result => result.truncated),
     ...(results.some(result => result.coverage_complete !== undefined) ? {coverage_complete: results.every(result => result.coverage_complete !== false)} : {}),
     fetched_at: timestamps.length ? timestamps.sort((a, b) => new Date(Number(a) * 1000 || a) - new Date(Number(b) * 1000 || b))[0] : undefined,
     ...(warning ? {error: warning.error, note: warning.note || (results.length > 1 ? "Some of this view could not be refreshed." : undefined)} : {}),
+    ...(!warning && deferred ? {note: deferred.note, coverage_complete: false} : {}),
   };
 }
 
@@ -86,6 +155,7 @@ export function intelStatusText(pack, result) {
   if (pack.configured === false || result?.status === "needs_key") return "Source access needed below";
   if (!result) return pack.id === "elevation" ? "Contour lines · heights in metres" : pack.id === "ahn" ? "National LiDAR · source chosen by map area" : ENVIRONMENT_RASTER_IDS.includes(pack.id) ? `${ENVIRONMENT_RASTERS[pack.id].title} · online only` : "Waiting for a map view";
   if (result.status === "loading") return "Loading this map view…";
+  if (result.status === "deferred") return result.note || "Waiting to download coverage";
   if (result.status === "zoom_in") return result.note || `Zoom in to level ${pack.min_zoom || 10} to load this pack`;
   if (result.status === "error") return result.error || "Source unavailable · try again later";
   if (result.status === "disabled") return "Off";
@@ -109,11 +179,21 @@ export function intelStatusText(pack, result) {
 // refreshes must not insert/remove lines as counts and cache timestamps change.
 export function intelLayerWarning(pack, result) {
   if (!pack.enabled) return "";
+  const hostAccess = pack.host_access || pack.host_notams;
+  if (hostAccess && result?.status === "needs_key") return `The team host needs a ${pack.source} key`;
+  if (hostAccess && result?.status === "waiting") return "Waiting for data from the team host";
+  if (hostAccess && result?.truncated) return "Team host result limit reached. Zoom in for more data.";
   if (pack.configured === false || result?.status === "needs_key") return "Source access needed below";
   if (result?.status === "error") return result.error || "Source unavailable · try again later";
   if (pack.id === "roads" && result?.status === "uncovered") return result.note;
+  if (pack.id === "transit" && ["zoom_in", "uncovered"].includes(result?.status)) return result.note;
+  if (pack.id === "transit" && result?.truncated) return "Public transport result limit reached. Zoom in to see more.";
   if (pack.id === "ahn" && result?.status === "uncovered") return result.note;
   if (result?.status === "stale") return result.error || "Source unavailable · showing saved data";
+  if ((hostAccess || pack.id === "notams") && result?.status === "zoom_in") return "Zoom in to load data for this area";
+  if (pack.id === "notams" && result?.truncated) return "NOTAM result limit reached. Zoom in for more notices.";
+  if (pack.id === "notams" && result?.unresolved_schedules) return "Some notices have unverified timing.";
+  if (result?.status === "deferred") return "";
   if (result?.coverage_complete === false) return "Incomplete coverage · some areas are not available";
   return "";
 }
@@ -132,6 +212,28 @@ export function intelFeatureHtml(feature, pack, result) {
   const title = props.title || props.name || pack.title || "Public map feature";
   const detail = props.detail || props.description || "";
   const observed = stamp(props.observed_at || props.date);
+  if (pack.id === "transit") {
+    const position = props.estimated ? "Estimated from realtime trip updates" : props.feed_timestamp ? "Reported position · feed timestamp" : "Reported vehicle position";
+    return `<article class="intel-feature-popup"><small>${escape(props.mode_label)} · ${escape(props.source)}</small><strong>${escape(title)}</strong>
+      <p>${position}${observed ? ` · ${escape(observed)}` : ""}</p>${props.vehicle ? `<p>Vehicle ${escape(props.vehicle)}</p>` : ""}
+      ${source ? `<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">${escape(props.source)} ↗</a>` : ""}</article>`;
+  }
+  if (pack.id === "notams") {
+    const utc = value => {
+      const date = new Date(value || "");
+      return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 16).replace("T", " ") + " UTC" : "";
+    };
+    const heading = [props.notice_number, title !== props.notice_number ? title : ""].filter(Boolean).join(" · ");
+    const end = props.notam_end ? utc(props.notam_end * 1000) : utc(props.valid_to);
+    const fields = [["Location", props.location], ["Starts", utc(props.notam_start ? props.notam_start * 1000 : props.valid_from)], ["Ends", end ? [end, props.estimated && !props.notam_end ? "estimated" : ""].filter(Boolean).join(" · ") : "No end reported"],
+      ["Schedule", props.schedule], ["Map placement", props.geometry_note]];
+    const phase = props.notam_phase === "upcoming" ? "Starts within an hour" : "Active now";
+    return `<article class="intel-feature-popup"><small>${phase} · ${escape(NOTAM_ACTIVITY_LABELS[props.local_activity] || props.category_label || "NOTAM")}</small><strong>${escape(heading)}</strong>
+      <dl>${fields.filter(([, value]) => value).map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join("")}</dl>
+      <p class="intel-notam-text">${escape(props.notice_text)}</p>
+      <p class="intel-feature-caution">${result?.status === "stale" ? "Cached copy. " : ""}Check your official briefing for flight planning.</p>
+      ${source ? `<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">${escape(pack.attribution || pack.source)} ↗</a>` : ""}</article>`;
+  }
   if (pack.id === "roads") {
     const fields = [["Impact",ROAD_IMPACTS[props.road_impact] || "Unknown"],["Reason",props.reason],
       ["Starts",stamp(props.starts_at, true)],["Ends",stamp(props.ends_at, true) || "Not supplied"],
@@ -149,39 +251,111 @@ export function intelFeatureHtml(feature, pack, result) {
       : props.type_code || props.ship_type_code || TRAFFIC_TYPES[pack.id][props.traffic_type] || "Type unknown";
     const thumbnail = pack.id === "flights" ? safeAircraftThumbnail(props.aircraft_photo_url) : "";
     const fields = [["Position report", observed], ["Age", age], ["Map position", props.motion_status || "Reported position"],
-      ["Track", props.track_label], ["Prediction", props.prediction_seconds > 0 ? `${Math.round(props.prediction_seconds)} seconds beyond report` : null],
-      ["Category", TRAFFIC_TYPES[pack.id][props.traffic_type] || "Unknown"], ["ICAO type", props.aircraft_type_code || props.type_code || props.ship_type_code || "Unknown"],
+      ["Prediction", props.prediction_seconds > 0 ? `${Math.round(props.prediction_seconds)} seconds beyond report` : null],
+      ["Category", TRAFFIC_TYPES[pack.id][props.traffic_type] || "Unknown"], [pack.id === "flights" ? "ICAO type" : "Ship type code", props.aircraft_type_code || props.type_code || props.ship_type_code || "Unknown"],
       [pack.id === "flights" ? "ICAO address" : "MMSI", props.identity], ["Registration", props.aircraft_registration || props.registration], ["Callsign", props.callsign],
       ["Speed", props.speed_knots == null ? "Unknown" : `${Number(props.speed_knots).toFixed(1)} kn`], ["Direction", props.heading == null ? "Unknown" : `${Math.round(props.heading)}°`],
-      ...(pack.id === "flights" ? [["Altitude", props.altitude_m == null ? props.altitude_reference : `${props.altitude_m} m · barometric`], ["Registered owner", props.aircraft_owner]] : [["Destination", props.destination]])];
-    const summary = [[props.aircraft_registration || props.registration || (pack.id === "flights" ? "Registration unknown" : null), "registration"], [altitude, "altitude"], [speed, "speed"], [age, "age"]]
-      .filter(([value]) => value).map(([value, label]) => `<span title="${escape(label)}">${escape(value)}</span>`).join("");
-    const photoSource = safeLink(props.aircraft_photo_source);
-    return `<article class="intel-feature-popup intel-traffic-popup"><small>PUBLIC ${pack.id === "flights" ? "AIRCRAFT" : "VESSEL"} · ${escape(pack.source)}</small><div class="intel-traffic-summary">${thumbnail ? `<img class="intel-aircraft-photo" src="${escape(thumbnail)}" alt="Public photo of ${escape(type || title)}" loading="lazy">` : ""}<div><strong>${escape(title)}</strong><p class="intel-traffic-type">${escape(type)}</p><div class="intel-traffic-facts">${summary}</div></div></div><details class="intel-traffic-details"><summary>${pack.id === "flights" ? "Flight details" : "Vessel details"}</summary><dl>${fields.filter(([, value]) => value !== undefined && value !== null && value !== "").map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join("")}</dl><p>${escape(props.classification_note)}</p><p class="intel-feature-caution">Coverage and classifications are incomplete. Reports may be delayed or incorrect. Not a verified team report or a navigation/collision-avoidance service.${props.stale ? " This position is stale." : ""}</p></details>${props.aircraft_model ? `<small>Aircraft details · ADSBDB public database</small>` : ""}${photoSource ? `<a href="${escape(photoSource)}" target="_blank" rel="noopener noreferrer">Photo source ↗</a>` : ""}${source ? `<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">${escape(pack.attribution)} ↗</a>` : ""}</article>`;
+      ...(pack.id === "flights" ? [["Altitude", props.altitude_m == null ? props.altitude_reference : `${props.altitude_m} m · barometric`], ["Registered owner", props.aircraft_owner]] : [["Reported length", props.length_m ? `${props.length_m} m` : null], ["Destination", props.destination]])];
+    if (pack.id === "flights") {
+      const photoSource = safeLink(props.aircraft_photo_source);
+      const registration = props.aircraft_registration || props.registration;
+      const heading = [title, registration && registration !== title ? registration : null].filter(Boolean).join(" · ");
+      const telemetry = [altitude, props.speed_knots != null ? speed : null, age !== "Time unknown" ? age : null].filter(Boolean).join(" · ");
+      const position = props.motion_status === "Reported position" ? "" : props.motion_status;
+      const identity = String(props.identity || "").toLowerCase();
+      const traceDay = new Date(Number(props.position_time) * 1000);
+      const historyUrl = /^[0-9a-f]{6}$/.test(identity) && Number.isFinite(traceDay.getTime())
+        ? `https://adsb.lol/?icao=${identity}&showTrace=${traceDay.toISOString().slice(0, 10)}` : "";
+      const extra = [["Aircraft", type !== "Type unknown" ? type : null], ...fields.filter(([label]) =>
+        !["Age", "Map position", "Registration", "Callsign", "Speed", "Altitude"].includes(label))];
+      const rows = extra.filter(([, value]) => value != null && value !== "" && value !== "Unknown")
+        .map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join("");
+      const links = [source && `<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">${escape(props.attribution || pack.attribution || pack.source)} ↗</a>`,
+        historyUrl && `<a href="${escape(historyUrl)}" target="_blank" rel="noopener noreferrer">ADSB.lol history ↗</a>`,
+        photoSource && `<a href="${escape(photoSource)}" target="_blank" rel="noopener noreferrer">Photo source ↗</a>`].filter(Boolean).join("");
+      return `<article class="intel-feature-popup intel-traffic-card"><strong>${escape(heading)}</strong>
+        ${telemetry ? `<p>${escape(telemetry)}</p>` : ""}${position ? `<small>${escape(position)}</small>` : ""}
+        ${props.track_label ? `<small>${escape(props.track_label)}</small>` : ""}
+        <details class="intel-traffic-details"><summary>Flight details</summary><dl>${rows}</dl>
+          ${thumbnail ? `<img class="intel-aircraft-photo" src="${escape(thumbnail)}" alt="Public photo of ${escape(type !== "Type unknown" ? type : title)}" loading="lazy">` : ""}
+          ${props.classification_note ? `<p>${escape(props.classification_note)}</p>` : ""}
+          <p class="intel-feature-caution">Public ADS-B data. Not a verified team report or a navigation service.</p>
+          ${props.aircraft_model ? `<small>Aircraft details · ADSBDB</small>` : ""}<div class="intel-flight-links">${links}</div>
+        </details></article>`;
+    }
+    const summary = [TRAFFIC_TYPES.vessels[props.traffic_type] || type, props.speed_knots != null ? speed : null, age].filter(Boolean).join(" · ");
+    const vesselThumbnail = safeVesselThumbnail(props.vessel_photo_url);
+    const vesselPhotoSource = safeLink(props.vessel_photo_source);
+    const photo = vesselThumbnail && props.vessel_photo_credit ? `<figure class="intel-vessel-photo"><img src="${escape(vesselThumbnail)}" alt="Public photo of ${escape(title)}" loading="lazy"><figcaption>${vesselPhotoSource ? `<a href="${escape(vesselPhotoSource)}" target="_blank" rel="noopener noreferrer">${escape(props.vessel_photo_credit)} ↗</a>` : escape(props.vessel_photo_credit)}</figcaption></figure>` : "";
+    return `<article class="intel-feature-popup intel-traffic-card"><strong>${escape(title)}</strong><p>${escape(summary)}</p>
+      ${props.track_label ? `<small>${escape(props.track_label)}</small>` : ""}
+      <details class="intel-traffic-details"><summary>Vessel details</summary><dl>${fields.filter(([, value]) => value !== undefined && value !== null && value !== "").map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join("")}</dl>
+      ${photo}<p>${escape(props.classification_note)}</p><p class="intel-feature-caution">Coverage and classifications are incomplete. Reports may be delayed or incorrect. Not a verified team report or a navigation/collision-avoidance service.${props.stale ? " This position is stale." : ""}</p>
+      ${source ? `<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">${escape(props.attribution || pack.attribution || pack.source)} ↗</a>` : `<small>${escape(props.source || pack.source)}</small>`}</details></article>`;
   }
   const fields = [["Reported", observed], ["Type", props.disaster_type || String(props.kind || "").replaceAll("_", " ")], ["Area / vector", props.area_label], ["GDACS level", pack.id === "gdacs" ? props.severity : null], ["Access", props.access], ["Confidence", props.confidence], ["Location precision", props.precision === 1 ? "Reported location" : props.precision === 2 ? "Approximate location" : props.precision === 3 ? "Regional location" : props.precision]];
-  return `<article class="intel-feature-popup"><small>PUBLIC SOURCE · ${escape(pack.source || props.source || pack.title)}</small><strong>${pack.id === "gdacs" ? gdacsIconSvg(gdacsCode(props)) : ""}${escape(title)}</strong>${detail ? `<p>${escape(detail)}</p>` : ""}<dl>${fields.filter(([, value]) => value !== undefined && value !== null && value !== "").map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join("")}</dl><p class="intel-feature-caution">${pack.id === "gdacs" ? "Provider areas may be reported extents, forecast zones or reference buffers; check the area label. No outline does not mean no impact. " : ""}${pack.id === "firms" ? "Satellite thermal detection, not a confirmed fire. " : ""}${pack.id === "military" ? "Public map data. Boundaries and access may be incomplete or outdated. " : ""}${pack.id === "trails" ? "A mapped trail is not proof of safe or permitted access. " : ""}Not a verified team report.${result?.status === "stale" ? " Showing stale cached data." : ""}</p>${source ? `<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">${escape(props.attribution || pack.attribution || "View source")} ↗</a>` : ""}${result?.fetched_at ? `<small>Fetched ${escape(stamp(result.fetched_at))}</small>` : ""}</article>`;
+  return `<article class="intel-feature-popup"><small>PUBLIC SOURCE · ${escape(props.source || pack.source || pack.title)}</small><strong>${pack.id === "gdacs" ? gdacsIconSvg(gdacsCode(props)) : ""}${escape(title)}</strong>${detail ? `<p>${escape(detail)}</p>` : ""}<dl>${fields.filter(([, value]) => value !== undefined && value !== null && value !== "").map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join("")}</dl><p class="intel-feature-caution">${pack.id === "gdacs" ? "Provider areas may be reported extents, forecast zones or reference buffers; check the area label. No outline does not mean no impact. " : ""}${pack.id === "firms" ? "Satellite thermal detection, not a confirmed fire. " : ""}${pack.id === "military" ? "Public map data. Boundaries and access may be incomplete or outdated. " : ""}${pack.id === "trails" ? "A mapped trail is not proof of safe or permitted access. " : ""}Not a verified team report.${result?.status === "stale" ? " Showing stale cached data." : ""}</p>${source ? `<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">${escape(props.attribution || pack.attribution || "View source")} ↗</a>` : ""}${result?.fetched_at ? `<small>Fetched ${escape(stamp(result.fetched_at))}</small>` : ""}</article>`;
 }
 
-// Live traffic refreshes several times per minute (and aircraft profiles can
-// arrive just after the card opens). Replacing popup HTML must retain an
-// operator's expanded details instead of snapping the disclosure shut.
-export function replaceTrafficPopup(popup, html) {
-  const wasOpen = Boolean(popup?.getElement?.()?.querySelector?.(".intel-traffic-details")?.open);
-  popup?.setHTML(html);
-  const details = popup?.getElement?.()?.querySelector?.(".intel-traffic-details");
-  if (details) details.open = wasOpen;
+function updateTrafficChildren(current, next) {
+  const key = node => current.tagName === "DL" ? node.firstElementChild.textContent : `${node.tagName} ${node.className}`;
+  const unused = [...current.children];
+  const pairs = [...next.children].map(child => {
+    const index = unused.findIndex(existing => key(existing) === key(child));
+    return [index === -1 ? null : unused.splice(index, 1)[0], child];
+  });
+  for (const child of unused) child.remove();
+  let cursor = current.firstElementChild;
+  for (const [existing, child] of pairs) {
+    if (!existing) { current.insertBefore(child, cursor); continue; }
+    if (existing !== cursor) current.insertBefore(existing, cursor);
+    cursor = existing.nextElementSibling;
+    if (existing.isEqualNode(child)) continue;
+    if (existing.matches("details, dl")) updateTrafficChildren(existing, child);
+    else if (current.tagName === "DL") existing.lastElementChild.textContent = child.lastElementChild.textContent;
+    else if (existing.matches("strong, p, small")) existing.textContent = child.textContent;
+    else existing.replaceWith(child);
+  }
+}
+
+// Keep the open disclosure and its scroll anchors mounted during live updates.
+export function replaceTrafficDetails(body, html) {
+  if (!body) return;
+  const current = body.firstElementChild;
+  if (!current) { body.innerHTML = html; return; }
+  const template = body.ownerDocument.createElement("template");
+  template.innerHTML = html;
+  updateTrafficChildren(current, template.content.firstElementChild);
 }
 
 // MapLibre keeps the same camera; adding/removing public layers never calls fitBounds.
 export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null, ahnMode = "dtm", lidarProvider = null) {
   const id = sourceId(pack.id);
   const layers = map.getStyle?.()?.layers || [];
-  const before = layers.find(layer => isTeamLayer(layer) || (layer.type === "symbol" && !layer.id.startsWith(PREFIX)))?.id;
+  // Contour tiles can finish loading after the live traffic layers have been installed.
+  const before = layers.find(layer => (pack.id === "elevation" && TRAFFIC_SOURCES.has(layer.source))
+    || isTeamLayer(layer) || (layer.type === "symbol" && !layer.id.startsWith(PREFIX)))?.id;
   if (pack.id === "elevation") {
     if (!contourUrl) return;
     if (!map.getSource(id)) map.addSource(id, {type: "vector", tiles: [contourUrl], minzoom: CONTOUR_MIN_ZOOM, maxzoom: CONTOUR_MAX_ZOOM});
     for (const layer of contourLayers(id)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
+    return;
+  }
+  if (pack.id === "transit") {
+    if (!map.getSource(id)) map.addSource(id, {type: "geojson", data});
+    else map.getSource(id).setData(data);
+    const estimated = ["boolean", ["get", "estimated"], false];
+    const mode = ["get", "kind"];
+    const definitions = [
+      {id: `${id}-points`, type: "circle", paint: {
+        "circle-color": ["case", estimated, "#17383a", "#75ddd0"], "circle-radius": 8,
+        "circle-stroke-color": "#75ddd0", "circle-stroke-width": 1.3, "circle-opacity": ["case", estimated, .72, .95]}},
+      {id: `${id}-labels`, type: "symbol", layout: {
+        "text-field": ["match", mode, "bus", "B", "train", "R", "metro", "M", "tram", "T", "ferry", "F", "•"],
+        "text-font": ["Noto Sans Regular"], "text-size": 10, "text-allow-overlap": true, "text-ignore-placement": true},
+        paint: {"text-color": ["case", estimated, "#b6fff2", "#102a2d"]}},
+    ];
+    for (const layer of definitions) if (!map.getLayer(layer.id)) map.addLayer({...layer, source: id}, before);
     return;
   }
   if (pack.id === "ahn") {
@@ -201,6 +375,14 @@ export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null,
     return;
   }
   if (pack.id === "gdacs") { installGdacsIcons(map); data = gdacsDisplayData(data); }
+  if (pack.id === "military") {
+    installPoliceIcon(map);
+    const showBasemap = map.getSource("offline") && (data.basemap_fallback ?? (!data.features.length && !data.worldwide_snapshot));
+    for (const layer of MILITARY_FALLBACK_LAYERS) {
+      if (showBasemap && !map.getLayer(layer.id)) map.addLayer({...layer, source: "offline"}, before);
+      else if (!showBasemap && map.getLayer(layer.id)) map.removeLayer(layer.id);
+    }
+  }
   if (!map.getSource(id)) map.addSource(id, {type: "geojson", data});
   else map.getSource(id).setData(data);
   if (pack.id === "roads") {
@@ -212,12 +394,34 @@ export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null,
     for (const layer of trafficLayers(id)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
     return;
   }
-  const color = pack.id === "gdacs" ? GDACS_COLOR : COLORS[pack.id] || COLORS.gdacs;
+  if (pack.id === "notams") {
+    installNotamIcons(map);
+    const upcoming = ["==", ["get", "notam_phase"], "upcoming"];
+    const local = ["in", ["get", "local_activity"], ["literal", Object.keys(NOTAM_ACTIVITY_LABELS)]];
+    const line = ["!=", ["geometry-type"], "Point"];
+    const definitions = [
+      {id: `${id}-lines`, type: "line", filter: ["all", line, ["!", local]],
+        paint: {"line-color": COLORS.notams, "line-width": 1, "line-opacity": ["case", upcoming, .25, .5]}},
+      {id: `${id}-local-lines`, type: "line", minzoom: 10, filter: ["all", line, local],
+        paint: {"line-color": COLORS.notams, "line-width": 1.2, "line-opacity": ["case", upcoming, .35, .7]}},
+      {id: `${id}-points`, type: "symbol", filter: ["any", local, ["==", ["geometry-type"], "Point"]],
+        layout: {"icon-image": ["match", ["get", "local_activity"],
+          ...Object.keys(NOTAM_ACTIVITY_LABELS).flatMap(key => [key, `public-notam-${key}`]), "public-notam-other"],
+          "icon-size": .85, "icon-allow-overlap": true, "icon-ignore-placement": true},
+        paint: {"icon-opacity": ["case", upcoming, .55, 1]}},
+    ];
+    for (const layer of definitions) if (!map.getLayer(layer.id)) map.addLayer({...layer, source: id}, before);
+    return;
+  }
+  const color = pack.id === "military" ? ["match", ["get", "kind"], ["police_station", "police_property"], POLICE_COLOR, COLORS.military]
+    : pack.id === "gdacs" ? GDACS_COLOR : COLORS[pack.id] || COLORS.gdacs;
+  const pointFilter = ["==", ["geometry-type"], "Point"];
   const definitions = [
     {id: `${id}-areas`, type: "fill", filter: ["==", ["geometry-type"], "Polygon"], paint: {"fill-color": color, "fill-opacity": .12}},
     {id: `${id}-lines`, type: "line", filter: pack.id === "gdacs" ? ["==", ["geometry-type"], "Polygon"] : ["!=", ["geometry-type"], "Point"], layout: {"line-join": "round", "line-cap": pack.id === "trails" ? "butt" : "round"}, paint: {"line-color": pack.id === "trails" ? ROAD_COLOR : color, "line-width": pack.id === "trails" ? 2 : 1.5, "line-opacity": pack.id === "trails" ? .82 : .8, ...(pack.id === "trails" || pack.id === "military" ? {"line-dasharray": [3, 2]} : {})}},
     ...(pack.id === "gdacs" ? [{id: `${id}-tracks`, type: "line", filter: ["==", ["geometry-type"], "LineString"], paint: {"line-color": color, "line-width": 2, "line-dasharray": [3, 2], "line-opacity": .85}}] : []),
-    {id: `${id}-points`, type: "circle", filter: ["==", ["geometry-type"], "Point"], paint: {"circle-radius": pack.id === "gdacs" ? 13 : pack.id === "firms" ? 4 : 6, "circle-color": pack.id === "gdacs" ? "#10160f" : color, "circle-opacity": pack.id === "gdacs" ? .95 : .7, "circle-stroke-color": pack.id === "gdacs" ? color : "#1a1d15", "circle-stroke-width": 1.5}},
+    {id: `${id}-points`, type: "circle", filter: pack.id === "military" ? ["all", pointFilter, ["!", POLICE_STATION]] : pointFilter, paint: {"circle-radius": pack.id === "gdacs" ? 13 : pack.id === "firms" ? 4 : 6, "circle-color": pack.id === "gdacs" ? "#10160f" : color, "circle-opacity": pack.id === "gdacs" ? .95 : .7, "circle-stroke-color": pack.id === "gdacs" ? color : "#1a1d15", "circle-stroke-width": 1.5}},
+    ...(pack.id === "military" ? [{id: `${id}-police-stations`, type: "symbol", filter: POLICE_STATION, layout: POLICE_LAYOUT}] : []),
     ...(pack.id === "gdacs" ? [{id: `${id}-icons`, type: "symbol", filter: ["==", ["geometry-type"], "Point"], layout: {"icon-image": GDACS_ICON, "icon-size": .82, "icon-allow-overlap": true, "icon-ignore-placement": true}}] : []),
     {id: `${id}-labels`, type: "symbol", minzoom: pack.id === "trails" ? 13 : 9, filter: ["==", ["geometry-type"], "Point"], layout: {"text-field": ["coalesce", ["get", "title"], ["get", "name"], ""], "text-size": 10, "text-font": ["Noto Sans Regular"], "text-anchor": "top", "text-offset": [0, 1.1], "text-max-width": 16}, paint: {"text-color": color, "text-halo-color": "#0e130e", "text-halo-width": 1.5}},
   ];
@@ -228,6 +432,7 @@ export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null,
 }
 
 export function removeIntelLayers(map, id) {
+  if (id === "military") for (const layer of MILITARY_FALLBACK_LAYERS) if (map.getLayer(layer.id)) map.removeLayer(layer.id);
   for (const layer of layerIds(id).reverse()) if (map.getLayer(layer)) map.removeLayer(layer);
   if (map.getSource(sourceId(id))) map.removeSource(sourceId(id));
 }
@@ -237,6 +442,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   let contourUrl = null, contourPending = null, contourFailed = false;
   let trafficFilters = normalizeTrafficFilters();
   let roadFilters = normalizeRoadFilters();
+  let notamCategories = [], notamView = "local";
   const maps = new Map(), results = new Map(), credentialDrafts = new Map(), trafficDrafts = new Map(), autosaveTimers = new Map();
   const listeners = [];
   const listen = (target, event, handler) => { target?.addEventListener(event, handler); listeners.push(() => target?.removeEventListener(event, handler)); };
@@ -245,9 +451,30 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const types = packById("gdacs")?.disaster_types?.filter(type => GDACS_TYPES.some(known => known.id === type.id));
     return types?.length ? types : GDACS_TYPES;
   };
-  const visibleData = (id, data) => id === "roads" ? filterRoadReports(data, roadFilters) : TRAFFIC_IDS.includes(id) ? trafficDisplayData(id, data, trafficFilters[id]) : id === "gdacs" ? {...gdacsDisplayData(data, gdacsTypes), gdacs_types: [...gdacsTypes]} : data;
+  const notamOptions = () => Object.entries(packById("notams")?.notam_categories || {});
+  const visibleData = (id, data) => {
+    if (id === "transit") {
+      const now = Date.now() / 1000;
+      return {...data, features: (data.features || []).filter(({properties}) =>
+        now - properties.observed_at <= (properties.estimated ? 90 : 120))};
+    }
+    if (id === "notams") {
+      const now = Date.now() / 1000;
+      const recent = !data.fetched_at || now - data.fetched_at <= 1800;
+      return {...data, features: recent ? (data.features || []).flatMap(feature => {
+        const props = feature.properties;
+        if (notamView === "local" ? !Object.hasOwn(NOTAM_ACTIVITY_LABELS, props.local_activity) : !notamCategories.includes(props.kind)) return [];
+        const periods = props.notam_periods ?? (props.schedule && !["H24", "CONTINUOUS"].includes(props.schedule.toUpperCase()) ? [] : [[Date.parse(props.valid_from) / 1000, props.valid_until]]);
+        const period = periods.find(([start, end]) => start <= now + 3600 && (end == null || end > now));
+        if (!period) return [];
+        const [start, end] = period;
+        return [{...feature, properties: {...props, notam_phase: start > now ? "upcoming" : "active", notam_start: start, notam_end: end}}];
+      }) : []};
+    }
+    return id === "roads" ? filterRoadReports(data, roadFilters) : TRAFFIC_IDS.includes(id) ? trafficDisplayData(id, data, trafficFilters[id]) : id === "gdacs" ? {...gdacsDisplayData(data, gdacsTypes), gdacs_types: [...gdacsTypes]} : data;
+  };
   const currentPacks = () => catalogue.packs.map(pack => ({...pack, enabled: enabled.has(pack.id)}));
-  const isVisible = context => globalThis.document?.visibilityState !== "hidden" && (!context.map.getContainer?.()?.getClientRects || context.map.getContainer().getClientRects().length > 0);
+  const isVisible = context => !context.paused && globalThis.document?.visibilityState !== "hidden" && (!context.map.getContainer?.()?.getClientRects || context.map.getContainer().getClientRects().length > 0);
   const activeMap = () => [...maps.values()].reverse().find(isVisible);
   const packSource = pack => {
     if (pack.id !== "ahn") return {url: safeLink(pack.source_url), label: pack.source || "Source"};
@@ -264,7 +491,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       const reported = data.features.find(feature => trafficKey(feature) === selected.key);
       if (reported && reported.properties.position_time >= selected.feature.properties.position_time) selected.feature = reported;
       data = {...data, features: [...data.features.filter(feature => trafficKey(feature) !== selected.key),
-        {...selected.feature, properties: {...selected.feature.properties, traffic_selected: true}}]};
+        trafficDetailFeature(context, selected.feature, id, {traffic_selected: true})]};
     }
     const filtered = visibleData(id, data);
     return TRAFFIC_IDS.includes(id) ? context.motion.get(id).sample(filtered, now, !motionPreference?.matches) : {data: filtered, active: false};
@@ -280,6 +507,11 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
           if (!enabled.has(id) || !source || !context.data.has(id)) continue;
           const frame = animatedData(context, id, context.data.get(id), now);
           source.setData(frame.data);
+          if (context.selectedTraffic?.pack === id) {
+            const feature = frame.data.features.find(item => trafficKey(item) === context.selectedTraffic.key);
+            showTrafficEstimate(context.map, feature);
+            followTraffic(context, feature);
+          }
           active ||= frame.active;
         }
       }
@@ -306,13 +538,20 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
 
   function buildPanel() {
     if (!panel) return;
-    panel.setAttribute("aria-label", "Public intel packs");
-    panel.innerHTML = `<header class="intel-packs-head"><div><span class="intel-packs-eyebrow">MAP CONTEXT</span><h2>Intel packs</h2></div><button type="button" data-intel-close aria-label="Close intel packs">×</button></header><p class="intel-packs-intro">Optional public layers. Separate from your team's reports.</p><p class="intel-packs-privacy">Enabling a pack sends the viewed map area to its provider over the Internet. Choices and access keys stay on this device.</p><div class="intel-pack-list"></div><p class="intel-packs-notice" role="status" aria-live="polite"></p><div class="intel-packs-actions"><button type="button" data-intel-refresh>Refresh this view</button></div><p class="intel-packs-footnote">Recently viewed data is cached locally, not included in offline map downloads. Public coverage and freshness vary. Never rely on these layers alone for safety or access.</p>`;
-    panel.setAttribute("aria-label", "Map layers and intel packs");
-    panel.querySelector(".intel-packs-footnote").textContent = "Public layers are cached locally, separate from offline maps. Saved markers and areas stay visible when zooming out; zoom in to download additional coverage. Traffic motion is estimated briefly between reports, then pauses. Last-seen positions remain for 30 minutes; a selected target stays until closed. Wide views keep the last regional feed active. Coverage varies; never rely on these layers alone for safety or access.";
-    panel.querySelector("h2").textContent = "Map layers";
-    panel.querySelector(".intel-packs-intro").textContent = "Choose your map, terrain and public context.";
-    panel.querySelector(".intel-pack-list").insertAdjacentHTML("beforebegin", `<section class="map-layer-options"><h3>Map & terrain</h3>${setMapStyle ? '<label class="map-style-select">Base map<select data-map-style aria-label="Base map"><option value="hiking">Hiking map</option><option value="satellite">Satellite</option></select></label><p>Trails are always shown as dashed lines. Mapped access and conditions can change.</p>' : ''}<div data-map-features></div></section><h3 class="intel-section-title">Intel packs</h3>`);
+    panel.setAttribute("aria-labelledby", "mapLayersHeading");
+    panel.innerHTML = `
+      <header class="intel-packs-head"><h2 id="mapLayersHeading">Map layers</h2><button type="button" data-intel-close aria-label="Close map layers">×</button></header>
+      <section class="map-layer-options">
+        <h3>Map & terrain</h3>
+        ${setMapStyle ? '<label class="map-style-select">Base map<select data-map-style><option value="hiking">Hiking map</option><option value="satellite">Satellite</option></select></label>' : ''}
+        <div data-map-features></div>
+      </section>
+      <h3 class="intel-section-title">Public layers</h3>
+      <p class="intel-packs-privacy">Public layers share the viewed area with their providers. Your settings and access keys stay on this device.</p>
+      <div class="intel-pack-list"></div>
+      <p class="intel-packs-notice" role="status"></p>
+      <div class="intel-packs-actions"><button type="button" data-intel-refresh>Refresh this view</button></div>
+      <p class="intel-packs-footnote">Public coverage and freshness vary. Traffic keeps its last reported position for up to 30 minutes. Zoom in to fetch more detail. Public layers use a separate cache from offline maps.</p>`;
     const styleSelect = panel.querySelector("[data-map-style]");
     listen(styleSelect, "change", async () => {
       styleSelect.disabled = true;
@@ -327,6 +566,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (event.target?.matches?.("[data-firms-days]")) void setFirmsDays(Number(event.target.value));
       const type = event.target?.dataset?.gdacsType;
       if (type) void setGdacsTypes(event.target.checked ? [...gdacsTypes, type] : gdacsTypes.filter(id => id !== type));
+      const category = event.target?.dataset?.notamCategory;
+      if (category) void setNotamCategories(event.target.checked ? [...notamCategories, category] : notamCategories.filter(id => id !== category));
+      if (event.target?.matches?.("[data-notam-view]")) void setNotamView(event.target.value);
       const roadGroup = event.target?.dataset?.roadGroup;
       const roadValue = event.target?.dataset?.roadValue;
       if (roadGroup && roadValue) void setRoadFilters({...roadFilters, [roadGroup]: event.target.checked ? [...roadFilters[roadGroup], roadValue] : roadFilters[roadGroup].filter(v => v !== roadValue)});
@@ -337,7 +579,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (ACCESS[key]) {
         const value = target.value;
         credentialDrafts.set(key, value);
-        scheduleAutosave(`credential:${key}`, () => updateCredentials({[key]: value.trim()}), delay);
+        if (!key.startsWith("host_")) scheduleAutosave(`credential:${key}`, () => updateCredentials({[key]: value.trim()}), delay);
       }
       const form = target?.closest?.("[data-traffic-form]");
       const id = form?.dataset?.trafficForm;
@@ -355,7 +597,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     listen(panel, "submit", event => {
       if (!event.target?.matches?.("[data-traffic-form], [data-intel-access-form]")) return;
       event.preventDefault();
-      saveField(event.target.querySelector("input"), 0);
+      const input = event.target.querySelector("input");
+      if (input.name.startsWith("host_")) void updateCredentials({[input.name]: input.value.trim()});
+      else saveField(input, 0);
     });
     listen(panel, "click", event => {
       const key = event.target?.closest?.("[data-intel-clear]")?.dataset?.intelClear;
@@ -391,7 +635,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const focusedPack = panel?.ownerDocument?.activeElement?.dataset?.intelPack;
     const focusedType = panel?.ownerDocument?.activeElement?.dataset?.gdacsType;
     const focusedAhnMode = focusedName === "ahn-mode";
-    const filtersOpen = Boolean(panel?.querySelector(".intel-disaster-filter")?.open);
+    const filtersOpen = Boolean(panel?.querySelector('[data-pack-row="gdacs"] .intel-disaster-filter')?.open);
+    const notamOpen = Boolean(panel?.querySelector("[data-notam-filter]")?.open);
+    const focusedCategory = active?.dataset?.notamCategory;
     const roadOpen = Boolean(panel?.querySelector("[data-road-filter]")?.open);
     const focusedRoadGroup = active?.dataset?.roadGroup, focusedRoadValue = active?.dataset?.roadValue;
     const accessOpen = Object.keys(ACCESS).filter(key => panel?.querySelector(`[data-intel-access="${key}"]`)?.open);
@@ -399,9 +645,14 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     if (panel) panel.querySelector(".intel-pack-list").innerHTML = currentPacks().map(pack => { const source = packSource(pack); return `<section class="intel-pack-row" data-pack-row="${escape(pack.id)}"><label class="intel-pack-switch"><span><strong>${escape(pack.title)}</strong><small>${escape(pack.description)}</small></span><input type="checkbox" role="switch" data-intel-pack="${escape(pack.id)}" aria-describedby="intel-status-${escape(pack.id)}" ${pack.enabled ? "checked" : ""}/><i aria-hidden="true"></i></label><div class="intel-pack-meta"><span id="intel-status-${escape(pack.id)}" data-intel-status="${escape(pack.id)}"></span>${source.url ? `<a href="${escape(source.url)}" target="_blank" rel="noopener noreferrer">${escape(source.label)} ↗</a>` : ""}</div><p class="intel-pack-note" data-intel-note="${escape(pack.id)}"></p>${pack.offline_downloadable ? `<button type="button" class="intel-pack-download" data-intel-download="${escape(pack.id)}">SAVE THIS VIEW OFFLINE</button><small class="intel-pack-download-note">Keeps this visible map area on this device without an expiry.</small>` : ""}</section>`; }).join("");
     panel?.querySelector('[data-pack-row="firms"]')?.insertAdjacentHTML("beforeend", `<label class="intel-firms-window">Detection window<select data-firms-days aria-label="NASA FIRMS detection window">${[[1, "24 hours"], [3, "3 days"], [7, "7 days"]].map(([days, label]) => `<option value="${days}" ${days === firmsDays ? "selected" : ""}>${label}</option>`).join("")}</select></label>`);
     const gdacsRow = panel?.querySelector('[data-pack-row="gdacs"]');
+    panel?.querySelector('[data-pack-row="notams"]')?.insertAdjacentHTML("beforeend", `<label class="intel-firms-window">NOTAM view<select name="notam-view" data-notam-view><option value="local">Local activity</option><option value="all">All notices</option></select></label><small class="intel-pack-download-note">Active now or starting within one hour</small><details class="intel-disaster-filter" data-notam-filter ${notamOpen ? "open" : ""}><summary>NOTAM categories <span data-notam-summary></span></summary><div class="intel-disaster-grid">${notamOptions().map(([id, label]) => `<label><input type="checkbox" data-notam-category="${escape(id)}"/><span>${escape(label)}</span></label>`).join("")}</div></details>`);
     panel?.querySelector('[data-pack-row="roads"]')?.insertAdjacentHTML("beforeend", `<details class="intel-disaster-filter" data-road-filter ${roadOpen ? "open" : ""}><summary>Filters · report type & impact</summary>${[["types", "Report types", ROAD_TYPES], ["impacts", "Impact", ROAD_IMPACTS]].map(([group, title, choices]) => `<fieldset><legend>${title}</legend><div class="intel-disaster-grid">${Object.entries(choices).map(([value, label]) => `<label><input type="checkbox" data-road-group="${group}" data-road-value="${value}"/><span>${escape(label)}</span></label>`).join("")}</div></fieldset>`).join("")}<p>Vehicle obstructions are off initially. Filters change the map; navigation still checks full closures while this layer is enabled.</p></details>`);
     for (const [key, field] of Object.entries(ACCESS)) {
-      panel?.querySelector(`[data-pack-row="${field.pack}"]`)?.insertAdjacentHTML("beforeend", `<details class="intel-access-section" data-intel-access="${key}" ${accessOpen.includes(key) ? "open" : ""}><summary>${field.title}</summary><form class="intel-access-field" data-intel-access-form="${key}"><label for="intel-${key}">${field.title}</label><div class="intel-access-input"><input id="intel-${key}" name="${key}" type="password" autocomplete="off" spellcheck="false" maxlength="8192" value="${escape(credentialDrafts.get(key) || "")}" placeholder="Paste ${escape(field.title)}"/></div><div class="intel-access-links"><a href="${field.url}" target="_blank" rel="noopener noreferrer">${field.link} ↗</a><button type="button" data-intel-clear="${key}">Remove saved key</button></div></form></details>`);
+      const hostKey = key.startsWith("host_");
+      const pack = packById(field.pack);
+      if (hostKey && !pack?.can_provide_host_key) continue;
+      const title = !hostKey && (pack?.host_access || pack?.host_notams) ? `${field.title} on this device` : field.title;
+      panel?.querySelector(`[data-pack-row="${field.pack}"]`)?.insertAdjacentHTML("beforeend", `<details class="intel-access-section" data-intel-access="${key}" ${accessOpen.includes(key) ? "open" : ""}><summary>${title}</summary><form class="intel-access-field" data-intel-access-form="${key}"><label for="intel-${key}">${title}</label><div class="intel-access-input"><input id="intel-${key}" name="${key}" type="password" autocomplete="off" spellcheck="false" maxlength="8192" value="${escape(credentialDrafts.get(key) || "")}" placeholder="Paste ${escape(field.title)}"/></div><div class="intel-access-links"><a href="${field.url}" target="_blank" rel="noopener noreferrer">${field.link} ↗</a>${hostKey ? '<button type="submit">Save on host</button>' : `<button type="button" data-intel-clear="${key}">Remove saved key</button>`}</div></form></details>`);
     }
     const mapFeatures = panel?.querySelector("[data-map-features]");
     if (mapFeatures) {
@@ -410,13 +661,18 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         const row = panel.querySelector(`[data-pack-row="${id}"]`);
         if (row) mapFeatures.append(row);
       }
+      mapFeatures.insertAdjacentHTML("beforeend", `<section class="intel-analysis-card"><strong>Sentinel-1 TomoSAR analysis</strong><p>Multi-baseline 3D radar analysis is generated on demand from an SLC stack; there is no reliable public live tile layer to toggle here.</p><a href="https://ids-dinamis.data-terra.org/tomosar-services" target="_blank" rel="noopener noreferrer">Open TomoSAR service ↗</a></section>`);
     }
-    panel?.querySelector('[data-pack-row="ahn"]')?.insertAdjacentHTML("beforeend", `<label class="intel-ahn-mode">Elevation view<select name="ahn-mode" data-ahn-mode aria-label="LiDAR elevation view">${Object.entries(AHN_MODES).map(([value, label]) => `<option value="${value}">${escape(label)}</option>`).join("")}</select></label><p class="intel-pack-note">National sources are selected from the map area: Netherlands, England or the United States. Online only.</p>`);
+    panel?.querySelector('[data-pack-row="ahn"]')?.insertAdjacentHTML("beforeend", `<label class="intel-ahn-mode">Elevation view<select name="ahn-mode" data-ahn-mode aria-label="LiDAR elevation view">${Object.entries(AHN_MODES).map(([value, label]) => `<option value="${value}">${escape(label)}</option>`).join("")}</select></label><p class="intel-pack-note">Available coverage includes the Netherlands, England, France, Malta and the United States. Online only.</p>`);
     if (gdacsRow) gdacsRow.insertAdjacentHTML("beforeend", `<details class="intel-disaster-filter" ${filtersOpen ? "open" : ""}><summary>Disaster types <span data-gdacs-summary></span></summary><div class="intel-disaster-actions"><button type="button" data-gdacs-select="all">All</button><button type="button" data-gdacs-select="none">None</button></div><div class="intel-disaster-grid">${disasterTypes().map(type => `<label><input type="checkbox" data-gdacs-type="${escape(type.id)}"/>${gdacsIconSvg(type.id)}<span>${escape(type.label)}</span></label>`).join("")}</div><p>Icon shows the disaster type. Color shows the GDACS alert level, not whether an area is safe.</p></details>`);
     for (const id of TRAFFIC_IDS) {
       const selected = trafficDrafts.get(id) || trafficFilters[id];
       const options = (items, value) => Object.entries(items).map(([key, label]) => `<option value="${key}" ${key === value ? "selected" : ""}>${escape(label)}</option>`).join("");
       panel?.querySelector(`[data-pack-row="${id}"]`)?.insertAdjacentHTML("beforeend", `<details class="intel-traffic-filter" data-traffic-filter="${id}" ${trafficOpen.includes(id) ? "open" : ""}><summary>Filters · classification & type</summary><form data-traffic-form="${id}"><label>Classification<select name="affiliation">${options({all:"All classifications",military:id === "flights" ? "Military (provider flag)" : "Military / restricted (AIS 35)", commercial:id === "flights" ? "Commercial / airline (estimated)" : "Commercial (AIS type)",unknown:"Other / unknown ownership"},selected.affiliation)}</select></label><label>Type<select name="type">${options({all:"All types",...TRAFFIC_TYPES[id]},selected.type)}</select></label><label>${id === "flights" ? "Callsign, registration or model" : "Vessel name, callsign or MMSI"}<input name="query" type="search" maxlength="64" value="${escape(selected.query)}" placeholder="Search received traffic"/></label><p>${id === "flights" ? "Commercial is an estimate from callsign and aircraft category, not confirmed ownership. Missing military flags do not prove civilian status." : "AIS type is self-reported and can arrive after a position. Type 35 includes military and other restricted operations. Unknown vessels stay separate."}</p></form></details>`);
+    }
+    if (packById("flights")?.personal_fallback) {
+      panel?.querySelector('[data-pack-row="flights"] .intel-pack-meta')?.insertAdjacentHTML("beforeend",
+        '<a href="https://adsb.fi/" target="_blank" rel="noopener noreferrer">adsb.fi fallback ↗</a>');
     }
     renderStatus();
     const restore = focusedTraffic ? panel?.querySelector(`[data-traffic-form="${focusedTraffic}"] [name="${focusedName}"]`) : ACCESS[focusedCredential] ? panel?.querySelector(`[name="${focusedCredential}"]`) : null;
@@ -425,6 +681,8 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     if (focusedPack && IDS.includes(focusedPack)) panel.querySelector(`[data-intel-pack="${focusedPack}"]`)?.focus();
     if (focusedAhnMode) panel.querySelector("[data-ahn-mode]")?.focus();
     if (focusedType && GDACS_TYPES.some(type => type.id === focusedType)) panel.querySelector(`[data-gdacs-type="${focusedType}"]`)?.focus();
+    if (focusedCategory) [...panel.querySelectorAll("[data-notam-category]")].find(input => input.dataset.notamCategory === focusedCategory)?.focus();
+    if (focusedName === "notam-view") panel.querySelector("[data-notam-view]")?.focus();
     if (["types", "impacts"].includes(focusedRoadGroup) && [...Object.keys(ROAD_TYPES), ...Object.keys(ROAD_IMPACTS)].includes(focusedRoadValue)) panel.querySelector(`[data-road-group="${focusedRoadGroup}"][data-road-value="${focusedRoadValue}"]`)?.focus();
   }
 
@@ -447,6 +705,13 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     if (typeSummary) typeSummary.textContent = gdacsTypes.length === disasterTypes().length ? "All" : gdacsTypes.length ? `${gdacsTypes.length} of ${disasterTypes().length}` : "None";
     for (const input of panel.querySelectorAll("[data-gdacs-type]")) { input.checked = gdacsTypes.includes(input.dataset.gdacsType); input.disabled = saving; }
     for (const control of panel.querySelectorAll("[data-gdacs-select]")) control.disabled = saving;
+    const notamSummary = panel.querySelector("[data-notam-summary]");
+    if (notamSummary) notamSummary.textContent = notamCategories.length === notamOptions().length ? "All" : notamCategories.length ? `${notamCategories.length} of ${notamOptions().length}` : "None";
+    const notamSelect = panel.querySelector("[data-notam-view]");
+    if (notamSelect) { notamSelect.value = notamView; notamSelect.disabled = saving; }
+    const notamFilter = panel.querySelector("[data-notam-filter]");
+    if (notamFilter) notamFilter.hidden = notamView !== "all";
+    for (const input of panel.querySelectorAll("[data-notam-category]")) { input.checked = notamCategories.includes(input.dataset.notamCategory); input.disabled = saving; }
     for (const input of panel.querySelectorAll("[data-road-group]")) { input.checked = roadFilters[input.dataset.roadGroup].includes(input.dataset.roadValue); input.disabled = saving; }
     for (const control of panel.querySelectorAll("[data-traffic-form] button, [data-traffic-form] select, [data-traffic-form] input")) control.disabled = false;
     for (const pack of currentPacks()) {
@@ -481,21 +746,35 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     return payload;
   }
 
-  function applyCatalogue(value) {
+  function applyCatalogue(value, refreshMaps = true) {
     catalogue = {...value, packs: (value.packs || []).filter(pack => IDS.includes(pack.id))};
     enabled = new Set(value.settings?.enabled || catalogue.packs.filter(pack => pack.enabled).map(pack => pack.id));
     enabled = new Set([...enabled].filter(id => IDS.includes(id)));
     gdacsTypes = normalizeGdacsTypes(value.settings?.gdacs_types, disasterTypes());
+    const selected = value.settings?.notam_categories;
+    notamCategories = notamOptions().map(([id]) => id).filter(id => !Array.isArray(selected) || selected.includes(id));
+    notamView = value.settings?.notam_view === "all" ? "all" : "local";
     trafficFilters = normalizeTrafficFilters(value.settings?.traffic_filters);
     roadFilters = normalizeRoadFilters(value.settings?.road_filters);
     ahnMode = normalizeAhnMode(value.settings?.ahn_mode);
     firmsDays = [1, 3, 7].includes(value.settings?.firms_days) ? value.settings.firms_days : 3;
     renderCatalogue();
-    for (const context of maps.values()) { syncLayers(context); schedule(context, 0); }
+    for (const context of maps.values()) { syncLayers(context); if (refreshMaps) schedule(context, 0); }
   }
 
-  async function refresh() {
+  async function refresh({resetHostData = false} = {}) {
     const generation = ++catalogueGeneration;
+    if (resetHostData) {
+      for (const id of SHARED_LAYERS) {
+        for (const context of maps.values()) {
+          invalidate(context, id);
+          context.data.delete(id);
+          context.map.getSource(sourceId(id))?.setData(EMPTY());
+          if (context.popupPack === id) context.popup?.remove();
+        }
+        results.delete(id);
+      }
+    }
     try {
       const value = await request("/api/intel-packs");
       if (!destroyed && generation === catalogueGeneration) {
@@ -523,12 +802,13 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     try {
       const value = await request("/api/intel-packs/settings", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
       if (destroyed) return false;
-      notice = body.credentials ? "Source access saved on this device." : "";
+      notice = body.credentials ? Object.keys(body.credentials).some(key => key.startsWith("host_")) ? "Source access saved on the team host." : "Source access saved on this device." : "";
       if (body.credentials) for (const key of Object.keys(body.credentials)) {
-        if (credentialDrafts.get(key)?.trim() === body.credentials[key]) credentialDrafts.delete(key);
+        if (key.startsWith("host_") || credentialDrafts.get(key)?.trim() === body.credentials[key]) credentialDrafts.delete(key);
       }
-      results.clear();
-      applyCatalogue(value);
+      const displayOnly = Boolean(body.notam_categories || body.notam_view);
+      if (!displayOnly) results.clear();
+      applyCatalogue(value, !displayOnly);
       return true;
     } catch (error) { notice = error.message; return false; }
     finally { saving = false; renderStatus(); }
@@ -570,14 +850,42 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   async function updateCredentials(credentials) {
     const filtered = Object.fromEntries(Object.entries(credentials).filter(([key, value]) => ACCESS[key] && typeof value === "string"));
     if (!Object.keys(filtered).length) return false;
-    for (const context of maps.values()) invalidate(context);
+    for (const context of maps.values()) {
+      invalidate(context);
+      for (const id of new Set(Object.keys(filtered).map(key => ACCESS[key].pack))) if (SHARED_LAYERS.includes(id)) {
+        context.data.delete(id);
+        context.map.getSource(sourceId(id))?.setData(EMPTY());
+        if (context.popupPack === id) context.popup?.remove();
+      }
+    }
     return save({credentials: filtered});
+  }
+
+  async function setNotamCategories(value) {
+    if (!packById("notams") || saving || destroyed) return false;
+    const previous = notamCategories;
+    notamCategories = notamOptions().map(([id]) => id).filter(id => value.includes(id));
+    const saved = await save({notam_categories: notamCategories});
+    if (!saved) notamCategories = previous;
+    for (const context of maps.values()) {
+      if (context.popupPack === "notams") context.popup?.remove();
+      syncLayers(context);
+    }
+    renderStatus();
+    return saved;
+  }
+
+  async function setNotamView(value) {
+    if (!packById("notams") || !["local", "all"].includes(value)) return false;
+    const saved = await save({notam_view: value});
+    if (saved) for (const context of maps.values()) if (context.popupPack === "notams") context.popup?.remove();
+    return saved;
   }
 
   async function downloadView(id) {
     const context = activeMap();
     const pack = packById(id);
-    if (!context || !pack?.enabled || saving || destroyed) { notice = "Enable Military areas, then open the map view you want to save."; renderStatus(); return false; }
+    if (!context || !pack?.enabled || saving || destroyed) { notice = "Enable Military areas, airstrips & police, then open the map view you want to save."; renderStatus(); return false; }
     const bounds = context.map.getBounds();
     const button = panel?.querySelector(`[data-intel-download="${id}"]`);
     if (button) { button.disabled = true; button.textContent = "SAVING VIEW…"; }
@@ -586,7 +894,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       results.set(id, visibleData(id, result));
       context.data.set(id, result);
       syncLayers(context);
-      notice = "Military areas saved on this device. They remain available offline.";
+      notice = "Map area saved on this device for offline use.";
       return true;
     } catch (error) { notice = error.message; return false; }
     finally { renderStatus(); }
@@ -664,6 +972,18 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   }
 
   function updateCredit(context) {
+    if (context.transitCredit) {
+      const credits = new Map();
+      for (const {properties} of context.data.get("transit")?.features || []) {
+        if (properties.source === "Transitous") {
+          credits.set("Transitous sources", "https://transitous.org/sources/");
+          credits.set("© OpenStreetMap", "https://www.openstreetmap.org/copyright");
+        } else credits.set(properties.source, safeLink(properties.source_url));
+      }
+      context.transitCredit.hidden = !enabled.has("transit") || !credits.size;
+      context.transitCredit.innerHTML = [...credits].filter(([, url]) => url).map(([label, url]) =>
+        `<a href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(label)}</a>`).join(" · ");
+    }
     if (!context.credit) return;
     const credits = new Map();
     for (const pack of currentPacks().filter(pack => pack.enabled && pack.configured !== false)) {
@@ -729,7 +1049,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     context.timer = setTimeout(() => void refreshMap(context), delay);
   }
 
-  async function refreshMap(context, trafficOnly = false) {
+  async function refreshMap(context, trafficOnly = false, onlyPack = null) {
     if (destroyed || !isVisible(context) || !hasParsedStyle(context)) return;
     context.needsRefresh = false;
     const map = context.map;
@@ -753,7 +1073,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (map.getZoom() < Number(pack?.min_zoom || ENVIRONMENT_MIN_ZOOM[id])) results.set(id, {status: "zoom_in", note: `Zoom in to level ${pack?.min_zoom || ENVIRONMENT_MIN_ZOOM[id]} to view ${ENVIRONMENT_RASTERS[id].title.toLowerCase()}`});
       else results.set(id, {status: "ready", note: `${ENVIRONMENT_RASTERS[id].source} raster · online only`});
     }
-    await Promise.all(currentPacks().filter(pack => pack.enabled && !CLIENT_RASTER_IDS.has(pack.id) && !context.requests.has(pack.id) && (!trafficOnly || TRAFFIC_IDS.includes(pack.id))).map(async pack => {
+    await Promise.all(currentPacks().filter(pack => pack.enabled && !CLIENT_RASTER_IDS.has(pack.id) && !context.requests.has(pack.id) && (!onlyPack || pack.id === onlyPack) && (!trafficOnly || TRAFFIC_IDS.includes(pack.id))).map(async pack => {
       if (pack.configured === false) { results.set(pack.id, {status: "needs_key"}); return; }
       if (pack.id === "gdacs" && !gdacsTypes.length) {
         map.getSource(sourceId(pack.id))?.setData(EMPTY());
@@ -794,14 +1114,26 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
           context.rejectedTrafficViews.delete(pack.id);
         }
         let data = mergeIntelResults(parts);
+        if (pack.id === "military") {
+          data.basemap_fallback = !data.worldwide_snapshot && (!data.features.length || data.coverage_complete === false || data.status === "stale");
+          if (data.basemap_fallback && map.getSource("offline")) {
+            data.note = ["Showing available military land, airfields and police stations from the basemap.", data.note].filter(Boolean).join(" ");
+          }
+        }
         const previous = context.data.get(pack.id);
         if (traffic) data = retainTraffic(previous, data);
         else if (pack.id === "roads") data = retainRoads(previous, data);
-        else data = retainIntel(previous, data, requestedBoxes);
+        else if (!["notams", "transit"].includes(pack.id)) data = retainIntel(previous, data, requestedBoxes);
         results.set(pack.id, visibleData(pack.id, data));
         context.data.set(pack.id, data);
+        if (pack.id === "transit") updateCredit(context);
         context.tracks.get(pack.id)?.ingest(data);
         if (hasParsedStyle(context)) installIntelLayers(map, pack, animatedData(context, pack.id, data).data);
+        if (pack.id === "notams" && context.popupPack === pack.id) {
+          const current = results.get(pack.id);
+          const ids = new Set(current.features.map(feature => feature.id));
+          if (current.status === "stale" || context.selectedNotams.some(id => !ids.has(id))) context.popup?.remove();
+        }
         if (pack.id === "roads") updateRoadPopup(context);
         trafficAnimator.start();
       } catch (error) {
@@ -814,6 +1146,13 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
           map.getSource(sourceId(pack.id))?.setData(visibleData(pack.id, old));
           updateRoadPopup(context);
         }
+        if (pack.id === "notams") {
+          old = old && {...old, status: "stale", error: failure};
+          if (old) context.data.set(pack.id, old);
+          map.getSource(sourceId(pack.id))?.setData(visibleData(pack.id, old || EMPTY()));
+          if (context.popupPack === pack.id) context.popup?.remove();
+        }
+        if (pack.id === "transit") map.getSource(sourceId(pack.id))?.setData(visibleData(pack.id, old || EMPTY()));
         results.set(pack.id, visibleData(pack.id, old?.features?.length ? {...old, status: "stale", error: failure} : {status: "error", error: failure}));
       } finally {
         clearTimeout(timeout);
@@ -830,9 +1169,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   }
 
 
-  function trafficPopupFeature(context, feature, packId, additions = {}) {
+  function trafficDetailFeature(context, feature, packId, additions = {}) {
     const identity = String(feature?.properties?.identity || "").toLowerCase();
-    const profile = packId === "flights" ? context.aircraftProfiles.get(identity) : null;
+    const profile = TRAFFIC_IDS.includes(packId) ? context.trafficProfiles.get(identity) : null;
     return {...feature, properties: {...feature.properties, ...(profile || {}), ...additions}};
   }
 
@@ -844,28 +1183,59 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     context.popup?.setHTML(intelFeatureHtml(feature, packById("roads"), results.get("roads")));
   }
 
-  async function loadAircraftProfile(context, identity) {
+  async function loadTrafficProfile(context, pack, identity) {
     identity = String(identity || "").toLowerCase();
-    if (!/^[0-9a-f]{6}$/.test(identity) || context.aircraftProfiles.has(identity)) return;
+    const flights = pack === "flights";
+    if (!(flights ? /^[0-9a-f]{6}$/ : /^[0-9]{9}$/).test(identity) || context.trafficProfiles.has(identity)) return;
     // Mark in-flight/unknown lookups so opening the same card never hammers a
     // public metadata provider while a map is refreshing.
-    context.aircraftProfiles.set(identity, null);
+    if (context.trafficProfiles.size >= 512) context.trafficProfiles.delete(context.trafficProfiles.keys().next().value);
+    context.trafficProfiles.set(identity, null);
     try {
-      const profile = await request(`/api/intel-packs/live/flights/${identity}/profile`);
+      const path = `/api/intel-packs/live/${pack}/${identity}`;
+      const profile = await request(`${path}/${flights ? "profile" : "photo"}`);
       if (destroyed || !profile) return;
-      context.aircraftProfiles.set(identity, {
+      context.trafficProfiles.set(identity, flights ? {
         aircraft_model: profile.model, aircraft_manufacturer: profile.manufacturer,
         aircraft_type_code: profile.type_code, aircraft_registration: profile.registration,
         aircraft_owner: profile.owner,
-        aircraft_photo_url: profile.photo_available ? `/api/intel-packs/live/flights/${identity}/thumbnail` : "",
+        aircraft_photo_url: profile.photo_available ? `${path}/thumbnail` : "",
         aircraft_photo_source: profile.photo_source_url,
+      } : {
+        vessel_photo_url: `${path}/thumbnail/${profile.number}`,
+        vessel_photo_credit: profile.credit, vessel_photo_source: profile.source_url,
       });
     } catch {
       // Public enrichment is optional. The signed Reticom picture and live
       // traffic view remain useful when this secondary provider is unavailable.
-      context.aircraftProfiles.set(identity, null);
+      context.trafficProfiles.set(identity, null);
     }
-    if (context.selectedTraffic?.pack === "flights" && context.selectedTraffic.key === identity) updateTrafficTrack(context);
+    if (context.selectedTraffic?.pack === pack && context.selectedTraffic.key === identity) updateTrafficTrack(context);
+  }
+
+  function followTraffic(context, feature) {
+    const {map, selectedTraffic: selected} = context;
+    if (!selected?.following || !feature || map.isMoving?.() || !isVisible(context)) return;
+    const [lng, lat] = feature.geometry.coordinates;
+    const current = map.getCenter();
+    const center = [lng + 360 * Math.round((current.lng - lng) / 360), lat];
+    const offset = map.project(center).dist(map.project(current));
+    if (offset >= 6 || (selected.recenter && offset > 0)) map.jumpTo({center}, {trafficFollow: true});
+    selected.recenter = false;
+  }
+
+  function closeTrafficDrawer(context) {
+    const selected = context.selectedTraffic;
+    if (!selected) return;
+    context.selectedTraffic = null;
+    if (context.drawer) {
+      if (context.drawer.contains(context.drawer.ownerDocument.activeElement)) context.map.getCanvas?.()?.focus({preventScroll: true});
+      context.drawer.hidden = true;
+      context.drawerBody.innerHTML = "";
+    }
+    clearTrafficTrack(context.map);
+    const data = context.data.get(selected.pack);
+    if (data) context.map.getSource(sourceId(selected.pack))?.setData(animatedData(context, selected.pack, data).data);
   }
 
   function updateTrafficTrack(context) {
@@ -877,15 +1247,19 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const feature = enabled.has(selected.pack) && pack?.configured !== false
       ? visible.find(item => trafficKey(item) === selected.key) : null;
     if (!feature) {
-      context.selectedTraffic = null;
-      context.popup?.remove(); context.popup = null;
-      clearTrafficTrack(context.map);
+      closeTrafficDrawer(context);
       return;
     }
     const route = context.tracks.get(selected.pack).route(selected.key, Date.now()/1000, selected.history);
     context.map.getSource(sourceId(selected.pack))?.setData({type: "FeatureCollection", features: visible});
     showTrafficTrack(context.map, route.data);
-    replaceTrafficPopup(context.popup, intelFeatureHtml(trafficPopupFeature(context, feature, selected.pack, {track_label: route.label}), pack, results.get(selected.pack)));
+    showTrafficEstimate(context.map, feature);
+    if (context.drawer) {
+      context.drawer.hidden = false;
+      context.followButton.textContent = selected.following ? "Pause follow" : "Resume follow";
+      replaceTrafficDetails(context.drawerBody, intelFeatureHtml(trafficDetailFeature(context, feature, selected.pack, {track_label: route.label}), pack, results.get(selected.pack)));
+    }
+    followTraffic(context, feature);
     if (selected.history && Date.now() - selected.historyAt > 60000) void loadTrafficRoute(context, selected);
   }
 
@@ -907,7 +1281,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
 
   function attachMap(map, {Popup} = {}) {
     if (maps.has(map)) { if (Popup) maps.get(map).Popup = Popup; return; }
-    const context = {map, Popup, motion: new Map(TRAFFIC_IDS.map(id => [id, new TrafficMotion(id)])), tracks: new Map(TRAFFIC_IDS.map(id => [id, new TrafficTracks(id)])), selectedTraffic: null, aircraftProfiles: new Map(), trafficRegions: new Map(), rejectedTrafficViews: new Map(), trafficClient: globalThis.crypto?.randomUUID?.() || `map-${Math.random().toString(36).slice(2)}`, requests: new Map(), data: new Map(), timer: null, popup: null, credit: null, needsRefresh: true};
+    const context = {map, Popup, motion: new Map(TRAFFIC_IDS.map(id => [id, new TrafficMotion(id)])), tracks: new Map(TRAFFIC_IDS.map(id => [id, new TrafficTracks(id)])), selectedTraffic: null, trafficProfiles: new Map(), trafficRegions: new Map(), rejectedTrafficViews: new Map(), trafficClient: globalThis.crypto?.randomUUID?.() || `map-${Math.random().toString(36).slice(2)}`, requests: new Map(), data: new Map(), timer: null, popup: null, credit: null, needsRefresh: true};
     maps.set(map, context);
     const container = map.getContainer?.();
     if (container?.ownerDocument) {
@@ -915,10 +1289,40 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       context.credit.className = "intel-map-credit";
       context.credit.hidden = true;
       container.append(context.credit);
+      context.transitCredit = container.ownerDocument.createElement("small");
+      context.transitCredit.className = "intel-transit-credit";
+      context.transitCredit.hidden = true;
+      container.append(context.transitCredit);
       context.credit.addEventListener("pointerdown", event => event.stopPropagation());
+      context.drawer = container.ownerDocument.createElement("aside");
+      context.drawer.className = "intel-traffic-drawer";
+      context.drawer.setAttribute("aria-label", "Aircraft and vessel details");
+      context.drawer.hidden = true;
+      context.drawer.innerHTML = `<div class="intel-traffic-drawer-body"></div><div class="intel-traffic-drawer-actions"><button type="button" data-traffic-follow>Pause follow</button><button type="button" data-traffic-close aria-label="Close traffic details">×</button></div>`;
+      context.drawerBody = context.drawer.querySelector(".intel-traffic-drawer-body");
+      context.followButton = context.drawer.querySelector("[data-traffic-follow]");
+      context.followButton.addEventListener("click", () => {
+        const selected = context.selectedTraffic;
+        if (!selected) return;
+        selected.following = !selected.following;
+        selected.recenter = selected.following;
+        updateTrafficTrack(context);
+      });
+      context.drawer.querySelector("[data-traffic-close]").addEventListener("click", () => closeTrafficDrawer(context));
+      context.drawer.addEventListener("keydown", event => {
+        if (event.key !== "Escape") return;
+        event.stopPropagation();
+        closeTrafficDrawer(context);
+      });
+      container.append(context.drawer);
     }
     context.onStyle = () => { invalidate(context); syncLayers(context); schedule(context, 0); };
-    context.onMove = () => schedule(context);
+    context.onMove = event => { if (!event?.trafficFollow) schedule(context); };
+    context.onDrag = () => {
+      if (!context.selectedTraffic?.following) return;
+      context.selectedTraffic.following = false;
+      if (context.followButton) context.followButton.textContent = "Resume follow";
+    };
     // A map may attach before its style is parsed. Idle is only a fallback for that
     // initial case; continuously streaming team data must not block public requests.
     context.onIdle = () => {
@@ -939,43 +1343,69 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       }
     };
     context.onClick = event => {
-      if (!context.Popup || event.originalEvent?.target?.closest?.(".maplibregl-marker,button,a")) return;
+      if (event.originalEvent?.target?.closest?.(".maplibregl-marker,.maplibregl-popup,.intel-traffic-drawer,button,a")) return;
       context.popup?.remove(); context.popup = null;
-      context.selectedTraffic = null;
       context.selectedRoad = null;
-      clearTrafficTrack(map);
       const features = map.queryRenderedFeatures(event.point);
       if (features.some(feature => isTeamLayer(feature.layer))) return;
-      const feature = features.find(item => item.layer?.id?.startsWith(PREFIX) && !item.layer.id.startsWith(`${PREFIX}elevation-`));
+      let feature = features.find(item => item.layer?.id?.startsWith(PREFIX) && !item.layer.id.startsWith(`${PREFIX}elevation-`));
       if (!feature) return;
       const id = IDS.find(id => feature.layer.id.startsWith(`${PREFIX}${id}-`));
       const pack = packById(id);
       if (!pack || !enabled.has(id)) return;
-      context.popup = new context.Popup({maxWidth: "320px", closeButton: true, className: "public-intel-popup"}).setLngLat(event.lngLat).setHTML(intelFeatureHtml(trafficPopupFeature(context, feature, id), pack, results.get(id))).addTo(map);
-      const popup = context.popup;
-      popup.on?.("close", () => {
-        if (context.popup !== popup) return;
-        context.popup = null; context.selectedTraffic = null;
-        context.selectedRoad = null;
-        clearTrafficTrack(map);
-      });
-      if (id === "roads") context.selectedRoad = feature.properties?.road_id || feature.id;
       if (TRAFFIC_IDS.includes(id)) {
-        const observed = context.data.get(id)?.features.find(item => trafficKey(item) === trafficKey(feature));
+        closeTrafficDrawer(context);
+        const key = trafficKey(feature);
+        const observed = context.data.get(id)?.features.find(item => trafficKey(item) === key);
         // Rendered IDs may be MapLibre IDs and coordinates may be predicted.
         const coordinates = [feature.properties.reported_lon, feature.properties.reported_lat];
         const original = observed || {...feature, geometry: {...feature.geometry, coordinates: coordinates.every(Number.isFinite) ? coordinates : feature.geometry.coordinates}};
-        context.selectedTraffic = {pack: id, key: trafficKey(feature), feature: original};
+        const selected = {pack: id, key, feature: original, following: true, recenter: true};
+        context.selectedTraffic = selected;
         updateTrafficTrack(context);
-        map.panTo?.(feature.geometry.coordinates.slice(0, 2), {duration: motionPreference?.matches ? 0 : 300});
-        void loadTrafficRoute(context, context.selectedTraffic);
-        if (id === "flights") void loadAircraftProfile(context, feature.properties?.identity);
+        if (context.selectedTraffic === selected) {
+          void loadTrafficRoute(context, selected);
+          void loadTrafficProfile(context, id, feature.properties?.identity);
+        }
+        return;
       }
+      if (!context.Popup) return;
+      closeTrafficDrawer(context);
+      if (feature.layer.id.startsWith(MILITARY_BASEMAP)) {
+        const label = feature.layer.id.endsWith("-police") ? "Police station"
+          : feature.layer.id.endsWith("-airfield") ? ({airstrip: "Airstrip", runway: "Runway"}[feature.properties?.class] || "Airfield") : "Military area";
+        feature = {...feature, properties: {...feature.properties, title: feature.properties?.name || feature.properties?.ref || label, detail: label,
+          source: "OpenFreeMap / OpenStreetMap", source_url: "https://openfreemap.org/", attribution: "OpenFreeMap · © OpenStreetMap contributors"}};
+      }
+      const result = results.get(id);
+      let html = intelFeatureHtml(feature, pack, result);
+      if (id === "notams") {
+        const hits = new Set(features.filter(hit => hit.layer?.source === sourceId(id))
+          .map(hit => hit.properties?.id || hit.id));
+        hits.add(feature.properties?.id || feature.id);
+        const notices = visibleData(id, context.data.get(id) || EMPTY()).features.filter(notice => hits.has(notice.id));
+        if (!notices.length) return;
+        context.selectedNotams = notices.map(notice => notice.id);
+        if (notices.length === 1) html = intelFeatureHtml(notices[0], pack, result);
+        else html = `<div class="intel-feature-popup"><strong>${notices.length} notices here</strong>${notices.map(notice =>
+          `<details class="intel-notam-overlap"><summary>${escape([notice.properties.notice_number, notice.properties.category_label, notice.properties.title !== notice.properties.notice_number ? notice.properties.title : ""].filter(Boolean).join(" · "))}</summary>${intelFeatureHtml(notice, pack, result)}</details>`).join("")}</div>`;
+      }
+      context.popup = new context.Popup({maxWidth: "320px", closeButton: true, className: "public-intel-popup"}).setLngLat(event.lngLat).setHTML(html).addTo(map);
+      context.popupPack = id;
+      const popup = context.popup;
+      popup.on?.("close", () => {
+        if (context.popup !== popup) return;
+        context.popup = null;
+        context.popupPack = null;
+        context.selectedRoad = null;
+      });
+      if (id === "roads") context.selectedRoad = feature.properties?.road_id || feature.id;
     };
     context.onRemove = () => detachMap(map);
     map.on("style.load", context.onStyle);
     map.on("load", context.onStyle);
     map.on("moveend", context.onMove);
+    map.on("dragstart", context.onDrag);
     map.on("idle", context.onIdle);
     map.on("error", context.onError);
     map.on("click", context.onClick);
@@ -987,10 +1417,10 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   function detachMap(map) {
     const context = maps.get(map);
     if (!context) return;
-    clearTimeout(context.timer); invalidate(context); context.popup?.remove(); context.credit?.remove();
+    clearTimeout(context.timer); invalidate(context); context.popup?.remove(); context.credit?.remove(); context.transitCredit?.remove(); context.drawer?.remove();
     clearTrafficTrack(map);
     releaseTraffic(context);
-    for (const [event, handler] of [["style.load", context.onStyle], ["load", context.onStyle], ["moveend", context.onMove], ["idle", context.onIdle], ["error", context.onError], ["click", context.onClick], ["remove", context.onRemove]]) map.off(event, handler);
+    for (const [event, handler] of [["style.load", context.onStyle], ["load", context.onStyle], ["moveend", context.onMove], ["dragstart", context.onDrag], ["idle", context.onIdle], ["error", context.onError], ["click", context.onClick], ["remove", context.onRemove]]) map.off(event, handler);
     maps.delete(map);
     for (const model of context.motion.values()) model.clear();
     for (const model of context.tracks.values()) model.clear();
@@ -1003,13 +1433,40 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     for (let index = 0; index < 2; index++) void fetchImpl(`/api/intel-packs/live/vessels/lease/${context.trafficClient}_${index}`, {method: "DELETE", keepalive: true}).catch(() => {});
   }
 
+  function setMapPaused(map, paused) {
+    const context = maps.get(map);
+    if (!context || Boolean(context.paused) === paused) return;
+    context.paused = paused;
+    if (paused) {
+      clearTimeout(context.timer);
+      invalidate(context);
+      releaseTraffic(context);
+    } else schedule(context, 0);
+  }
+
   buildPanel();
   if (button) { button.setAttribute("aria-expanded", "false"); if (panel?.id) button.setAttribute("aria-controls", panel.id); }
   listen(button, "click", () => setOpen(Boolean(panel?.hidden || panel?.classList.contains("hidden"))));
   listen(panel?.ownerDocument, "keydown", event => { if (event.key === "Escape" && panel && !panel.hidden && !panel.classList.contains("hidden")) { event.stopPropagation(); setOpen(false); } });
   if (typeof window !== "undefined") listen(window, "online", () => { if (enabled.has("elevation")) void refresh(); });
   const interval = setInterval(() => { for (const context of maps.values()) if (isVisible(context) && !context.requests.size) schedule(context, 0); }, 60000);
+  const transitInterval = setInterval(() => {
+    if (enabled.has("transit")) for (const context of maps.values()) if (isVisible(context) && !context.needsRefresh) void refreshMap(context, false, "transit");
+  }, 30000);
   const trafficInterval = setInterval(() => {
+    if (enabled.has("notams")) for (const context of maps.values()) {
+      const source = context.map.getSource(sourceId("notams")), original = context.data.get("notams");
+      if (!source || !original || !isVisible(context)) continue;
+      const frame = visibleData("notams", original);
+      const signature = JSON.stringify(frame.features.map(feature => [feature.id, feature.properties.notam_phase, feature.properties.notam_start]));
+      if (context.notamFrame === signature) continue;
+      context.notamFrame = signature;
+      source.setData(frame);
+      if (context.popupPack === "notams" && context.selectedNotams.some(id => !frame.features.some(feature => feature.id === id))) context.popup?.remove();
+    }
+    for (const id of SHARED_LAYERS) if (enabled.has(id) && results.get(id)?.waiting_for_host) {
+      for (const context of maps.values()) if (isVisible(context) && !context.needsRefresh && !context.requests.has(id)) void refreshMap(context, false, id);
+    }
     if (!enabled.has("roads") && !TRAFFIC_IDS.some(id => enabled.has(id))) return;
     for (const context of maps.values()) {
       if (!isVisible(context)) { releaseTraffic(context); continue; }
@@ -1038,8 +1495,8 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     trafficAnimator.start();
   });
   const ready = refresh();
-  return {ready, attachMap, refresh, setEnabled, setRoadFilters, setFirmsDays, setGdacsTypes, setTrafficFilters, updateCredentials, getState: () => ({packs: currentPacks(), settings: {road_filters: roadFilters, firms_days: firmsDays, gdacs_types: [...gdacsTypes], traffic_filters: trafficFilters, ahn_mode: ahnMode}, results: Object.fromEntries(results)}), destroy() {
-    destroyed = true; ++catalogueGeneration; clearInterval(interval); clearInterval(trafficInterval);
+  return {ready, attachMap, setMapPaused, refresh, setEnabled, setRoadFilters, setFirmsDays, setGdacsTypes, setNotamCategories, setNotamView, setTrafficFilters, updateCredentials, getState: () => ({packs: currentPacks(), settings: {road_filters: roadFilters, firms_days: firmsDays, gdacs_types: [...gdacsTypes], notam_categories: [...notamCategories], notam_view: notamView, traffic_filters: trafficFilters, ahn_mode: ahnMode}, results: Object.fromEntries(results)}), destroy() {
+    destroyed = true; ++catalogueGeneration; clearInterval(interval); clearInterval(trafficInterval); clearInterval(transitInterval);
     for (const timer of autosaveTimers.values()) clearTimeout(timer);
     trafficAnimator.destroy();
     for (const context of maps.values()) { if (hasParsedStyle(context)) for (const id of IDS) removeIntelLayers(context.map, id); detachMap(context.map); }

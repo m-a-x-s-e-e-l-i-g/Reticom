@@ -1,10 +1,12 @@
 import {connectivityState} from "./connectivity.js?v=20260905-1";
+import {isHardwarePttKeyboardEvent} from "./ptt-input.js?v=20260916-1";
+import {commsPositionEvent} from "./comms-only.js?v=20261125-1";
 import {createCommandWorkspace} from "./command-workspace.js?v=20260908-2";
 let commandCanvas = null;
 import {calculateDeviceRoute, initOfflineRoutingSettings, ROUTING_MODE_KEY} from "./offline-routing.js?v=20260909-7";
 const offlineRoutingSettings = initOfflineRoutingSettings();
 import {hikingMapStyle, recenterOnFix, roadAndPathLayers, preferredMapStyle, nextMapStyle, satelliteWithTrails} from "./outdoor-map.js?v=20260907-5";
-import {createIntelPacks} from "./intel-packs.js?v=20260914-3";
+import {createIntelPacks} from "./intel-packs.js?v=20261125-24";
 import {createSharedNavigation, navigationSharePayload} from "./shared-navigation.js?v=20260906-1";
 import {HeadingTracker, HeadingOverlay, HeadingConnection} from "./live-heading.js?v=20260905-2";
 import {reportDraft, reportComposerHtml} from "./map-reports.js?v=20260905-1";
@@ -12,8 +14,8 @@ import {reportProperties, REPORT_STATUS_LABELS} from "./marker-catalog.js?v=2026
 import {drawingFeatures, validDrawingArea, addDrawingDecorationLayers, drawingReviewHtml} from "./map-drawings.js?v=20260905-2";
 import {teamApiUrl, teamPageUrl} from "./command-teams.js?v=20260908-2";
 import {initContinuitySettings} from "./continuity-settings.js?v=20260905-1";
-import {initMembershipSettings} from "./membership-settings.js?v=20260908-2";
-import {displayPositionSeries, distanceMeters, MAX_AUTOMATIC_ACCURACY_METERS} from "./location-filter.js?v=20260903-1";
+import {initMembershipSettings, membershipRequestLabel} from "./membership-settings.js?v=20261125-1";
+import {displayPositionSeries, distanceMeters, locationTime, MAX_AUTOMATIC_ACCURACY_METERS} from "./location-filter.js?v=20261125-1";
 import {nextWaypointLabel, withDisplayWaypointLabels} from "./map-labels.js?v=20260903-2";
 import {formatMapBytes, packProgress, tileCountForBounds} from "./map-offline.js?v=20260903-1";
 import {mapMessageReadStorageKey, mapOverlayMessages, parseReadMessageIds, shouldDismissMapMessage} from "./map-message-read.js?v=20260903-2";
@@ -44,11 +46,12 @@ import {
 const $ = (id) => document.getElementById(id);
 const apiUrl = (url) => teamApiUrl(url, location.href);
 const fetch = (url, options) => globalThis.fetch(apiUrl(url), options);
-const intelPacks = createIntelPacks({button: $("intelPacksToggle"), panel: $("intelPacksPanel"), fetchImpl: globalThis.fetch.bind(globalThis), getMapStyle: readMapStylePreference, setMapStyle: mode => toggleMapStyle(mode)});
+const intelPacks = createIntelPacks({button: $("intelPacksToggle"), panel: $("intelPacksPanel"), fetchImpl: fetch, getMapStyle: readMapStylePreference, setMapStyle: mode => toggleMapStyle(mode)});
 let commandWorkspace = false;
 const commandDisplay = () => commandWorkspace || role === "gateway";
-const commandOverview = new URL(location.href).searchParams.get("team") === "none";
-const commandAllTeams = new URL(location.href).searchParams.get("team") === "all";
+const selectedCommandTeam = new URL(location.href).searchParams.get("team") || "default";
+const commandOverview = selectedCommandTeam === "none";
+const commandAllTeams = selectedCommandTeam === "all";
 let role = null;
 let qrStream = null;
 let qrScanTimer = null;
@@ -122,6 +125,7 @@ let feedLoading = false;
 let pttRecorder = null;
 let pttStream = null;
 let pttStarting = false;
+let pttFinishing = false;
 let pttChunks = [];
 let pttStartedAt = 0;
 let pttButton = null;
@@ -135,6 +139,7 @@ let pttLiveStreamId = null;
 let pttLiveFailed = false;
 let pttLiveSendChain = Promise.resolve();
 let pttPrivateRecipient = null;
+let hardwarePttActive = false;
 let leaveArmed = false;
 let localIdentityHash = "";
 let teamOperational = false;
@@ -142,10 +147,18 @@ let fieldQueuedEvents = 0;
 let localMapWatchId = null;
 let localMapPosition = null;
 let localMapPositionHasCentered = false;
+const nativeLocation = typeof window.RetiumAndroid?.setLocationDemand === "function" ? window.RetiumAndroid : null;
+const nativeComms = typeof window.RetiumAndroid?.setCommsOnly === "function" ? window.RetiumAndroid : null;
+let commsOnly = nativeComms?.isCommsOnly() === true;
+const commsLivePositions = new Map();
+let nativeLocationJoined = false;
+let nativeLocateRequest = null;
+let nativeLocateId = Date.now();
 let liveVoiceSocket = null;
 let liveVoiceReady = false;
 let liveVoiceReconnectTimer = null;
 let incomingLiveVoice = null;
+let incomingRecordedClipId = null;
 let incomingFeedInitialized = false;
 let incomingAudioReady = false;
 let incomingAudioUnlock = null;
@@ -514,6 +527,7 @@ function muteIncomingAlerts() {
     activeIncomingCue.pause();
     activeIncomingCue = null;
   }
+  incomingCuePreloads[0].pause();
   incomingCuePlaying = false;
   if (activeIncomingAudio) {
     activeIncomingAudio.pause();
@@ -637,11 +651,12 @@ function runNativeSpeech(text, showReadingState = false) {
   });
 }
 
-async function playIncomingMessageCue(source, force = false) {
-  if (!force && !incomingAlertsEnabled) return;
+async function playIncomingMessageCue(source, volume = 0.82) {
+  if (!incomingAlertsEnabled) return;
   const audio = new Audio(source);
   audio.preload = "auto";
-  audio.volume = 0.82;
+  audio.volume = volume;
+  activeIncomingCue?.pause();
   activeIncomingCue = audio;
   incomingCuePlaying = true;
   updateIncomingAlertsUi();
@@ -660,9 +675,11 @@ async function playIncomingMessageCue(source, force = false) {
       toast("Message cue blocked · tap ARM ALERTS", true);
     }
   } finally {
-    if (activeIncomingCue === audio) activeIncomingCue = null;
-    incomingCuePlaying = false;
-    updateIncomingAlertsUi();
+    if (activeIncomingCue === audio) {
+      activeIncomingCue = null;
+      incomingCuePlaying = false;
+      updateIncomingAlertsUi();
+    }
   }
 }
 
@@ -788,28 +805,36 @@ function waitForIncomingVoiceReady(audio) {
 }
 
 async function playIncomingVoice(event) {
-  if (!incomingAlertsEnabled) return;
-  const audio = new Audio(apiUrl(`/api/audio/${encodeURIComponent(event.clip_id)}`));
+  const clipId = event.clip_id;
+  if (!incomingAlertsEnabled || !clipId || incomingVoiceWasHandled(clipId)) return;
+  const live = incomingLiveVoice?.streamId === clipId ? incomingLiveVoice : null;
+  if (live) {
+    let timeout;
+    await Promise.race([live.playback, new Promise(resolve => { timeout = setTimeout(resolve, VOICE_READY_TIMEOUT_MS); })]);
+    clearTimeout(timeout);
+    if (!incomingAlertsEnabled || incomingVoiceWasHandled(clipId)) return;
+    disposeIncomingLiveVoice(live);
+  }
+  const audio = new Audio(apiUrl(`/api/audio/${encodeURIComponent(clipId)}`));
   audio.preload = "auto";
   activeIncomingAudio = audio;
-  const ready = await waitForIncomingVoiceReady(audio);
-  if (!ready) {
-    if (activeIncomingAudio === audio) activeIncomingAudio = null;
-    updateIncomingAlertsUi();
-    toast("Incoming voice could not be loaded", true);
-    return;
-  }
-  if (!incomingAlertsEnabled) return;
-  await playIncomingMessageCue(INCOMING_MESSAGE_CUE_URL);
-  if (!incomingAlertsEnabled) return;
+  incomingRecordedClipId = clipId;
   let playbackResult = "error";
   try {
+    if (!await waitForIncomingVoiceReady(audio)) {
+      toast("Incoming voice could not be loaded", true);
+      return;
+    }
+    if (!incomingAlertsEnabled || incomingVoiceWasHandled(clipId)) return;
+    await playIncomingMessageCue(INCOMING_MESSAGE_CUE_URL);
+    if (!incomingAlertsEnabled || incomingVoiceWasHandled(clipId)) return;
     const finished = new Promise((resolve) => {
       audio.addEventListener("ended", () => resolve("ended"), {once: true});
       audio.addEventListener("error", () => resolve("error"), {once: true});
       audio.addEventListener("pause", () => resolve("pause"), {once: true});
     });
     await audio.play();
+    rememberIncomingVoice(clipId);
     incomingAudioReady = true;
     updateIncomingAlertsUi();
     playbackResult = await finished;
@@ -818,6 +843,7 @@ async function playIncomingVoice(event) {
     updateIncomingAlertsUi();
     toast("Incoming voice blocked · tap ARM ALERTS", true);
   } finally {
+    incomingRecordedClipId = null;
     if (activeIncomingAudio === audio) activeIncomingAudio = null;
     updateIncomingAlertsUi();
   }
@@ -832,8 +858,9 @@ function uuidFromBytes(bytes) {
 }
 
 function disposeIncomingLiveVoice(session, playEndCue = false) {
-  if (!session) return;
+  if (!session || session.disposed) return;
   session.disposed = true;
+  session.resolvePlayback();
   session.audio?.pause();
   if (session.objectUrl) URL.revokeObjectURL(session.objectUrl);
   if (activeIncomingAudio === session.audio) activeIncomingAudio = null;
@@ -846,18 +873,36 @@ function disposeIncomingLiveVoice(session, playEndCue = false) {
   }
 }
 
+async function playIncomingLiveCue() {
+  const cue = incomingCuePreloads[0];
+  try {
+    cue.currentTime = 0;
+    cue.volume = window.RetiumAndroid ? .35 : 1;
+    await cue.play();
+  } catch (error) {
+    console.warn("Incoming live PTT beep could not play", error);
+  }
+}
+
 async function beginIncomingLivePlayback(session) {
   if (session.disposed || session.started || session.starting || !incomingAlertsEnabled) return;
   session.starting = true;
-  await playIncomingMessageCue(INCOMING_MESSAGE_CUE_URL);
-  if (session.disposed || !incomingAlertsEnabled) return;
   try {
+    if (incomingVoiceWasHandled(session.streamId)) {
+      disposeIncomingLiveVoice(session);
+      return;
+    }
     await session.audio.play();
+    if (session.disposed) return;
     session.started = true;
+    void playIncomingLiveCue();
+    rememberIncomingVoice(session.streamId);
+    session.resolvePlayback();
     incomingAudioReady = true;
     activeIncomingAudio = session.audio;
     updateIncomingAlertsUi();
   } catch {
+    disposeIncomingLiveVoice(session);
     toast("Live voice blocked · tap ARM ALERTS", true);
   } finally {
     session.starting = false;
@@ -887,10 +932,14 @@ function appendIncomingLiveBuffer(session) {
 }
 
 function startIncomingLiveVoice(frame) {
-  if (frame.sender_hash === localIdentityHash) return;
+  if (frame.sender_hash === localIdentityHash || !frame.stream_id
+      || incomingLiveVoice?.streamId === frame.stream_id || incomingRecordedClipId === frame.stream_id
+      || incomingVoiceWasHandled(frame.stream_id)) return;
   if (incomingLiveVoice) disposeIncomingLiveVoice(incomingLiveVoice, false);
   const mimeType = frame.mime_type || "audio/webm;codecs=opus";
   const canStream = typeof MediaSource !== "undefined" && MediaSource.isTypeSupported(mimeType);
+  let resolvePlayback;
+  const playback = new Promise(resolve => { resolvePlayback = resolve; });
   const session = {
     streamId: frame.stream_id,
     callsign: frame.callsign,
@@ -905,6 +954,8 @@ function startIncomingLiveVoice(frame) {
     starting: false,
     ended: false,
     disposed: false,
+    playback,
+    resolvePlayback,
   };
   incomingLiveVoice = session;
   toast(`Live voice · ${frame.callsign}`);
@@ -948,17 +999,8 @@ async function playCompletedLiveFallback(session) {
     disposeIncomingLiveVoice(session, false);
     return;
   }
-  await playIncomingMessageCue(INCOMING_MESSAGE_CUE_URL);
-  if (session.disposed || !incomingAlertsEnabled) return;
-  activeIncomingAudio = session.audio;
   session.audio.addEventListener("ended", () => disposeIncomingLiveVoice(session, true), {once: true});
-  try {
-    await session.audio.play();
-    session.started = true;
-    updateIncomingAlertsUi();
-  } catch {
-    disposeIncomingLiveVoice(session, false);
-  }
+  await beginIncomingLivePlayback(session);
 }
 
 function receiveIncomingLiveChunk(streamId, sequence, audio) {
@@ -979,6 +1021,7 @@ function finishIncomingLiveVoice(streamId, canceled = false) {
     disposeIncomingLiveVoice(session, false);
     return;
   }
+  if (session.ended) return;
   session.ended = true;
   if (!session.mediaSource) {
     playCompletedLiveFallback(session);
@@ -1022,6 +1065,13 @@ function handleLiveVoiceMessage(message) {
     startIncomingLiveVoice(frame);
   } else if (frame.type === "live.end" || frame.type === "live.cancel") {
     finishIncomingLiveVoice(frame.stream_id, frame.type === "live.cancel");
+  } else if (frame.type === "live.ended") {
+    const pending = commsLivePositions.get(frame.stream_id);
+    if (pending) {
+      clearTimeout(pending.expiry);
+      commsLivePositions.delete(frame.stream_id);
+      if (!frame.canceled) void sendCommsPosition(pending.fix, pending.destination);
+    }
   } else if (frame.type === "live.error" && (!frame.stream_id || frame.stream_id === pttLiveStreamId)) {
     pttLiveFailed = true;
     setLiveVoiceAvailability(false, 0);
@@ -1045,17 +1095,36 @@ function connectLiveVoice() {
   socket.addEventListener("error", () => setLiveVoiceAvailability(false, 0));
 }
 
-function queueIncomingAlerts(events) {
+function readNativeIncomingHistory() {
   try {
     const nativeSeen = JSON.parse(window.RetiumAndroid?.getSeenIncomingEventIds?.() || "[]");
     if (Array.isArray(nativeSeen)) nativeSeen.forEach((eventId) => seenIncomingEventIds.add(eventId));
   } catch {
     // The native bridge is Android-only; browser alert tracking remains in-memory.
   }
+}
+
+function syncIncomingHistory() {
+  window.RetiumAndroid?.syncSeenIncomingEventIds?.(JSON.stringify([...seenIncomingEventIds].slice(-200)));
+}
+
+function incomingVoiceWasHandled(clipId) {
+  readNativeIncomingHistory();
+  return seenIncomingEventIds.has(`voice:${clipId}`);
+}
+
+function rememberIncomingVoice(clipId) {
+  // Live stream IDs become clip IDs in the feed, which assigns a separate event ID.
+  seenIncomingEventIds.add(`voice:${clipId}`);
+  syncIncomingHistory();
+}
+
+function queueIncomingAlerts(events) {
+  readNativeIncomingHistory();
   const alertable = events.filter((event) => event?.id && ["chat.message", "private.message", "private.ptt", "ptt.broadcast", "task.created", "waypoint.arrived"].includes(event.type));
   if (!incomingFeedInitialized) {
     alertable.forEach((event) => seenIncomingEventIds.add(event.id));
-    window.RetiumAndroid?.syncSeenIncomingEventIds?.(JSON.stringify([...seenIncomingEventIds].slice(-200)));
+    syncIncomingHistory();
     incomingFeedInitialized = true;
     return;
   }
@@ -1064,13 +1133,15 @@ function queueIncomingAlerts(events) {
     .sort((left, right) => left.created_at - right.created_at);
   for (const event of incoming) {
     seenIncomingEventIds.add(event.id);
-    if (["ptt.broadcast", "private.ptt"].includes(event.type)) requestVoiceTranscript(event.clip_id, false);
+    const voice = event.type === "ptt.broadcast" || event.type === "private.ptt";
+    if (!commsOnly && voice) requestVoiceTranscript(event.clip_id, false);
+    if (commsOnly && !voice) continue;
     if (event.network?.sender_hash === localIdentityHash || !incomingAlertsEnabled) continue;
     incomingAlertQueue = incomingAlertQueue
-      .then(() => ["ptt.broadcast", "private.ptt"].includes(event.type) ? playIncomingVoice(event) : playIncomingTextAlert(event))
+      .then(() => voice ? playIncomingVoice(event) : !commsOnly && playIncomingTextAlert(event))
       .catch(() => undefined);
   }
-  window.RetiumAndroid?.syncSeenIncomingEventIds?.(JSON.stringify([...seenIncomingEventIds].slice(-200)));
+  syncIncomingHistory();
 }
 
 function shortHash(value, length = 10) {
@@ -1210,7 +1281,7 @@ sharingHeading.checked = localStorage.getItem(headingPreference) === "true" ||
 const pointingConnection = new HeadingConnection({
   clock: pointingTracker.clock,
   url: () => apiUrl(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/heading/live`),
-  operational: () => teamOperational && window.RetiumAndroid?.isHeadingScreenActive?.() !== false,
+  operational: () => teamOperational && !commsOnly && window.RetiumAndroid?.isHeadingScreenActive?.() !== false,
   eligible: () => role === "field" && sharingHeading.checked && (!window.RetiumAndroid || window.RetiumAndroid.isHeadingSharingActive?.() === true),
   sample: () => pointingSample,
   receive: frame => {
@@ -1226,6 +1297,7 @@ sharingHeading.addEventListener("change", () => {
 });
 
 function browserCompassHeading(event) {
+  if (commsOnly) return;
   if (performance.now() - nativeCompassUpdatedAt < 2000) return;
   const alpha = event.webkitCompassHeading ?? event.alpha;
   if (!Number.isFinite(alpha)) return;
@@ -1286,10 +1358,21 @@ document.addEventListener("click", (event) => {
   if (!$("connectivityPanel").contains(event.target) && !$("networkToggle").contains(event.target)) closeConnectivity();
 });
 document.addEventListener("keydown", (event) => {
+  if (isHardwarePttKeyboardEvent(event)) {
+    event.preventDefault();
+    if (!event.repeat) beginHardwarePtt();
+    return;
+  }
   if (event.key === "Escape" && !$("connectivityPanel").classList.contains("hidden")) {
     closeConnectivity(); $("networkToggle").focus();
   }
 });
+document.addEventListener("keyup", (event) => {
+  if (!isHardwarePttKeyboardEvent(event)) return;
+  event.preventDefault();
+  endHardwarePtt();
+});
+window.addEventListener("blur", () => endHardwarePtt());
 setInterval(renderConnectivity, 5000);
 
 function voiceTime(seconds, compact = false) {
@@ -1446,8 +1529,11 @@ async function requestVoiceTranscript(clipId, start = false, attempt = 0) {
     const transcript = await response.json();
     if (!response.ok) throw new Error(transcript.detail || "Transcript unavailable");
     updateTranscriptDisplays(clipId, transcript);
-    if ((transcript.status === "processing" || ["interpreting", "publishing"].includes(transcript.interpretation?.state)) && attempt < 40) {
-      setTimeout(() => requestVoiceTranscript(clipId, false, attempt + 1), role === "field" ? 4000 : 2000);
+    const interpreting = ["interpreting", "publishing"].includes(transcript.interpretation?.state);
+    const interval = role === "field" ? 4000 : 2000;
+    const maxAttempts = interpreting ? 300000 / interval : 40;
+    if ((transcript.status === "processing" || interpreting) && attempt < maxAttempts) {
+      setTimeout(() => requestVoiceTranscript(clipId, false, attempt + 1), interval);
     }
   } catch (error) {
     updateTranscriptDisplays(clipId, {status: "error", clip_id: clipId, error: error.message});
@@ -1859,7 +1945,7 @@ function updateLocalMapPosition(position) {
   const accuracy = Number(position?.coords?.accuracy);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
   window.RetiumAndroid?.setCompassLocation?.(lat, lon, Number(position.coords.altitude) || 0);
-  const now = Math.floor(Date.now() / 1000);
+  const now = Math.floor((position.timestamp || Date.now()) / 1000);
   localMapPosition = {
     id: "local-device-position",
     type: "position.updated",
@@ -1869,22 +1955,75 @@ function updateLocalMapPosition(position) {
     created_at: now,
     lat,
     lon,
+    approximate: Boolean(position.coords.approximate),
     ...(Number.isFinite(accuracy) ? {accuracy} : {}),
     network: {
       verified: false,
       local: true,
       sender_hash: localIdentityHash,
       received_at: now,
-      interface: "Local device GPS",
+      interface: "Device location",
     },
   };
+  updateFieldLocationAccuracy();
   if (fieldMap) {
     void renderFieldMap(fieldEvents, {preserveView: localMapPositionHasCentered});
     localMapPositionHasCentered = true;
   }
 }
 
+function updateFieldLocationAccuracy() {
+  const label = $("fieldLocationAccuracy");
+  const position = localMapPosition;
+  const stale = position && Date.now() / 1000 - position.created_at > 90;
+  label.hidden = !nativeLocation || !position || (!position.approximate && !stale && position.accuracy <= 25);
+  label.textContent = position && [stale ? "Last fix" : position.approximate ? "Approximate" : "Location",
+    Number.isFinite(position.accuracy) ? `±${Math.round(position.accuracy)} m` : "accuracy unavailable"].join(" · ");
+}
+
+function nativeMapVisible() {
+  return nativeLocationJoined && !commsOnly && !document.hidden && !$("fieldMapPage").classList.contains("hidden");
+}
+
+function syncNativeLocationDemand() {
+  if (!nativeLocation) return;
+  const navigating = nativeLocationJoined && !commsOnly && !document.hidden && Boolean(waypointNavigation);
+  nativeLocation.setLocationDemand(nativeLocationJoined, navigating ? "navigation" : nativeMapVisible() ? "map" : "idle");
+}
+
+function nativePosition(coords) {
+  return Number.isFinite(coords?.latitude) && Number.isFinite(coords?.longitude) ? {coords, timestamp: coords.timestamp} : null;
+}
+
+window.retiumAndroidLocation = coords => {
+  if (!nativeLocationJoined || commsOnly || document.hidden) return;
+  const position = nativePosition(coords);
+  if (!position) return;
+  if (nativeMapVisible() || waypointNavigation) updateLocalMapPosition(position);
+  if (waypointNavigation) updateWaypointNavigation(position);
+};
+
+window.retiumAndroidFreshLocation = (id, coords) => {
+  if (nativeLocateRequest?.id !== id) return;
+  const {complete} = nativeLocateRequest;
+  nativeLocateRequest = null;
+  complete(nativePosition(coords));
+};
+
 function syncLocalMapPosition(joined) {
+  if (nativeLocation) {
+    nativeLocationJoined = joined;
+    if (!joined) {
+      localMapPosition = null;
+      localMapPositionHasCentered = false;
+    } else if (nativeMapVisible() && !localMapPosition) {
+      const cached = cachedLocationPosition();
+      if (cached) updateLocalMapPosition(cached);
+    }
+    updateFieldLocationAccuracy();
+    syncNativeLocationDemand();
+    return;
+  }
   if (!joined || !navigator.geolocation) {
     if (localMapWatchId !== null) navigator.geolocation?.clearWatch(localMapWatchId);
     localMapWatchId = null;
@@ -1914,9 +2053,9 @@ function movementTracks(events) {
     const series = displayPositionSeries(positions);
     if (!series.length) return;
     const latest = series[series.length - 1];
-    const latestTime = latest.network?.received_at || latest.created_at;
+    const latestTime = locationTime(latest);
     if (now - latestTime > ACTIVE_TRACK_MAX_AGE_SECONDS) return;
-    const recent = series.filter((event) => (event.network?.received_at || event.created_at) >= latestTime - TRACK_HISTORY_SECONDS).slice(-TRACK_MAX_POINTS);
+    const recent = series.filter((event) => locationTime(event) >= latestTime - TRACK_HISTORY_SECONDS).slice(-TRACK_MAX_POINTS);
     const coordinates = [];
     recent.forEach((event) => {
       const point = [event.lon, event.lat];
@@ -2750,6 +2889,7 @@ async function ensureFieldMap() {
     map.addControl(new NavigationControl({showCompass: false}), "top-right");
     addFieldMapLayers(map);
     intelPacks.attachMap(map, {Popup});
+    if (commsOnly) intelPacks.setMapPaused(map, true);
     sharedNavigation.attachMap(map, Popup);
     fieldMap = map;
     fieldPointing = new HeadingOverlay(map, pointingTracker, () => localIdentityHash);
@@ -2822,8 +2962,10 @@ function syncWaypointMarkers(map, locations) {
 }
 
 async function renderFieldMap(events, {preserveView = localMapPositionHasCentered} = {}) {
+  if (commsOnly) return;
   try {
     const map = await ensureFieldMap();
+    if (commsOnly) return;
     fieldMapOnline = true;
     $("fieldMapFallback").classList.add("hidden");
     const mapEvents = fieldMapEvents(events);
@@ -3465,9 +3607,18 @@ async function deleteMapItem(kind, eventId, button, popup) {
     if (!response.ok) throw new Error(data.detail || "Map item removal failed");
     showDelivery(data.delivery);
     popup.remove();
-    toast(`${kind === "drawing" ? "Drawing" : "Marker"} removed${kind === "automatic-report" ? " · original message kept" : " · signed over Reticulum"}`);
+    const queued = data.delivery.status === "queued";
+    const item = kind === "drawing" ? "Drawing" : "Marker";
+    toast(queued ? `${item} removal queued · awaiting team host`
+      : `${item} removed${kind === "automatic-report" ? " · original message kept" : " · signed over Reticulum"}`);
+    if (queued && kind !== "automatic-report") {
+      fieldEvents = fieldEvents.filter(event => event.id !== eventId);
+      saveFieldEventCache(fieldTeamDestination, fieldEvents);
+      if (commandDisplay()) renderJoinedCommand(fieldEvents);
+      else void renderFieldMap(fieldEvents, {preserveView: true});
+    }
     if (role === "gateway") await refresh();
-    else await refreshFeed();
+    else if (!queued || kind === "automatic-report") await refreshFeed();
   } catch (error) {
     toast(error.message, true);
     button.disabled = false;
@@ -3518,6 +3669,7 @@ function stopWaypointNavigation(announce = true, {unshare = true} = {}) {
   waypointNavigation?.routeAbortController?.abort();
   waypointNavigationWatchId = null;
   waypointNavigation = null;
+  syncNativeLocationDemand();
   waypointArrivalReportPending = false;
   $("waypointNavigation").classList.add("hidden");
   $("waypointNavigation").classList.remove("arrived", "calculated");
@@ -3621,7 +3773,7 @@ function updateWaypointNavigation(position) {
   waypointNavigation.currentAccuracy = accuracy;
   const directDistance = distanceMeters(currentPoint, waypointNavigation.target);
   const bearing = bearingDegrees(currentPoint, waypointNavigation.target);
-  const accurate = Number.isFinite(accuracy) && accuracy > 0 && accuracy <= WAYPOINT_MAX_ARRIVAL_ACCURACY_METERS;
+  const accurate = !position.coords.approximate && Number.isFinite(accuracy) && accuracy > 0 && accuracy <= WAYPOINT_MAX_ARRIVAL_ACCURACY_METERS;
   const arrived = accurate && directDistance <= Math.max(WAYPOINT_ARRIVAL_RADIUS_METERS, accuracy);
   const calculated = waypointNavigation.mode === "route" && waypointNavigation.routeCoordinates?.length >= 2;
   const routeLabel = waypointNavigation.pinnedRoute ? "SHARED ROUTE" : `${waypointNavigation.routeSource === "offline" ? "OFFLINE · " : ""}${waypointNavigation.routeProfile === "walking" ? "WALKING ROUTE" : "ROAD ROUTE"}`;
@@ -3644,12 +3796,13 @@ function updateWaypointNavigation(position) {
     } else if (waypointNavigation.mode === "route" && waypointNavigation.routeError) {
       $("waypointNavigationState").textContent = `${waypointNavigation.routeError.toUpperCase()} · DIRECT LINE SHOWN`;
     } else if (calculated) {
-      const fix = accurate ? ` · ±${Math.round(accuracy)} M` : "";
+      const fix = Number.isFinite(accuracy) ? ` · ±${Math.round(accuracy)} M` : "";
       $("waypointNavigationState").textContent = waypointNavigation.pinnedRoute
         ? `FOLLOW SHARED PATH · ${formatNavigationDistance(directDistance)} TO DESTINATION${fix}`
         : `${routeInstruction(waypointNavigation.routeSteps)}${fix}`;
     } else {
-      $("waypointNavigationState").textContent = accurate ? `LIVE POSITION · ±${Math.round(accuracy)} M` : "WAITING FOR ACCURATE FIX";
+      const fix = Number.isFinite(accuracy) ? ` · ±${Math.round(accuracy)} M` : "";
+      $("waypointNavigationState").textContent = accurate ? `LIVE POSITION${fix}` : `WAITING FOR ACCURATE FIX${fix}`;
     }
   } else if (!waypointNavigation.reportArrival) {
     $("waypointNavigationState").textContent = waypointNavigation.pinnedRoute ? "AT SHARED DESTINATION" : "AT LAST VERIFIED POSITION";
@@ -3659,7 +3812,7 @@ function updateWaypointNavigation(position) {
     void reportWaypointArrival(position);
   }
   renderWaypointNavigationLine();
-  if (!waypointNavigation.pinnedRoute && waypointNavigation.mode === "route" && !arrived && !waypointNavigation.routeLoading
+  if (!waypointNavigation.pinnedRoute && waypointNavigation.mode === "route" && (!nativeLocation || accurate) && !arrived && !waypointNavigation.routeLoading
       && routeNeedsRefresh(
         waypointNavigation.routeOrigin,
         currentPoint,
@@ -3687,7 +3840,7 @@ function updateWaypointNavigation(position) {
 }
 
 function startNavigation(properties, target, popup, targetKind, mode, sharedPlan = null, routeProfile = "driving") {
-  if (!navigator.geolocation) return toast("Geolocation unavailable", true);
+  if (nativeLocation ? !nativeLocation.hasLocationPermission() : !navigator.geolocation) return toast("Location permission is needed for navigation", true);
   stopWaypointNavigation(false);
   waypointNavigation = {
     id: String(targetKind === "operator" ? properties.senderHash : properties.id),
@@ -3749,7 +3902,8 @@ function startNavigation(properties, target, popup, targetKind, mode, sharedPlan
     void publishNavigation(waypointNavigation);
   }
   const currentNavigation = waypointNavigation;
-  waypointNavigationWatchId = navigator.geolocation.watchPosition(
+  if (nativeLocation) syncNativeLocationDemand();
+  else waypointNavigationWatchId = navigator.geolocation.watchPosition(
     position => { if (waypointNavigation === currentNavigation) updateWaypointNavigation(position); },
     (error) => {
       if (waypointNavigation !== currentNavigation) return;
@@ -4101,9 +4255,9 @@ function refreshAiMarkerStatus() {
   }).catch(() => {});
 }
 
+let intelTeamAccess;
 function renderTeam(team) {
-  refreshAiMarkerStatus();
-  membershipSettings.update(team, localIdentityHash);
+  if (!commsOnly) refreshAiMarkerStatus();
   currentTeamModules = Array.isArray(team.modules) ? team.modules : [];
   const previousEveryoneAdmin = currentEveryoneAdmin;
   currentEveryoneAdmin = team.everyone_admin === true;
@@ -4113,10 +4267,21 @@ function renderTeam(team) {
   if (previousEveryoneAdmin !== currentEveryoneAdmin) lastFieldMapSignature = "";
   const tasksEnabled = currentTeamModules.includes("tasks");
   teamOperational = role === "gateway" ? Boolean(team.created) : Boolean(team.joined);
+  const access = JSON.stringify([team.join_code, team.joined, team.hosted, team.membership_status, currentTeamAdmin]);
+  if (intelTeamAccess !== access) {
+    intelTeamAccess = access;
+    void intelPacks.refresh({resetHostData: true});
+  }
+  updateCommsMode(team.name);
   if (teamOperational && (role === "gateway" || team.membership_status === "approved")) connectLiveVoice();
   else if (liveVoiceSocket) liveVoiceSocket.close(1000, "No active team");
   const activeTeam = commandDisplay() ? Boolean(team.created || team.joined) : Boolean(team.joined);
   const canManageTeam = activeTeam && currentTeamAdmin;
+  membershipSettings.update(team, localIdentityHash, canManageTeam);
+  if (canManageTeam && location.hash === "#membership-requests") {
+    history.replaceState(history.state, "", location.href.split("#")[0]);
+    membershipSettings.open($("adminSettingsToggle"));
+  }
   $("adminSettingsToggle").classList.toggle("hidden", !canManageTeam);
   document.querySelectorAll("[data-open-admin-settings]").forEach(button => {
     button.classList.toggle("hidden", !canManageTeam);
@@ -4345,7 +4510,7 @@ function ownMessageRemoveButton(event) {
 
 function renderFieldFeed(events) {
   const visibleEvents = intelEvents(events);
-  $("feedCount").textContent = `${visibleEvents.length} EVENT${visibleEvents.length === 1 ? "" : "S"}`;
+  $("feedCount").textContent = `${visibleEvents.length} event${visibleEvents.length === 1 ? "" : "s"}`;
   if (!visibleEvents.length) {
     $("fieldFeedList").className = "field-feed-list empty-copy";
     $("fieldFeedList").textContent = "No verified intel received yet.";
@@ -4472,12 +4637,24 @@ function closePrivateChat() {
 
 async function refreshFeed() {
   if (role !== "field" || feedLoading) return;
-  if (!commandDisplay() && !fieldMap && !fieldMapReady) void renderFieldMap(fieldEvents);
+  if (!commsOnly && !commandDisplay() && !fieldMap && !fieldMapReady) void renderFieldMap(fieldEvents);
   feedLoading = true;
   try {
     const response = await fetch("/api/feed", {cache: "no-store"});
     const data = await response.json();
+    if (commsOnly && (response.status === 409 || data.team?.joined === false)) {
+      teamOperational = false;
+      void refresh();
+      return;
+    }
     if (!response.ok) throw new Error(data.detail || "Feed sync failed");
+    if (commsOnly) {
+      connectivityProbe = {at: Date.now(), online: data.network?.online !== false, ms: data.network?.response_ms};
+      fieldQueuedEvents = Number(data.network?.queued || 0);
+      renderConnectivity();
+      queueIncomingAlerts([...(data.events || []), ...(data.private_events || [])]);
+      return;
+    }
     if (data.team) renderTeam(data.team);
     renderMissionSync(data.mission_sync);
     fieldFeedOnline = data.network?.online !== false;
@@ -4552,8 +4729,9 @@ function renderNearby(teams) {
   }).join("");
 }
 
-async function refresh() {
+async function refresh({pullFeed = true} = {}) {
   if (commandWorkspace && (commandOverview || commandAllTeams)) return;
+  if (commsOnly && role === "field" && teamOperational) { await refreshFeed(); return; }
   try {
     const response = await fetch("/api/state", {cache: "no-store"});
     const state = await response.json();
@@ -4619,9 +4797,9 @@ async function refresh() {
         void renderFieldMap(fieldEvents);
       }
     }
-    if ((state.team.created || state.team.joined) && currentTeamModules.includes("tasks")) refreshTasks();
-    if (state.team.created || state.team.joined) void sharedNavigation.refresh();
-    if (role === "field" && state.team.joined) refreshFeed();
+    if (!commsOnly && (state.team.created || state.team.joined) && currentTeamModules.includes("tasks")) refreshTasks();
+    if (!commsOnly && (state.team.created || state.team.joined)) void sharedNavigation.refresh();
+    if (pullFeed && role === "field" && state.team.joined) refreshFeed();
     if (role === "field" && state.team.joined && activePrivatePeer) refreshPrivateChat();
   } catch (error) {
     setNetwork(null);
@@ -4853,9 +5031,13 @@ window.retiumAndroidQrError = (message) => {
   if (message) toast(String(message), true);
 };
 
+let toastTimer;
 function toast(message, error = false) {
-  $("toast").textContent = message; $("toast").className = `toast show${error ? " error" : ""}`;
-  setTimeout(() => $("toast").className = "toast", 2800);
+  const element = $("toast");
+  clearTimeout(toastTimer);
+  element.textContent = message;
+  element.className = `toast show${error ? " error" : ""}`;
+  toastTimer = setTimeout(() => { element.className = "toast"; }, 2800);
 }
 
 function showDelivery(delivery) {
@@ -4887,6 +5069,7 @@ function applyQueuedFieldEvent(data) {
     },
   };
   fieldQueuedEvents = Number(data.delivery.queued || fieldQueuedEvents || 1);
+  if (commsOnly) return;
   // The local API projects status updates onto their original pin on refresh.
   if (event.type === "marker.status") return;
   fieldEvents = withDisplayWaypointLabels([
@@ -4948,6 +5131,10 @@ enableDesktopEnterToSend("commandMessage", "sendCommandMessage");
 enableDesktopEnterToSend("message", "sendMessage");
 
 function cachedLocationPosition() {
+  if (nativeLocation) {
+    try { return nativePosition(JSON.parse(nativeLocation.getLastKnownLocation())); }
+    catch { return null; }
+  }
   const local = localMapPosition;
   if (Number.isFinite(local?.lat) && Number.isFinite(local?.lon) && Date.now() / 1000 - Number(local.created_at) <= 300) {
     return {coords: {latitude: local.lat, longitude: local.lon, accuracy: local.accuracy, altitude: null}};
@@ -4979,14 +5166,14 @@ function recenterKnownLocation() {
 }
 
 function transmitPosition(button) {
-  if (!navigator.geolocation) return toast("Geolocation unavailable", true);
+  if (nativeLocation ? !nativeLocation.hasLocationPermission() : !navigator.geolocation) return toast("Location permission is needed to share your position", true);
   const original = button.textContent;
   // Center first from a recent device fix. A fresher high-accuracy reading is
   // still requested and transmitted afterwards, without holding up the map.
   recenterKnownLocation();
   button.disabled = true;
   button.setAttribute("aria-label", "Refreshing current location");
-  navigator.geolocation.getCurrentPosition(async (position) => {
+  const onFix = async position => {
     // Explicit locate pans even when delivery is queued/offline. Suppress initial
     // auto-framing so a first manual fix cannot replace the user's chosen zoom.
     localMapPositionHasCentered = true;
@@ -4997,7 +5184,25 @@ function transmitPosition(button) {
     const accuracy = Number(position.coords.accuracy.toFixed(1));
     button.disabled = false; button.textContent = original; button.setAttribute("aria-label", "Share current position");
     await send({type: "position.updated", lat, lon, accuracy}, button);
-  }, (error) => { button.disabled = false; button.textContent = original; button.setAttribute("aria-label", "Share current position"); toast(error.message, true); }, {enableHighAccuracy: true, maximumAge: 10_000, timeout: 12000});
+  };
+  const onError = error => {
+    button.disabled = false;
+    button.textContent = original;
+    button.setAttribute("aria-label", "Share current position");
+    toast(error.message, true);
+  };
+  if (nativeLocation) {
+    const id = ++nativeLocateId;
+    const timer = setTimeout(() => window.retiumAndroidFreshLocation(id, null), 14_000);
+    nativeLocateRequest = {id, complete(position) {
+      clearTimeout(timer);
+      if (position) void onFix(position);
+      else onError(new Error("No fresh location fix available."));
+    }};
+    nativeLocation.requestFreshLocation(id);
+  } else {
+    navigator.geolocation.getCurrentPosition(onFix, onError, {enableHighAccuracy: true, maximumAge: 10_000, timeout: 12000});
+  }
 }
 $("mapSharePosition").addEventListener("click", (event) => transmitPosition(event.currentTarget));
 
@@ -5073,10 +5278,10 @@ async function sendMovementFix(position) {
 function startMovementSharing({announce = true, persist = true} = {}) {
   if (persist) saveAutomaticLocationPreference(true);
   if (window.RetiumAndroid?.setAutomaticLocationEnabled) {
-    nativeMovementTracking = true;
+    nativeMovementTracking = !nativeLocation || nativeLocation.hasPreciseLocation();
     window.RetiumAndroid.setAutomaticLocationEnabled(true);
     updateMovementSharingUi();
-    if (announce) toast("Automatic location updates active");
+    if (announce) toast(nativeMovementTracking ? "Automatic location updates active" : "Enable Precise location in Android settings for automatic team updates", !nativeMovementTracking);
     return;
   }
   if (!navigator.geolocation) return toast("Geolocation unavailable", true);
@@ -5101,6 +5306,11 @@ function syncAutomaticLocationSharing(joined) {
     return;
   }
   automaticLocationEnabled = readAutomaticLocationPreference();
+  if (nativeLocation && !nativeLocation.hasPreciseLocation()) {
+    nativeMovementTracking = false;
+    updateMovementSharingUi();
+    return;
+  }
   if (automaticLocationEnabled && movementWatchId === null && !nativeMovementTracking) {
     startMovementSharing({announce: false, persist: false});
   } else {
@@ -5120,12 +5330,55 @@ $("shareWaypointNavigation").addEventListener("click", async () => {
   try { await stopNavigationSharing(); } catch (error) { toast(error.message, true); }
 });
 window.addEventListener("pagehide", () => {
+  endHardwarePtt();
   if (localMapWatchId !== null) navigator.geolocation?.clearWatch(localMapWatchId);
   localMapWatchId = null;
   stopMovementSharing({announce: false, persist: false});
   // A suspended WebView is not an operator explicitly ending the shared plan.
   stopWaypointNavigation(false, {unshare: false});
+  nativeLocation?.setLocationDemand(nativeLocationJoined, "idle");
 });
+document.addEventListener("visibilitychange", syncNativeLocationDemand);
+
+function updateCommsMode(teamName) {
+  const button = $("commsOnlyToggle");
+  const active = Boolean(nativeComms && role === "field" && teamOperational && commsOnly);
+  button.classList.toggle("hidden", !nativeComms || commandDisplay() || role !== "field" || (!teamOperational && !commsOnly));
+  button.setAttribute("aria-pressed", String(commsOnly));
+  button.title = commsOnly ? "Back to full Field" : "Enter comms-only mode";
+  button.disabled = Boolean(pttStarting || pttRecorder || pttFinishing);
+  document.body.classList.toggle("field-comms-only", active);
+  $("fieldRadioPage").classList.toggle("hidden", !active);
+  if (teamName !== undefined) $("fieldRadioTeam").textContent = teamName || "Joined team";
+}
+
+$("commsOnlyToggle").addEventListener("click", () => {
+  if (!nativeComms || pttStarting || pttRecorder || pttFinishing) return;
+  commsOnly = !commsOnly;
+  nativeComms.setCommsOnly(commsOnly);
+  if (commsOnly) pointingSample = null;
+  pointingConnection.tick();
+  updateCommsMode();
+  if (fieldMap) {
+    if (commsOnly) fieldMap.stop();
+    else fieldMap.resize();
+    intelPacks.setMapPaused(fieldMap, commsOnly);
+  }
+  syncNativeLocationDemand();
+  void refresh();
+});
+
+function cachedCommsFix() {
+  try { return JSON.parse(nativeComms.getCommsLocation()); }
+  catch { return null; }
+}
+
+async function sendCommsPosition(fix, destination) {
+  const event = commsPositionEvent(fix);
+  if (!event || !destination || destination !== fieldTeamDestination || !teamOperational) return;
+  try { await postJson("/api/send", event); }
+  catch (error) { toast(`Voice sent · location update failed: ${error.message}`, true); }
+}
 
 function setPttState(state) {
   document.querySelectorAll(".ptt-button").forEach((button) => {
@@ -5139,7 +5392,35 @@ function setPttState(state) {
     button.querySelector("b").textContent = state === "live" ? "LIVE · RELEASE TO END" : state === "cutting" ? "RELEASE TO CUT" : state === "recording" ? "RELEASE TO SEND" : state === "canceling" ? "RELEASE TO DISCARD" : state === "sending" ? "SENDING OVER RNS…" : idleLabel;
     hint.textContent = state === "live" ? "ENCRYPTED RNS CHANNEL · SWIPE TO CUT" : state === "cutting" ? "ALREADY SENT AUDIO CANNOT BE UNDONE" : state === "recording" ? "SWIPE LEFT OR UP TO CANCEL" : state === "canceling" ? "RECORDING WILL NOT BE SENT" : state === "sending" ? "AUTHENTICATED RETICULUM LINK" : button.dataset.idleHint;
   });
+  $("commsOnlyToggle").disabled = Boolean(pttStarting || pttRecorder || pttFinishing);
 }
+
+function publicPttButton() {
+  if (commsOnly && role === "field") return teamOperational && !$("radioPttButton").disabled ? $("radioPttButton") : null;
+  return [...document.querySelectorAll(".ptt-button:not([data-private-recipient])")]
+    .find((button) => button.id !== "radioPttButton" && !button.disabled) || null;
+}
+
+function beginHardwarePtt() {
+  if (hardwarePttActive || pttRecorder || pttStarting || pttFinishing) return;
+  const button = publicPttButton();
+  if (!button) return;
+  hardwarePttActive = true;
+  startPtt(button, null);
+}
+
+function endHardwarePtt() {
+  if (!hardwarePttActive) return;
+  hardwarePttActive = false;
+  // Hardware input has no pointer-cancel gesture: releasing the key always
+  // sends the clip currently being recorded.
+  stopPtt(true);
+}
+
+// Android's native shell calls these for headset/PTT media keys and physical
+// function keys. They intentionally use the same public PTT path as touch.
+window.retiumHardwarePttDown = beginHardwarePtt;
+window.retiumHardwarePttUp = endHardwarePtt;
 
 function releasePttStream() {
   pttStream?.getTracks().forEach((track) => track.stop());
@@ -5171,11 +5452,12 @@ function microphoneErrorMessage(error) {
 }
 
 async function startPtt(button, pointerId) {
-  if (pttRecorder || pttStarting || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+  if (pttRecorder || pttStarting || pttFinishing || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
     if (!navigator.mediaDevices?.getUserMedia) toast("Microphone recording is unavailable", true);
     return;
   }
   pttStarting = true;
+  $("commsOnlyToggle").disabled = true;
   pttHoldActive = true;
   pttShouldSend = true;
   pttButton = button;
@@ -5232,6 +5514,7 @@ async function startPtt(button, pointerId) {
     toast(microphoneErrorMessage(error), true);
   } finally {
     pttStarting = false;
+    $("commsOnlyToggle").disabled = Boolean(pttRecorder || pttFinishing);
   }
 }
 
@@ -5245,6 +5528,16 @@ function stopPtt(sendClip) {
 }
 
 async function finishPtt() {
+  pttFinishing = true;
+  try { await deliverPtt(); }
+  finally {
+    pttFinishing = false;
+    setPttState("idle");
+    pttButton = null;
+  }
+}
+
+async function deliverPtt() {
   const recorder = pttRecorder;
   const mode = pttMode;
   const liveStreamId = pttLiveStreamId;
@@ -5253,14 +5546,24 @@ async function finishPtt() {
   const shouldSend = pttShouldSend;
   const mimeType = (recorder?.mimeType || "audio/webm").split(";", 1)[0];
   const blob = new Blob(pttChunks, {type: mimeType});
+  const fix = commsOnly && shouldSend && !privateRecipient && blob.size ? cachedCommsFix() : null;
+  const locationDestination = fieldTeamDestination;
   releasePttStream();
   pttRecorder = null;
   pttChunks = [];
   pttShouldSend = true;
   await pttLiveSendChain;
-  const liveSucceeded = mode === "live" && !pttLiveFailed && liveVoiceSocket?.readyState === WebSocket.OPEN;
+  let liveSucceeded = mode === "live" && !pttLiveFailed && liveVoiceSocket?.readyState === WebSocket.OPEN;
   if (mode === "live" && liveVoiceSocket?.readyState === WebSocket.OPEN && liveStreamId) {
-    liveVoiceSocket.send(JSON.stringify({action: liveSucceeded && shouldSend ? "end" : "cancel", stream_id: liveStreamId}));
+    try {
+      liveVoiceSocket.send(JSON.stringify({action: liveSucceeded && shouldSend ? "end" : "cancel", stream_id: liveStreamId}));
+      if (liveSucceeded && commsPositionEvent(fix)) {
+        const expiry = setTimeout(() => commsLivePositions.delete(liveStreamId), 20_000);
+        commsLivePositions.set(liveStreamId, {fix, destination: locationDestination, expiry});
+      }
+    } catch {
+      liveSucceeded = false;
+    }
   }
   pttMode = "recorded";
   pttLiveStreamId = null;
@@ -5268,15 +5571,11 @@ async function finishPtt() {
   pttLiveSendChain = Promise.resolve();
   pttPrivateRecipient = null;
   if (liveSucceeded) {
-    setPttState("idle");
     toast(shouldSend ? "Live Reticulum broadcast ended" : "Live transmission cut · sent audio cannot be undone");
-    pttButton = null;
     return;
   }
   if (!shouldSend || blob.size === 0) {
-    setPttState("idle");
     if (!shouldSend) toast(mode === "live" ? "Live transmission cut" : "Voice recording discarded");
-    pttButton = null;
     return;
   }
   setPttState("sending");
@@ -5290,6 +5589,7 @@ async function finishPtt() {
     if (!privateRecipient) {
       applyQueuedFieldEvent(data);
       showDelivery(data.delivery);
+      if (fix) void sendCommsPosition(fix, locationDestination);
     }
     toast(privateRecipient
       ? "Private voice accepted by Command mailbox"
@@ -5298,14 +5598,12 @@ async function finishPtt() {
         : data.delivery.status === "published"
           ? "Voice published to the Reticulum team feed"
           : "Voice broadcast proven over Reticulum");
-    if (data.delivery.status !== "queued") requestVoiceTranscript(data.event?.clip_id, false);
+    if (!commsOnly && data.delivery.status !== "queued") requestVoiceTranscript(data.event?.clip_id, false);
     if (privateRecipient) await refreshPrivateChat();
+    else if (commsOnly) void refreshFeed();
     else await refreshFeed();
   } catch (error) {
     toast(error.message, true);
-  } finally {
-    setPttState("idle");
-    pttButton = null;
   }
 }
 
@@ -5336,6 +5634,17 @@ document.querySelectorAll(".ptt-button").forEach((button) => {
     stopPtt(false);
   });
   button.addEventListener("contextmenu", (event) => event.preventDefault());
+});
+
+$("radioPttButton").addEventListener("keydown", event => {
+  if (event.key !== " " && event.key !== "Enter") return;
+  event.preventDefault();
+  if (!event.repeat) beginHardwarePtt();
+});
+$("radioPttButton").addEventListener("keyup", event => {
+  if (event.key !== " " && event.key !== "Enter") return;
+  event.preventDefault();
+  endHardwarePtt();
 });
 
 async function removeOwnMessage(button) {
@@ -5445,11 +5754,11 @@ function setFieldPage(page) {
   $("fieldFeedPage").classList.toggle("hidden", page !== "feed");
   $("fieldOpsPage").classList.toggle("hidden", page !== "ops");
   document.querySelectorAll("[data-field-page]").forEach((item) => {
-    const selected = item.dataset.fieldPage === page;
-    item.classList.toggle("selected", selected);
-    item.setAttribute("aria-selected", String(selected));
+    if (item.dataset.fieldPage === page) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
   });
   if (page === "map" && fieldMap) setTimeout(() => fieldMap.resize(), 0);
+  if (nativeLocation) syncLocalMapPosition(nativeLocationJoined);
 }
 
 document.querySelectorAll("[data-field-page]").forEach((button) => {
@@ -6016,22 +6325,26 @@ $("nearbyTeams").addEventListener("click", (event) => {
 });
 
 function connectLiveStream() {
-  if (role !== "gateway" || commandOverview || commandAllTeams) return;
+  if ((role !== "gateway" && !(role === "field" && commandWorkspace)) || commandOverview || commandAllTeams) return;
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(apiUrl(`${protocol}://${location.host}/api/live`));
   socket.addEventListener("message", (message) => {
     const payload = JSON.parse(message.data);
-    if (payload.type === "event.received") refresh();
+    if (payload.type === "event.received") refresh({pullFeed: false});
   });
   socket.addEventListener("close", () => setTimeout(connectLiveStream, 1500));
 }
 
-async function loadCommandTeams() {
+async function loadCommandTeams(startup = false) {
   const response = await fetch("/api/command/teams", {cache: "no-store"});
   if (!response.ok) return false; // Field has no Command workspace.
   commandWorkspace = true;
   const {teams, removed = []} = await response.json();
-  const selected = new URL(location.href).searchParams.get("team") || "default";
+  const chooseDefault = startup && !new URL(location.href).searchParams.has("team");
+  if (chooseDefault && (teams.length || await loadCommandNearby())) {
+    location.replace(teamPageUrl("all", location.href));
+    return true;
+  }
   $("commandTeamsToggle").classList.remove("hidden");
   $("allTeamsLink").classList.remove("hidden");
   $("allTeamsLink").href = teamPageUrl("all", location.href);
@@ -6041,7 +6354,7 @@ async function loadCommandTeams() {
   $("closeTeamView").classList.toggle("hidden", commandOverview || commandAllTeams);
   $("commandTeamsList").innerHTML = teams.length ? teams.map((team) => `
     <article class="command-team-row">
-      <div><strong>${escapeHtml(team.name)}</strong><small>${team.mode === "member" ? (team.hosting ? "JOINED · SYNC ACTIVE" : "JOINED · PAUSED") : team.hosting ? "HOSTING HERE" : "HOST STOPPED"}${team.id === selected ? " · CURRENT VIEW" : ""}</small></div>
+      <div><strong>${escapeHtml(team.name)}</strong><small>${team.mode === "member" ? (team.hosting ? "JOINED · SYNC ACTIVE" : "JOINED · PAUSED") : team.hosting ? "HOSTING HERE" : "HOST STOPPED"}${team.id === selectedCommandTeam ? " · CURRENT VIEW" : ""}</small></div>
       <div class="command-team-actions">
         ${team.hosting ? `<a class="team-open-link" href="${escapeHtml(teamPageUrl(team.id, location.href))}">OPEN TEAM →</a>` : ""}
         ${team.mode !== "member" ? `<button type="button" class="text-button" data-team-rename aria-expanded="false" aria-controls="rename-team-${escapeHtml(team.id)}">RENAME</button>` : ""}
@@ -6058,8 +6371,38 @@ async function loadCommandTeams() {
     </article>`).join("") : '<p class="empty-copy">No saved teams. Join or create a team below.</p>';
   $("removedCommandTeams").classList.toggle("hidden", !removed.length);
   $("removedCommandTeamsList").innerHTML = removed.map(team => `<article class="command-team-row"><strong>${escapeHtml(team.name)}</strong><button type="button" class="text-button" data-team-restore="${escapeHtml(team.id)}">RESTORE</button></article>`).join("");
-  void loadCommandNearby();
-  return true;
+  if (!chooseDefault) void loadCommandNearby();
+  return false;
+}
+
+let workspaceMembershipLoading = false;
+let workspaceMembershipLinks = "";
+async function refreshWorkspaceMembership() {
+  if (!commandWorkspace || workspaceMembershipLoading) return;
+  workspaceMembershipLoading = true;
+  try {
+    const response = await fetch("/api/command/membership-requests", {cache: "no-store"});
+    if (!response.ok) return;
+    const {teams} = await response.json();
+    const requests = teams.filter(team => team.id !== selectedCommandTeam).map(team => {
+      const url = new URL(teamPageUrl(team.id, location.href));
+      url.hash = "membership-requests";
+      return {url: url.href, label: `${membershipRequestLabel(team.count)} · ${team.name}`};
+    });
+    const status = $("workspaceMembershipRequestStatus");
+    const label = requests.map(request => request.label).join(". ");
+    const links = requests.map(request =>
+      `<a class="membership-review" href="${escapeHtml(request.url)}">${escapeHtml(request.label)}</a>`).join("");
+    if (links !== workspaceMembershipLinks) {
+      workspaceMembershipLinks = links;
+      $("workspaceMembershipRequests").innerHTML = links;
+    }
+    if (status.textContent !== label) status.textContent = label;
+  } catch {
+    // Keep the last known requests during a connection interruption.
+  } finally {
+    workspaceMembershipLoading = false;
+  }
 }
 
 async function loadCommandNearby() {
@@ -6075,6 +6418,7 @@ async function loadCommandNearby() {
         : `<button type="button" class="secondary compact" data-command-join="${escapeHtml(team.join_code)}">JOIN</button>`;
       return `<div class="nearby-team"><div><strong>${escapeHtml(team.name)}</strong><small>${state}</small></div>${action}</div>`;
     }).join("") : '<p class="empty-copy">No team announces heard recently. Paste its join code above.</p>';
+    return teams.length > 0;
   } catch (error) { $("commandNearbyTeams").textContent = error.message; }
 }
 
@@ -6196,12 +6540,13 @@ $("commandTeamsList").addEventListener("submit", async (event) => {
 });
 
 async function initializeWorkspace() {
-  try { await loadCommandTeams(); } catch { /* Normal state check reports connection errors. */ }
+  try { if (await loadCommandTeams(true)) return; } catch { /* Normal state check reports connection errors. */ }
+  void refreshWorkspaceMembership();
   if (commandWorkspace && commandAllTeams) {
     document.body.classList.add("all-teams-mode");
     $("roleLabel").textContent = "COMMAND";
     $("networkToggle").classList.add("hidden");
-    const {startAllTeamsView} = await import("./all-teams-view.js?v=20260908-3");
+    const {startAllTeamsView} = await import("./all-teams-view.js?v=20261125-1");
     await startAllTeamsView({mapStyle: mapStyleDefinition, initialStyle: mapStyleMode, saveStyle: saveMapStylePreference, onMapReady: (map, Popup) => intelPacks.attachMap(map, {Popup})});
     return;
   }
@@ -6222,6 +6567,13 @@ initContinuitySettings({apiUrl, escapeHtml, toast});
 const membershipSettings = initMembershipSettings({apiUrl, escapeHtml, toast, onChange: async () => { await refresh(); if (role === "field") await refreshFeed(); }});
 initializeWorkspace();
 setInterval(refresh, 15000);
+function refreshMembershipIndicators() {
+  if (document.hidden || commsOnly) return;
+  void membershipSettings.refresh();
+  void refreshWorkspaceMembership();
+}
+setInterval(refreshMembershipIndicators, 15000);
+document.addEventListener("visibilitychange", refreshMembershipIndicators);
 
 // Resolve asynchronous landmarks into the currently displayed team immediately.
 onLandmarkResolved(() => {

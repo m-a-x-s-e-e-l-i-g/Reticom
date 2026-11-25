@@ -113,3 +113,20 @@ def test_confirmed_deletions_and_report_status_are_in_the_next_snapshot(tmp_path
     assert [e["id"] for e in events] == ["clear"]
     assert events[0]["report_view"]["status"] == "cleared"
     source.close(); cache.close()
+
+
+def test_stale_mission_snapshot_cannot_restore_a_removed_marker(tmp_path):
+    source, cache = EventStore(tmp_path / "host.sqlite"), EventStore(tmp_path / "cache.sqlite")
+    publisher, inbox = MissionPublisher(), MissionInbox(cache)
+    source.insert(event("casualty"), SENDER)
+    transfer(publisher, inbox, source)
+    deletion = {**event("delete", "marker.deleted"), "marker_id": "casualty"}
+    cache.insert(deletion, "c" * 32, interface_name="Team admin · Authenticated Reticulum Link")
+    # Force a refresh while an old host picture still contains the marker.
+    inbox.request(force=True)
+    transfer(publisher, inbox, source)
+    assert cache.mission_events() == []
+    source.insert(deletion, "c" * 32, interface_name="Team admin · Authenticated Reticulum Link")
+    transfer(publisher, inbox, source)
+    assert cache.mission_events() == []
+    source.close(); cache.close()

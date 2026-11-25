@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from threading import Lock
+from types import SimpleNamespace
+
 import pytest
+import RNS
 
 from retium.live_voice import (
     LiveVoiceAssembler,
@@ -9,6 +13,7 @@ from retium.live_voice import (
     validate_live_metadata,
 )
 from retium.transport import GatewayReceiver
+from retium.store import EventStore
 
 
 STREAM_ID = "336f067d-541e-49af-aa9d-a283146f97f5"
@@ -129,3 +134,37 @@ def test_completed_command_live_stream_uses_normal_ptt_archive() -> None:
 
     assert archived[0][0]["mime_type"] == "audio/ogg"
     assert archived[0][1] == b"ogg-opus"
+
+
+def test_hosted_field_live_stream_keeps_field_identity_in_feed(tmp_path) -> None:
+    field_identity = RNS.Identity()
+    receiver = GatewayReceiver.__new__(GatewayReceiver)
+    receiver.identity = RNS.Identity()
+    receiver.destination = SimpleNamespace(hash=b"\x00" * 16)
+    receiver._live_lock = Lock()
+    receiver._live_streams = {}
+    receiver._live_links_except = lambda: [object()]
+    receiver._broadcast_live_chunk = lambda *_args: 1
+    frames, saved, published = [], [], []
+    receiver._broadcast_live_control = lambda *frame: frames.append(frame) or 1
+    receiver.save_ptt = lambda *clip: saved.append(clip)
+    receiver.event_callback = published.append
+    receiver.store = EventStore(tmp_path / "events.sqlite3")
+    try:
+        receiver.send_live_start(
+            STREAM_ID,
+            {"mime_type": "audio/webm;codecs=opus", "callsign": "FIELD-1"},
+            origin_identity=field_identity,
+        )
+        receiver.send_live_chunk(STREAM_ID, 0, b"recorded audio")
+        receiver.send_live_end(STREAM_ID)
+
+        sender = field_identity.hash.hex()
+        assert frames[0][2]["sender_hash"] == sender
+        assert saved == [(STREAM_ID, b"recorded audio", "audio/webm")]
+        assert published[0]["network"]["sender_hash"] == sender
+        [event] = receiver.store.mission_events()
+        assert event["clip_id"] == STREAM_ID
+        assert event["network"]["sender_hash"] == sender
+    finally:
+        receiver.store.close()

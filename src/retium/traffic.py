@@ -1,32 +1,54 @@
 """Opt-in public moving traffic. No team identity, messages or Reticulum writes.
 
-Aircraft use bounded ADSB.lol requests. AISStream stays in the local Python
-backend, never the WebView; one compressed socket serves leased visible maps.
+Aircraft use bounded regional requests. Vessel providers serve leased visible
+maps through the local Python backend.
 """
 from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 import math
-import random
+import os
 import re
 import time
-from urllib.parse import urlsplit
+from urllib.error import HTTPError
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 FLIGHT_TYPES = ("light", "small", "medium", "heavy", "helicopter", "glider", "balloon", "drone", "ground", "other", "unknown")
 VESSEL_TYPES = ("cargo", "tanker", "passenger", "fishing", "sailing", "pleasure", "tug", "service", "high_speed", "military_restricted", "other", "unknown")
 AFFILIATIONS = ("all", "military", "commercial", "unknown")
 TRAFFIC_IDS = ("flights", "vessels")
+
+
+def personal_flight_fallback_enabled():
+    setting = "RETICOM_ADSB_FI_PERSONAL"
+    value = os.environ.get(setting)
+    if value is not None or os.name != "nt":
+        return value == "1"
+    # Desktop launchers can inherit an environment older than the user's opt-in.
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            value, _ = winreg.QueryValueEx(key, setting)
+    except OSError:
+        return False
+    return value == "1"
+
+
+PERSONAL_FLIGHT_FALLBACK = personal_flight_fallback_enabled()
 TRAFFIC_PACKS = [
     {"id": "flights", "title": "Live aircraft", "source": "ADSB.lol", "source_url": "https://www.adsb.lol/docs/open-data/api/",
      "attribution": "ADSB.lol contributors · ODbL", "description": "Public aircraft positions, heading and altitude. Incomplete coverage; not an air-traffic safety service.",
-     "min_zoom": 6, "ttl_seconds": 10, "credential_fields": []},
-    {"id": "vessels", "title": "Live boats & ships", "source": "AISStream", "source_url": "https://aisstream.io/documentation",
-     "attribution": "AISStream · AIS reports", "description": "Public AIS positions and vessel types. Requires your own API key and permitted use. Not a complete marine picture.",
-     "min_zoom": 6, "ttl_seconds": 5, "credential_fields": ["aisstream_key"]},
+     "min_zoom": 6, "ttl_seconds": 10, "credential_fields": [],
+     "personal_fallback": PERSONAL_FLIGHT_FALLBACK},
+    {"id": "vessels", "title": "Live boats & ships", "source": "Open Waters AIS", "source_url": "https://openwaters.io/ais/",
+     "description": "Public AIS positions. Uses AISStream when configured, with Open Waters AIS and optional AISHub fallback.",
+     "min_zoom": 6, "ttl_seconds": 5, "credential_fields": []},
 ]
 MAX_TARGETS = 1500
 MAX_FLIGHT_QUERIES = 4
@@ -76,6 +98,15 @@ def number(value, low=-math.inf, high=math.inf):
 
 def clean(value, size=80):
     return "".join(c for c in str(value or "") if ord(c) >= 32).strip()[:size]
+
+
+def ais_length(dimensions):
+    if not isinstance(dimensions, dict):
+        return None
+    bow, stern = (number(dimensions.get(axis), 0, 511) for axis in ("A", "B"))
+    if bow is None or stern is None:
+        return None
+    return round(bow + stern) or None
 
 
 def point_feature(key, lon, lat, props):
@@ -143,12 +174,75 @@ class _NoRedirect(HTTPRedirectHandler):
         raise ValueError("Aircraft provider redirected")
 
 
-def fetch_flights(url):
-    with build_opener(_NoRedirect()).open(Request(url, headers={"User-Agent": "Reticom/0.1 public-aircraft-layer"}), timeout=12) as response:
+def fetch_traffic_json(url, user_agent):
+    with build_opener(_NoRedirect()).open(Request(url, headers={"User-Agent": user_agent}), timeout=12) as response:
         data = response.read(4_000_001)
         if len(data) > 4_000_000:
-            raise ValueError("Aircraft response too large")
+            raise ValueError("Traffic response too large")
         return json.loads(data)
+
+
+def fetch_flights(url):
+    return fetch_traffic_json(url, "Reticom/0.1 public-aircraft-layer")
+
+
+def flight_retry_at(error, now, default):
+    retry = error.headers.get("Retry-After", "") if error.headers else ""
+    if retry.isdecimal():
+        return now + max(1, int(retry))
+    if retry:
+        try:
+            return max(now + 1, parsedate_to_datetime(retry).timestamp())
+        except (ValueError, OverflowError):
+            pass
+    return default
+
+
+class FlightFeedCooldown(Exception):
+    pass
+
+
+def vessel_snapshot(bounds, aishub_key=""):
+    west, south, east, north = bounds
+    agent = "Reticom/0.2 (https://github.com/m-a-x-s-e-e-l-i-g/Reticom)"
+    if aishub_key:
+        query = urlencode(dict(username=aishub_key, format=1, output="json", interval=10,
+                               lonmin=west, latmin=south, lonmax=east, latmax=north))
+        payload = fetch_traffic_json(f"https://data.aishub.net/ws.php?{query}", agent)
+        if (not isinstance(payload, list) or len(payload) != 2 or not isinstance(payload[0], dict)
+                or payload[0].get("ERROR") is not False or not isinstance(payload[1], list)):
+            raise ValueError("AISHub snapshot unavailable")
+        return [dict(mmsi=row.get("MMSI"), name=row.get("NAME"), type=row.get("TYPE"),
+                     callsign=row.get("CALLSIGN"), destination=row.get("DEST"), seen=row.get("TIME"),
+                     length_m=ais_length(row),
+                     cog=row.get("COG"), sog=row.get("SOG"), heading=row.get("HEADING"), nav_status=row.get("NAVSTAT"),
+                     coordinates=[row.get("LONGITUDE"), row.get("LATITUDE")], source="aishub", credit="Data: AISHub contributors")
+                for row in payload[1][:MAX_CACHED_TARGETS] if isinstance(row, dict)]
+
+    # Anonymous Open Waters queries allow 100 square degrees per request.
+    middle_lon, middle_lat = (west + east) / 2, (south + north) / 2
+    boxes = [bounds] if (east-west)*(north-south) <= 100 else [
+        (w, s, e, n) for w, e in ((west, middle_lon), (middle_lon, east))
+        for s, n in ((south, middle_lat), (middle_lat, north))]
+    rows = []
+    for w, s, e, n in boxes:
+        query = urlencode(dict(bbox=f"{s},{w},{n},{e}", max_age="10m", kind="vessel"))
+        payload = fetch_traffic_json(f"https://ais.openwaters.io/v1/vessels?{query}", agent)
+        if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection" or not isinstance(payload.get("features"), list):
+            raise ValueError("Open Waters AIS snapshot unavailable")
+        credits = payload.get("attribution")
+        credits = credits if isinstance(credits, dict) else {}
+        for feature in payload["features"][:MAX_TARGETS]:
+            if not isinstance(feature, dict):
+                continue
+            props, geometry = feature.get("properties"), feature.get("geometry")
+            if isinstance(props, dict) and isinstance(geometry, dict) and geometry.get("type") == "Point":
+                source = clean(props.get("source")).split(":", 1)[0]
+                credit = clean(credits.get(source), 500) or "Open Waters AIS"
+                if source == "aishub":
+                    credit = "Open Waters AIS · Data: AISHub contributors"
+                rows.append({**props, "coordinates": geometry.get("coordinates"), "credit": credit})
+    return rows
 
 
 def fetch_aircraft_profile(identity):
@@ -190,14 +284,38 @@ def aircraft_profile(payload):
 def fetch_aircraft_photo(url):
     if not safe_aircraft_photo_url(url):
         raise ValueError("Unsafe aircraft photo URL")
-    with build_opener(_NoRedirect()).open(Request(url, headers={"User-Agent": "Reticom/0.1 aircraft-details"}), timeout=8) as response:
+    return _fetch_traffic_photo(url)
+
+
+def _fetch_traffic_photo(url):
+    with build_opener(_NoRedirect()).open(Request(url, headers={"User-Agent": "Reticom/0.2 public-traffic-photo"}), timeout=8) as response:
         content_type = clean(response.headers.get("Content-Type")).lower().split(";", 1)[0]
         if content_type not in {"image/jpeg", "image/png", "image/webp"}:
-            raise ValueError("Aircraft photo is not a supported image")
+            raise ValueError("Traffic photo is not a supported image")
         data = response.read(AIRCRAFT_PHOTO_MAX_BYTES + 1)
-        if len(data) > AIRCRAFT_PHOTO_MAX_BYTES:
-            raise ValueError("Aircraft photo is too large")
+        if not data or len(data) > AIRCRAFT_PHOTO_MAX_BYTES:
+            raise ValueError("Invalid traffic photo size")
         return {"data": data, "content_type": content_type}
+
+
+def vessel_photo_info(identity):
+    url = f"https://openvesselphotos.org/v1/mmsi/{identity}"
+    payload = fetch_traffic_json(url, "Reticom/0.2 public-vessel-photo (+https://github.com/m-a-x-s-e-e-l-i-g/Reticom)")
+    if not isinstance(payload, dict) or str(payload.get("mmsi")) != identity or not isinstance(payload.get("photos"), list):
+        return None
+    for photo in payload["photos"]:
+        if not isinstance(photo, dict):
+            continue
+        photo_number = photo.get("n")
+        credit = clean(photo.get("attribution"), 350)
+        if type(photo_number) is int and 1 <= photo_number <= 9999 and credit:
+            return {"number": photo_number, "credit": credit,
+                    "source_url": clean(photo.get("source"), 800) or f"{url}/photos/{photo_number}.jpg"}
+    return None
+
+
+def fetch_vessel_photo(identity, photo_number):
+    return _fetch_traffic_photo(f"https://openvesselphotos.org/v1/mmsi/{identity}/photos/{photo_number}.jpg?size=320")
 
 
 def flight_query(bounds):
@@ -277,7 +395,24 @@ class VesselRegistry:
         self.records = OrderedDict()
         self.on_position = on_position
 
-    def ingest(self, envelope, now):
+    def ingest_snapshot(self, row, now, provider):
+        coordinates, seen = row.get("coordinates"), row.get("seen")
+        if not isinstance(coordinates, (list, tuple)) or len(coordinates) != 2 or not isinstance(seen, str):
+            return False
+        try:
+            observed = datetime.fromisoformat(seen.replace(" GMT", "+00:00").replace("Z", "+00:00"))
+            if observed.tzinfo is None:
+                return False
+            report_time = observed.astimezone(timezone.utc).isoformat()
+        except (ValueError, OverflowError):
+            return False
+        lon, lat = coordinates
+        position = dict(UserID=row.get("mmsi"), Latitude=lat, Longitude=lon, TrueHeading=row.get("heading"),
+                        Cog=row.get("cog"), Sog=row.get("sog"), NavigationalStatus=row.get("nav_status"))
+        return self.ingest({"MessageType": "PositionReport", "Message": {"PositionReport": position},
+                            "MetaData": {"time_utc": report_time}}, now, provider, row)
+
+    def ingest(self, envelope, now, provider="AISStream", snapshot=None):
         if not isinstance(envelope, dict) or envelope.get("MessageType") not in AIS_TYPES:
             return
         kind = envelope["MessageType"]
@@ -297,15 +432,18 @@ class VesselRegistry:
             self.records.popitem(last=False)
         if metadata.get("ShipName"):
             record["title"] = clean(metadata["ShipName"])
+        length = None
         if kind == "ShipStaticData":
             record.update(title=clean(message.get("Name")) or record.get("title", mmsi), callsign=clean(message.get("CallSign")),
                           ship_type_code=int(number(message.get("Type"), 0, 99) or 0), destination=clean(message.get("Destination")))
+            length = ais_length(message.get("Dimension"))
         elif kind == "StaticDataReport":
             part_a, part_b = message.get("ReportA", {}), message.get("ReportB", {})
             if message.get("PartNumber") == 0 and isinstance(part_a, dict) and part_a.get("Valid") is not False:
                 record["title"] = clean(part_a.get("Name")) or record.get("title", mmsi)
             elif message.get("PartNumber") == 1 and isinstance(part_b, dict) and part_b.get("Valid") is not False:
                 record.update(callsign=clean(part_b.get("CallSign")), ship_type_code=int(number(part_b.get("ShipType"), 0, 99) or 0))
+                length = ais_length(part_b.get("Dimension"))
         else:
             lat = number(message.get("Latitude", metadata.get("latitude", metadata.get("Latitude"))), -90, 90)
             lon = number(message.get("Longitude", metadata.get("longitude", metadata.get("Longitude"))), -180, 180)
@@ -318,11 +456,27 @@ class VesselRegistry:
             record.update(lon=lon, lat=lat, position_time=observed, heading=heading,
                           course=number(message.get("Cog"), 0, 359.999),
                           navigation_status=number(message.get("NavigationalStatus"), 0, 15),
-                          speed_knots=number(message.get("Sog"), 0, 102.2))
+                          speed_knots=number(message.get("Sog"), 0, 102.2), source=provider,
+                          attribution="AISStream · AIS reports", source_url="https://aisstream.io/")
+            if kind == "ExtendedClassBPositionReport":
+                length = ais_length(message.get("Dimension"))
+                if ship_type := number(message.get("Type"), 1, 99):
+                    record["ship_type_code"] = int(ship_type)
+            if snapshot is not None:
+                length = number(snapshot.get("length_m"), 1, 1022)
+                source_url = "https://www.aishub.net/" if snapshot.get("source") == "aishub" else "https://openwaters.io/ais/"
+                record.update(attribution=snapshot["credit"], source_url=source_url)
+                for field, value in (("title", clean(snapshot.get("name"))), ("callsign", clean(snapshot.get("callsign"))),
+                                     ("destination", clean(snapshot.get("destination"))), ("ship_type_code", int(number(snapshot.get("type"), 0, 99) or 0))):
+                    if value:
+                        record[field] = value
+        if length:
+            record["length_m"] = round(length)
         # Static reports enrich a target, never refresh its position or resurrect it.
         record["metadata_time"] = now
         if kind in AIS_POSITION and self.on_position and "position_time" in record:
             self.on_position(record)
+        return True
 
     def features(self, bounds, now):
         result = []
@@ -335,9 +489,9 @@ class VesselRegistry:
             kind, affiliation = vessel_kind(record["ship_type_code"])
             props = {key: value for key, value in record.items() if key not in {"lat", "lon", "metadata_time"}}
             props.update(title=record.get("title") or mmsi, traffic_pack="vessels", traffic_type=kind, affiliation=affiliation,
-                         observed_at=record["position_time"], source_url="https://aisstream.io/", attribution="AISStream · AIS reports",
+                         observed_at=record["position_time"],
                          classification_note="AIS type 35: military OR other restricted operations, not confirmed ownership" if affiliation == "military" else "Commercial use inferred from self-reported AIS vessel type" if affiliation == "commercial" else "Ownership unknown; AIS vessel type may be missing",
-                         position_time_note="Stream report time, not guaranteed GNSS fix time")
+                         position_time_note="Provider report time, not guaranteed GNSS fix time")
             feature = point_feature(f"vessel-{mmsi}", record["lon"], record["lat"], props)
             if inside(feature, bounds):
                 result.append(feature)
@@ -346,10 +500,11 @@ class VesselRegistry:
 
 class LiveTraffic:
     def __init__(self, store, *, clock=time.time, flight_fetch=fetch_flights, aircraft_fetch=fetch_aircraft_profile,
-                 photo_fetch=fetch_aircraft_photo, connector=None):
+                 photo_fetch=fetch_aircraft_photo, connector=None, snapshot_fetch=vessel_snapshot):
         self.store, self.clock, self.flight_fetch, self.aircraft_fetch, self.photo_fetch, self.connector = store, clock, flight_fetch, aircraft_fetch, photo_fetch, connector
         self.flight_lock = asyncio.Lock()
         self.flight_data, self.flight_at, self.flight_next = [], 0, 0
+        self.primary_flight_next = self.fallback_flight_next = 0
         self.flight_views = OrderedDict()
         self.flight_clients = OrderedDict()
         self.flight_epoch = 0
@@ -365,15 +520,18 @@ class LiveTraffic:
         self.task = None
         self.closed = False
         self.ais_state = "waiting"
-        self.ais_key = None
+        self.ais_keys = None
+        self.ais_provider = None
+        self.snapshot_fetch = snapshot_fetch
+        self.aishub_next = 0
 
     def access(self):
         with self.store.lock:
-            return "vessels" in self.store.enabled, self.store.credentials.get("aisstream_key", "")
+            return "vessels" in self.store.enabled, (self.store.credentials.get("aisstream_key", ""), self.store.credentials.get("aishub_key", ""))
 
     async def settings_changed(self):
-        enabled, key = self.access()
-        if not enabled or key != self.ais_key:
+        enabled, keys = self.access()
+        if not enabled or keys != self.ais_keys:
             await self.stop_vessels()
         if not self.store.is_enabled("flights"):
             self.flight_data = []
@@ -391,7 +549,7 @@ class LiveTraffic:
                 pass
         self.leases.clear()
         self.registry = VesselRegistry(self.record_vessel)
-        self.ais_state, self.ais_key = "waiting", None
+        self.ais_state, self.ais_keys, self.ais_provider = "waiting", None, None
 
     async def close(self):
         if self.closed:
@@ -411,7 +569,7 @@ class LiveTraffic:
             raise ValueError("Enable this traffic layer to view its route")
         identity = identity.lower()
         points = self.history.points(pack, identity)
-        note = "Recorded AIS track · last 24 hours; earlier voyage unavailable" if pack == "vessels" else "Locally recorded aircraft track · provider history unavailable"
+        note = "Recorded AIS track · last 24 hours; earlier voyage unavailable" if pack == "vessels" else "Local fixes · ADSB.lol history unavailable"
         if pack == "flights":
             async with self.route_lock:
                 cached = self.route_cache.get(identity)
@@ -425,9 +583,9 @@ class LiveTraffic:
                     while len(self.route_cache) > 64:
                         self.route_cache.popitem(last=False)
                 if cached["points"]:
-                    merged = {p["time"]: p for p in [*cached["points"], *points]}
+                    merged = {p["time"]: p for p in [*points, *cached["points"]]}
                     points = sorted(merged.values(), key=lambda p: p["time"])[-12000:]
-                    note = "Available ADSB.lol track · last 24 hours; coverage gaps may remain"
+                    note = "ADSB.lol history · coverage may have gaps"
         return {"points": points, "note": note, "complete": False}
 
     @staticmethod
@@ -496,24 +654,60 @@ class LiveTraffic:
         if not vessel_view_allowed(bounds):
             self.release(client)
             return {**empty, "status": "zoom_in", "note": "Zoom in: vessel coverage is limited to a large regional view."}
-        enabled, key = self.access()
-        if not key:
-            return {**empty, "status": "needs_key", "note": "Add your AISStream key under Source access. Confirm your provider permissions."}
-        if key != self.ais_key:
+        _, keys = self.access()
+        if keys != self.ais_keys:
             await self.stop_vessels()
-            self.ais_key = key
+            self.ais_keys = keys
         self.leases[client] = (tuple(bounds), self.clock() + LEASE_SECONDS)
         self.leases.move_to_end(client)
         while len(self.leases) > MAX_LEASES:
             self.leases.popitem(last=False)
         if self.task is None or self.task.done():
-            self.task = asyncio.create_task(self.run_vessels(key))
+            self.task = asyncio.create_task(self.run_vessels(keys))
         features = self.registry.features(bounds, self.clock())
         capped = len(features) > MAX_TARGETS
         features = sorted(features, key=lambda feature: feature["properties"].get("position_time", 0), reverse=True)[:MAX_TARGETS]
-        note = "AIS connected · waiting for reports in this area" if self.ais_state == "connected" else "Connecting to AISStream…" if self.ais_state == "waiting" else "AISStream unavailable or access rejected; retrying with backoff. Check key, Internet and account limits."
+        note = f"{self.ais_provider} · {len(features)} vessels in view" if self.ais_state == "connected" else "Connecting to AIS providers…" if self.ais_state == "waiting" else "AIS providers unavailable · retrying"
         return {**empty, "status": "fresh" if self.ais_state == "connected" else "stale" if features else "waiting" if self.ais_state == "waiting" else "error",
-                "features": features, "capped": capped, "note": note if not features or self.ais_state != "connected" else "AIS stream · last-seen positions cached for 30 minutes", "error": note if self.ais_state == "error" else None}
+                "features": features, "capped": capped, "note": note, "error": note if self.ais_state == "error" else None}
+
+    async def flight_batches(self, queries):
+        now = self.clock()
+        if now >= self.primary_flight_next:
+            try:
+                payloads = await asyncio.gather(*(asyncio.to_thread(self.flight_fetch, query) for query in queries))
+                return [parse_flights(payload, self.clock()) for payload in payloads]
+            except (OSError, ValueError) as error:
+                now = self.clock()
+                if isinstance(error, HTTPError) and error.code == 429:
+                    self.primary_flight_next = flight_retry_at(error, now, (int(now) // 86400 + 1) * 86400)
+                elif not PERSONAL_FLIGHT_FALLBACK:
+                    raise
+                else:
+                    self.primary_flight_next = now + 30
+        if not PERSONAL_FLIGHT_FALLBACK or now < self.fallback_flight_next:
+            raise FlightFeedCooldown
+        batches = []
+        for index, query in enumerate(queries):
+            if index:
+                await asyncio.sleep(1)
+            _, lat, lon, radius = query.rsplit("/", 3)
+            url = f"https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{radius}"
+            try:
+                payload = await asyncio.to_thread(self.flight_fetch, url)
+                features, capped = parse_flights(payload, self.clock())
+            except (OSError, ValueError) as error:
+                now = self.clock()
+                self.fallback_flight_next = flight_retry_at(error, now, now + 30) if isinstance(error, HTTPError) else now + 30
+                if batches:
+                    return batches
+                if isinstance(error, HTTPError) and error.code == 429:
+                    raise FlightFeedCooldown from error
+                raise
+            for feature in features:
+                feature["properties"].update(source_url="https://adsb.fi/", attribution="adsb.fi")
+            batches.append((features, capped))
+        return batches
 
     async def flights(self, bounds, empty, queries, client):
         async with self.flight_lock:
@@ -544,8 +738,7 @@ class LiveTraffic:
                 epoch = self.flight_epoch
                 try:
                     chosen_queries = flight_queries(chosen_bounds)
-                    payloads = await asyncio.gather(*(asyncio.to_thread(self.flight_fetch, query) for query in chosen_queries))
-                    batches = [parse_flights(payload, self.clock()) for payload in payloads]
+                    batches = await self.flight_batches(chosen_queries)
                     merged = {}
                     for features, _capped in batches:
                         for feature in features:
@@ -570,6 +763,9 @@ class LiveTraffic:
                         self.history.add("flights", props["identity"], props["position_time"], lon, lat)
                     self.flight_at, self.flight_error = self.clock(), None
                     chosen.update(features=features, capped=capped, fetched_at=self.clock(), error=None)
+                except FlightFeedCooldown:
+                    self.flight_next = self.clock() + 30
+                    current["error"] = chosen["error"] = "Aircraft provider is cooling down. Last-seen positions stay visible until they expire."
                 except Exception:
                     self.flight_next = self.clock() + 30
                     chosen["error"] = "Aircraft feed unavailable; retrying shortly. Coverage is not guaranteed."
@@ -591,47 +787,76 @@ class LiveTraffic:
                     "features": features, "fetched_at": current["fetched_at"], "capped": current["capped"], "error": current["error"],
                     "note": current["error"] or "Refreshes about every 10 seconds · last-seen positions cached for 30 minutes"}
 
-    async def run_vessels(self, key):
-        retry = 2
-        try:
-            while not self.closed and self.boxes() and self.access() == (True, key):
+    async def stream_vessels(self, keys):
+        if self.connector is None:
+            from websockets.asyncio.client import connect
+        else:
+            connect = self.connector
+        loop = asyncio.get_running_loop()
+        async with connect(AIS_URL, compression="deflate", open_timeout=10, close_timeout=2, max_size=65536,
+                           max_queue=32, ping_interval=20, ping_timeout=20, proxy=None) as socket:
+            sent, sent_at = None, 0
+            deadline = loop.time() + 15
+            while (boxes := self.boxes()) and self.access() == (True, keys):
+                if loop.time() >= deadline:
+                    raise TimeoutError("AISStream sent no recent positions")
+                if boxes != sent and loop.time()-sent_at >= 1:
+                    await socket.send(json.dumps({"APIKey": keys[0], "BoundingBoxes": [[[s, w], [n, e]] for w, s, e, n in boxes], "FilterMessageTypes": list(AIS_TYPES)}))
+                    sent, sent_at = boxes, loop.time()
                 try:
-                    if self.connector is None:
-                        from websockets.asyncio.client import connect
-                    else:
-                        connect = self.connector
-                    async with connect(AIS_URL, compression="deflate", open_timeout=10, close_timeout=2, max_size=65536,
-                                       max_queue=32, ping_interval=20, ping_timeout=20, proxy=None) as socket:
-                        sent, sent_at = None, 0
-                        while self.boxes() and self.access() == (True, key):
-                            boxes = self.boxes()
-                            if boxes != sent and self.clock()-sent_at >= 1:
-                                await socket.send(json.dumps({"APIKey": key, "BoundingBoxes": [[[s, w], [n, e]] for w, s, e, n in boxes], "FilterMessageTypes": list(AIS_TYPES)}))
-                                sent, sent_at = boxes, self.clock()
-                            try:
-                                raw = await asyncio.wait_for(socket.recv(), timeout=1)
-                            except asyncio.TimeoutError:
-                                continue
-                            try:
-                                data = json.loads(raw)
-                            except (ValueError, UnicodeDecodeError, TypeError):
-                                continue
-                            if not isinstance(data, dict):
-                                continue
-                            if data.get("error") or data.get("Error") or data.get("MessageType") in {"Error", "SubscriptionError"}:
-                                raise ValueError("AIS subscription rejected")
-                            if data.get("MessageType") == "SubscriptionConfirmation" or data.get("MessageType") in AIS_TYPES:
-                                self.ais_state, retry = "connected", 2
-                            self.registry.ingest(data, self.clock())
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    # Never expose provider responses, URLs or keys through errors.
-                    self.ais_state = "error"
-                    deadline = self.clock() + retry + random.random()
-                    while self.clock() < deadline and self.boxes() and self.access() == (True, key):
-                        await asyncio.sleep(1)
-                    retry = min(60, retry * 2)
+                    raw = await asyncio.wait_for(socket.recv(), timeout=1)
+                    data = json.loads(raw)
+                except (TimeoutError, ValueError, UnicodeDecodeError, TypeError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                kind = data.get("MessageType")
+                if data.get("error") or data.get("Error") or kind in ("Error", "SubscriptionError"):
+                    raise ValueError("AISStream subscription rejected")
+                if kind == "SubscriptionConfirmation" and self.ais_provider != "AISStream":
+                    deadline = loop.time() + 45
+                    self.ais_state, self.ais_provider = "connected", "AISStream"
+                if self.registry.ingest(data, self.clock()) and kind in AIS_POSITION:
+                    deadline = loop.time() + 45
+                    self.ais_state, self.ais_provider = "connected", "AISStream"
+
+    async def run_vessels(self, keys):
+        loop = asyncio.get_running_loop()
+        primary_next = 0
+        open_view = hub_view = 0
+        try:
+            while (boxes := self.boxes()) and not self.closed and self.access() == (True, keys):
+                if keys[0] and loop.time() >= primary_next:
+                    try:
+                        await self.stream_vessels(keys)
+                        return
+                    except Exception:
+                        primary_next = loop.time() + 120
+                        continue
+                bounds = boxes[open_view % len(boxes)]
+                open_view += 1
+                available = await self.poll_vessels(bounds, keys, "Open Waters AIS")
+                if not available and keys[1] and loop.time() >= self.aishub_next and self.access() == (True, keys):
+                    self.aishub_next = loop.time() + 60
+                    bounds = boxes[hub_view % len(boxes)]
+                    hub_view += 1
+                    await self.poll_vessels(bounds, keys, "AISHub")
+                await asyncio.sleep(8)
         finally:
             if self.ais_state != "error":
                 self.ais_state = "waiting"
+
+    async def poll_vessels(self, bounds, keys, provider):
+        try:
+            rows = await asyncio.to_thread(self.snapshot_fetch, bounds, keys[1] if provider == "AISHub" else "")
+        except Exception:
+            # Provider errors can contain the contributor key in the request URL.
+            self.ais_state = "error"
+            return False
+        if self.closed or not self.boxes() or self.access() != (True, keys):
+            return False
+        now = self.clock()
+        received = sum(bool(self.registry.ingest_snapshot(row, now, provider)) for row in rows)
+        if received or self.ais_state != "connected":
+            self.ais_state, self.ais_provider = "connected", provider
+        return bool(received)

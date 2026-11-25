@@ -73,6 +73,8 @@ class CommandTeams:
             return
         role = "field" if self.entries[team_id].get("mode") == "member" else "gateway"
         app = self.factory(role, self.config_dir, self.directory(team_id))
+        if role == "gateway":
+            app.state.host_intel = self.host_intel
         context = app.router.lifespan_context(app)
         await context.__aenter__()
         self.apps[team_id] = app
@@ -84,12 +86,16 @@ class CommandTeams:
             self.sync_stops[team_id] = stop
             async def synchronize():
                 while not stop.is_set():
+                    interval = 5
                     try:
-                        await app.state.sync_feed()
+                        response = await app.state.sync_feed()
+                        feed = json.loads(response.body)
+                        if feed.get("mission_sync", {}).get("state") == "syncing" and feed.get("network", {}).get("online"):
+                            interval = .25
                     except (HTTPException, OSError, ValueError):
                         pass  # Retain cached mission data while the remote host is offline.
                     try:
-                        await asyncio.wait_for(stop.wait(), timeout=15)
+                        await asyncio.wait_for(stop.wait(), timeout=interval)
                     except asyncio.TimeoutError:
                         pass
             self.sync_workers[team_id] = asyncio.create_task(synchronize())
@@ -201,7 +207,7 @@ class CommandTeams:
                 self.requests[team_id].discard(task)
 
 
-def create_command_app(config_dir: Path, data_dir: Path, factory: Callable) -> FastAPI:
+def create_command_app(config_dir: Path, data_dir: Path, factory: Callable, local_membership_request: Callable[[Request], bool]) -> FastAPI:
     teams = CommandTeams(config_dir, data_dir, factory)
     overview_maps = OfflineMapStore(data_dir / "offline-maps")
 
@@ -226,7 +232,15 @@ def create_command_app(config_dir: Path, data_dir: Path, factory: Callable) -> F
 
     app = FastAPI(title="Reticom Command", lifespan=lifespan)
     # Public layers belong to this device, not to a selected team's signed feed.
-    public_intel = intel_router(data_dir)
+    def intel_host(request):
+        team_id = request.query_params.get("team", "default")
+        team = teams.apps.get(team_id)
+        if team is not None and team_id not in teams.stopping and teams.entries[team_id].get("mode") == "member":
+            return team.state.intel_host()
+        return None
+
+    public_intel = intel_router(data_dir, intel_host=intel_host, local_request=local_membership_request)
+    teams.host_intel = public_intel.store
     app.include_router(public_intel)
     from .landmarks import landmark_router
     app.include_router(landmark_router())
@@ -250,6 +264,18 @@ def create_command_app(config_dir: Path, data_dir: Path, factory: Callable) -> F
     @app.get("/api/command/teams")
     async def list_teams():
         return {**teams.listing(), "removed": teams.listing(removed=True)["teams"]}
+
+    @app.get("/api/command/membership-requests")
+    async def pending_memberships(request: Request):
+        if not local_membership_request(request):
+            raise HTTPException(403, "Review membership from the local Reticom app")
+        pending = []
+        for team in teams.listing()["teams"]:
+            if team["hosting"] and team["mode"] == "host":
+                count = teams.apps[team["id"]].state.pending_membership_count()
+                if count:
+                    pending.append({"id": team["id"], "name": team["name"], "count": count})
+        return JSONResponse({"teams": pending}, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/command/nearby")
     async def nearby():

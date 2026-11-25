@@ -8,12 +8,18 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
 import android.net.wifi.WifiManager;
 import android.os.IBinder;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
+import android.os.SystemClock;
 import android.util.Log;
+import android.view.KeyEvent;
 
 import com.chaquo.python.Python;
 
@@ -24,12 +30,17 @@ public final class RetiumNodeService extends Service {
     public static final String EXTRA_AUTOMATIC_LOCATION = "automatic_location";
     private static final String CHANNEL_ID = "retium_link";
     private static final int NOTIFICATION_ID = 8142;
+    public static final String ACTION_HARDWARE_PTT = "com.retium.field.HARDWARE_PTT";
+    public static final String EXTRA_HARDWARE_PTT_ACTION = "hardware_ptt_action";
     private WifiManager.MulticastLock multicastLock;
     private WifiManager.WifiLock wifiLock;
     private BackgroundAlertController backgroundAlerts;
-    private LocationUpdateController locationUpdates;
+    private static volatile LocationUpdateController locationUpdates;
+    private boolean appForeground;
+    private MediaSession pttMediaSession;
 
     public static boolean isShuttingDown() { return shuttingDown; }
+    static LocationUpdateController locationUpdates() { return locationUpdates; }
 
     @Override
     public void onCreate() {
@@ -37,7 +48,8 @@ public final class RetiumNodeService extends Service {
         WhisperTranscriber.initialize(this);
         if (shuttingDown) return;
         createNotificationChannel();
-        startForeground(NOTIFICATION_ID, buildNotification("Starting Reticulum…"));
+        promoteForeground(false, "Starting Reticulum…");
+        configurePttMediaSession();
         acquireNetworkLocks();
         Python.getInstance()
                 .getModule("mobile_main")
@@ -50,13 +62,8 @@ public final class RetiumNodeService extends Service {
         backgroundAlerts = new BackgroundAlertController(this);
         backgroundAlerts.start();
         locationUpdates = new LocationUpdateController(this);
-        locationUpdates.start();
         NotificationManager manager = getSystemService(NotificationManager.class);
-        manager.notify(NOTIFICATION_ID, buildNotification(
-                LocationUpdateController.isEnabled(this)
-                        ? "Reticulum + automatic location active"
-                        : "Reticulum Field node active"
-        ));
+        manager.notify(NOTIFICATION_ID, buildNotification(serviceStatus()));
     }
 
     @Override
@@ -72,10 +79,9 @@ public final class RetiumNodeService extends Service {
         if (intent != null && backgroundAlerts != null) {
             String action = intent.getAction();
             if (BackgroundAlertController.ACTION_APP_VISIBILITY.equals(action)) {
-                backgroundAlerts.setAppForeground(intent.getBooleanExtra(
-                        BackgroundAlertController.EXTRA_APP_FOREGROUND,
-                        true
-                ));
+                appForeground = intent.getBooleanExtra(BackgroundAlertController.EXTRA_APP_FOREGROUND, true);
+                backgroundAlerts.setAppForeground(appForeground);
+                refreshLocationPermission();
             } else if (BackgroundAlertController.ACTION_ALERTS_ENABLED.equals(action)) {
                 backgroundAlerts.setAlertsEnabled(intent.getBooleanExtra(
                         BackgroundAlertController.EXTRA_ALERTS_ENABLED,
@@ -86,17 +92,43 @@ public final class RetiumNodeService extends Service {
             } else if (ACTION_AUTOMATIC_LOCATION.equals(action) && locationUpdates != null) {
                 boolean enabled = intent.getBooleanExtra(EXTRA_AUTOMATIC_LOCATION, true);
                 LocationUpdateController.setEnabled(this, enabled);
-                if (enabled) locationUpdates.start();
-                else locationUpdates.stop();
-                NotificationManager manager = getSystemService(NotificationManager.class);
-                manager.notify(NOTIFICATION_ID, buildNotification(
-                        enabled
-                                ? "Reticulum + automatic location active"
-                                : "Reticulum Field node active"
-                ));
+                refreshLocationPermission();
             }
         }
         return START_STICKY;
+    }
+
+    private void refreshLocationPermission() {
+        if (locationUpdates == null) return;
+        if (appForeground && !LocationUpdateController.isCommsOnly(this) && LocationUpdateController.hasPermission(this)) {
+            try {
+                promoteForeground(true, serviceStatus());
+                locationUpdates.start();
+            } catch (SecurityException error) {
+                Log.w("ReticomService", "Location foreground service unavailable", error);
+                locationUpdates.stop();
+            }
+        } else {
+            locationUpdates.refreshRequests();
+            getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, buildNotification(serviceStatus()));
+        }
+    }
+
+    private String serviceStatus() {
+        if (LocationUpdateController.isCommsOnly(this)) return "Reticulum · comms only";
+        return LocationUpdateController.isEnabled(this) && LocationUpdateController.hasPrecisePermission(this)
+                ? "Reticulum Field node · automatic location enabled" : "Reticulum Field node active";
+    }
+
+    private void promoteForeground(boolean withLocation, String message) {
+        Notification notification = buildNotification(message);
+        if (Build.VERSION.SDK_INT >= 29) {
+            int types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE | ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK;
+            if (withLocation) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+            startForeground(NOTIFICATION_ID, notification, types);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
     }
 
     @Override
@@ -106,8 +138,53 @@ public final class RetiumNodeService extends Service {
 
     @Override
     public void onDestroy() {
+        if (pttMediaSession != null) {
+            pttMediaSession.setActive(false);
+            pttMediaSession.release();
+            pttMediaSession = null;
+        }
         stopControllersAndLocks();
         super.onDestroy();
+    }
+
+    private void configurePttMediaSession() {
+        pttMediaSession = new MediaSession(this, "Reticom PTT");
+        pttMediaSession.setFlags(
+                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS
+                        | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+        );
+        pttMediaSession.setCallback(new MediaSession.Callback() {
+            @Override
+            public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
+                KeyEvent event = mediaButtonIntent == null
+                        ? null
+                        : mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+                if (event == null || !isPttMediaKey(event)) return super.onMediaButtonEvent(mediaButtonIntent);
+                if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                    sendHardwarePtt("down");
+                } else if (event.getAction() == KeyEvent.ACTION_UP) {
+                    sendHardwarePtt("up");
+                }
+                return true;
+            }
+        });
+        pttMediaSession.setPlaybackState(new PlaybackState.Builder()
+                .setActions(PlaybackState.ACTION_PLAY_PAUSE)
+                .setState(PlaybackState.STATE_PAUSED, 0, 1f, SystemClock.elapsedRealtime())
+                .build());
+        pttMediaSession.setActive(true);
+    }
+
+    private boolean isPttMediaKey(KeyEvent event) {
+        return event.getKeyCode() == KeyEvent.KEYCODE_HEADSETHOOK
+                || event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE;
+    }
+
+    private void sendHardwarePtt(String action) {
+        Intent intent = new Intent(ACTION_HARDWARE_PTT)
+                .setPackage(getPackageName())
+                .putExtra(EXTRA_HARDWARE_PTT_ACTION, action);
+        sendBroadcast(intent);
     }
 
     private void stopControllersAndLocks() {

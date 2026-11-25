@@ -52,6 +52,7 @@ def exercise(root):
         decision = {'identity': member, 'status': 'approved', 'callsign': 'Phone'}
         assert client.post(endpoint, json=decision, headers={'Origin': 'https://untrusted.example'}).status_code == 403
         assert client.post(endpoint, json=decision, headers={'Sec-Fetch-Site': 'cross-site'}).status_code == 403
+        assert client.get('/api/command/membership-requests', headers={'Sec-Fetch-Site': 'cross-site'}).status_code == 403
         assert client.post(endpoint, content=json.dumps(decision), headers={'Content-Type': 'text/plain'}).status_code == 422
         assert client.post(endpoint, json={**decision, 'unexpected': True}).status_code == 422
         assert client.post(endpoint, content='x' * 2049, headers={'Content-Type': 'application/json'}).status_code == 422

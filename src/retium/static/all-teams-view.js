@@ -103,7 +103,7 @@ export async function startAllTeamsView({mapStyle, initialStyle = "hiking", save
           <p>${team.snapshot_available ? `${team.located} located · ${team.recent} recent<br>${team.open_tasks ?? "—"} open tasks` : "Reports unavailable"}</p>
           <small>Last report ${escape(stamp(team.last_event_at))}</small>
           <div class="overview-team-actions"><button type="button" class="text-button" data-focus-team="${escape(team.id)}">LOCATE</button><a href="${escape(team.hosting && !disconnected ? urlFor(team.id) : urlFor("none"))}">${team.hosting && !disconnected ? "OPEN TEAM →" : "MANAGE →"}</a></div>
-        </article>`).join("") || '<p class="empty-copy">No teams yet. Use Teams to create one.</p>';
+        </article>`).join("") || '<p class="empty-copy">No saved teams. Open Teams to join or create one.</p>';
       if (focusedId) [...$("allTeamsRoster").querySelectorAll("[data-team-visibility]")].find((input) => input.dataset.teamVisibility === focusedId)?.focus();
     }
     const nextFeedSignature = JSON.stringify(model.feed);

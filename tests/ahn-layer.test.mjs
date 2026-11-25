@@ -30,7 +30,17 @@ test("international providers are selected by the map area", () => {
   assert.equal(lidarProviderForBounds({west: 3.9, south: 50.9, east: 4.1, north: 51.1}).id, "ahn");
   assert.equal(lidarProviderForBounds({west: -1.5, south: 51.3, east: -1.2, north: 51.6}).id, "england");
   assert.equal(lidarProviderForBounds({west: -100.2, south: 35.0, east: -99.8, north: 35.3}).id, "usgs");
+  assert.equal(lidarProviderForBounds({west: 14.33, south: 35.83, east: 14.52, north: 35.97}).id, "malta");
+  assert.equal(lidarProviderForBounds({west: 4.75, south: 45.72, east: 4.9, north: 45.8}).id, "france");
   assert.equal(lidarProviderForBounds({west: 10, south: 0, east: 11, north: 1}), null);
+});
+
+test("Malta uses local reprojected tiles and France uses IGN hillshade", () => {
+  for (const [mode, layer] of [["dtm", "MNT"], ["dsm", "MNS"]]) {
+    assert.equal(lidarTileUrl(mode, LIDAR_PROVIDERS.malta), `/api/intel-packs/lidar/malta/${mode}/{z}/{x}/{y}.png`);
+    assert.equal(new URL(lidarTileUrl(mode, LIDAR_PROVIDERS.france)).searchParams.get("layers"),
+      `IGNF_LIDAR-HD_${layer}_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW`);
+  }
 });
 
 test("international WMS rasters use provider layers and honest mode fallbacks", () => {

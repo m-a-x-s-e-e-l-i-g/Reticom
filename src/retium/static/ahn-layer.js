@@ -35,8 +35,32 @@ const USGS_PROVIDER = Object.freeze({
   modes: Object.freeze({dtm: {layer: "3DEPElevation", label: AHN_MODES.dtm, wms: "https://elevation.nationalmap.gov/arcgis/services/3DEPElevation/ImageServer/WMSServer"}}),
 });
 
-export const LIDAR_PROVIDERS = Object.freeze({ahn: AHN_PROVIDER, england: ENGLAND_PROVIDER, usgs: USGS_PROVIDER});
-export const LIDAR_PROVIDER_ORDER = Object.freeze(["ahn", "england", "usgs"]);
+const MALTA_PROVIDER = Object.freeze({
+  id: "malta", label: "Planning Authority · Malta", bounds: Object.freeze([13.92, 35.59, 14.83, 36.30]),
+  minzoom: 12, maxzoom: 18, resolution: "1 m · 2018", source: "Malta Planning Authority",
+  source_url: "https://portal.data.gov.mt/dataset/digital-terrain-model-2018",
+  attribution: "Malta Planning Authority · CC BY 4.0",
+  attribution_url: "https://portal.data.gov.mt/dataset/digital-terrain-model-2018",
+  modes: Object.freeze({
+    dtm: {label: AHN_MODES.dtm, tiles: "/api/intel-packs/lidar/malta/dtm/{z}/{x}/{y}.png"},
+    dsm: {label: AHN_MODES.dsm, tiles: "/api/intel-packs/lidar/malta/dsm/{z}/{x}/{y}.png"},
+  }),
+});
+
+const IGN_WMS_URL = "https://data.geopf.fr/wms-r/wms";
+const FRANCE_PROVIDER = Object.freeze({
+  id: "france", label: "IGN LiDAR HD · France", bounds: Object.freeze([-5.2, 41.2, 9.7, 51.2]),
+  minzoom: 12, maxzoom: 19, resolution: "0.5 m source grid", source: "IGN / Géoplateforme",
+  source_url: "https://www.data.gouv.fr/datasets/mnt-lidar-hd",
+  attribution: "IGN · LiDAR HD", attribution_url: "https://geoservices.ign.fr/lidarhd",
+  modes: Object.freeze({
+    dtm: {label: "Bare-earth hillshade (DTM)", layer: "IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW", wms: IGN_WMS_URL},
+    dsm: {label: "Surface hillshade (DSM)", layer: "IGNF_LIDAR-HD_MNS_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW", wms: IGN_WMS_URL},
+  }),
+});
+
+export const LIDAR_PROVIDERS = Object.freeze({ahn: AHN_PROVIDER, england: ENGLAND_PROVIDER, france: FRANCE_PROVIDER, malta: MALTA_PROVIDER, usgs: USGS_PROVIDER});
+export const LIDAR_PROVIDER_ORDER = Object.freeze(Object.keys(LIDAR_PROVIDERS));
 
 export function normalizeAhnMode(value) {
   return Object.hasOwn(AHN_MODES, value) ? value : "dtm";
@@ -95,6 +119,7 @@ export function lidarProviderForBounds(bounds) {
 export function lidarTileUrl(mode = "dtm", provider = AHN_PROVIDER) {
   const actualMode = providerMode(provider, mode);
   const selected = provider.modes[actualMode];
+  if (selected.tiles) return selected.tiles;
   const query = new URLSearchParams({
     service: "WMS", request: "GetMap", version: "1.3.0", layers: selected.layer,
     styles: "", format: "image/png", transparent: "true", width: "256", height: "256",
@@ -111,6 +136,7 @@ export function lidarSource(source, provider = AHN_PROVIDER, mode = "dtm") {
   return {
     type: "raster", tiles: [lidarTileUrl(mode, provider)], tileSize: 256,
     minzoom: provider.minzoom, maxzoom: provider.maxzoom, bounds: provider.bounds,
+    attribution: provider.attribution,
   };
 }
 

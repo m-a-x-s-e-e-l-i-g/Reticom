@@ -14,7 +14,7 @@ import {intelNoteText} from "../src/retium/static/intel-packs.js";
 import {intelLayerWarning} from "../src/retium/static/intel-packs.js";
 
 test("layer picker suppresses routine refresh information but retains actionable failures", () => {
-  for (const id of ["flights", "vessels", "military", "gdacs", "elevation", "ahn", "bathymetry", "worldcover", "nightlights", "firms"]) {
+  for (const id of ["flights", "vessels", "military", "gdacs", "elevation", "ahn", "bathymetry", "nightlights", "firms"]) {
     const pack = {id, enabled: true};
     assert.equal(intelLayerWarning(pack), "");
     for (const status of ["loading", "waiting", "ready", "cached", "zoom_in"]) {
@@ -25,6 +25,10 @@ test("layer picker suppresses routine refresh information but retains actionable
     assert.match(intelLayerWarning({...pack, configured: false}), /Source access/);
     assert.equal(intelLayerWarning({...pack, enabled: false}, {status: "error"}), "");
   }
+  const deferred = mergeIntelResults([{...empty, status: "cached"}, {...empty, status: "deferred", note: "Queued"}]);
+  assert.equal(deferred.status, "deferred");
+  assert.equal(deferred.coverage_complete, false);
+  assert.equal(intelLayerWarning(pack("military"), deferred), "");
 });
 
 test("contour interval appears once while distinct warnings remain visible", () => {
@@ -38,7 +42,7 @@ test("contour interval appears once while distinct warnings remain visible", () 
   assert.equal(intelNoteText({...contour, enabled: false}, {note: "Old status"}), "");
   assert.equal(intelNoteText({id: "military", enabled: true}, {status: "cached", note: "Partial coverage"}), "Partial coverage");
 });
-import {createIntelPacks, installIntelLayers, removeIntelLayers, intelViewportBoxes, intelPackUrls, mergeIntelResults, intelStatusText, intelFeatureHtml, replaceTrafficPopup} from "../src/retium/static/intel-packs.js";
+import {createIntelPacks, installIntelLayers, removeIntelLayers, intelViewportBoxes, intelPackUrls, mergeIntelResults, intelStatusText, intelFeatureHtml, replaceTrafficDetails} from "../src/retium/static/intel-packs.js";
 
 const empty = {type: "FeatureCollection", features: []};
 const feature = (id, title = id) => ({type: "Feature", id, properties: {title}, geometry: {type: "Point", coordinates: [4, 51]}});
@@ -67,7 +71,13 @@ class FakeMap {
   addSource(id, source) { this.sources.set(id, {...source, setData(value) { this.data = value; }}); }
   removeSource(id) { this.sources.delete(id); }
   getLayer(id) { return this.layers.get(id); }
-  addLayer(layer, before) { this.layers.set(layer.id, layer); this.added.push({layer, before}); }
+  addLayer(layer, before) {
+    const ordered = [...this.layers];
+    const index = ordered.findIndex(([id]) => id === before);
+    ordered.splice(index < 0 ? ordered.length : index, 0, [layer.id, layer]);
+    this.layers = new Map(ordered);
+    this.added.push({layer, before});
+  }
   removeLayer(id) { this.layers.delete(id); }
   on(event, fn) { if (!this.events.has(event)) this.events.set(event, new Set()); this.events.get(event).add(fn); }
   off(event, fn) { this.events.get(event)?.delete(fn); }
@@ -79,6 +89,24 @@ class FakeMap {
   jumpTo() { assert.fail("Public intel must not move the map"); }
 }
 
+test("public transport installs and refreshes reported and estimated vehicle markers", () => {
+  const map = new FakeMap();
+  const transit = pack("transit");
+  const bus = feature("bus", "<Route 64>");
+  bus.properties = {...bus.properties, estimated: true, kind: "bus", mode_label: "Bus", source: "Transitous"};
+  const data = {...empty, features: [bus]};
+  installIntelLayers(map, transit, data);
+  const {source} = map.added[0].layer;
+  assert.equal(map.getSource(source).data, data);
+  assert.deepEqual(map.added.map(({layer}) => layer.type), ["circle", "symbol"]);
+  assert.match(intelFeatureHtml(bus, transit, {}), /Estimated from realtime trip updates/);
+  assert.match(intelFeatureHtml(bus, transit, {}), /&lt;Route 64&gt;/);
+  installIntelLayers(map, transit, empty);
+  assert.equal(map.getSource(source).data, empty);
+  removeIntelLayers(map, "transit");
+  assert.equal(map.getSource(source), undefined);
+});
+
 test("viewport queries wrap the world and split the antimeridian without oversized boxes", () => {
   assert.deepEqual(intelViewportBoxes({west: 179, south: 10, east: 181, north: 11}), [{west: 179, south: 10, east: 180, north: 11}, {west: -180, south: 10, east: -179, north: 11}]);
   assert.deepEqual(intelViewportBoxes({west: 539, south: 10, east: 541, north: 11}), intelViewportBoxes({west: 179, south: 10, east: 181, north: 11}));
@@ -89,6 +117,68 @@ test("viewport queries wrap the world and split the antimeridian without oversiz
   assert.deepEqual(intelPackUrls("../../secret", {west: 0, south: 0, east: 1, north: 1}, 12), []);
   assert.match(intelPackUrls("military", {west: 0, south: 0, east: 1, north: 1}, 12)[0], /^\/api\/intel-packs\/military\?west=0\.00000&south=0\.00000&east=1\.00000&north=1\.00000&zoom=12\.00$/);
   assert.deepEqual(intelPackUrls("trails", {west: 0, south: 0, east: 1, north: 1}, 12), []);
+});
+
+test("Local and All NOTAM views share a one-hour filter and use outlines", async () => {
+  const notams = {...pack("notams"), notam_categories: {airspace: "Airspace", runway: "Runways"}};
+  const settings = catalogue([notams]);
+  const now = Date.now() / 1000;
+  const notices = [
+    ["a", "airspace", "drones", now - 60, null],
+    ["r", "runway", "", now - 60, null],
+    ["p", "airspace", "parachuting", now + 3599, now + 4200],
+    ["f", "airspace", "fireworks", now + 3610, now + 4200],
+    ["x", "runway", "", now - 60, now - 10],
+  ].map(([id, kind, local_activity, start, end]) => ({
+    ...feature(id), properties: {id, title: `Notice ${id}`, kind, local_activity, notam_periods: [[start, end]], notice_text: "<em>provider text</em>",
+      category_label: notams.notam_categories[kind], geometry_note: "Approximate position from the Q-line"},
+  }));
+  let downloads = 0, html;
+  const controller = createIntelPacks({fetchImpl: async (url, options) => {
+    if (url === "/api/intel-packs") return response(settings);
+    if (url.endsWith("/settings")) {
+      Object.assign(settings.settings, JSON.parse(options.body));
+      return response(settings);
+    }
+    downloads++;
+    return response({...empty, features: notices, status: "fresh", fetched_at: Date.now() / 1000});
+  }});
+  class Popup {
+    setLngLat() { return this; }
+    setHTML(value) { html = value; return this; }
+    addTo() { return this; }
+    remove() {}
+  }
+  const map = new FakeMap();
+  try {
+    await controller.ready;
+    controller.attachMap(map, {Popup});
+    await tick();
+    const source = map.getSource("public-intel-notams");
+    assert.deepEqual(source.data.features.map(item => item.id), ["a", "p"]);
+    assert.equal(source.data.features[1].properties.notam_phase, "upcoming");
+    assert.equal(map.getLayer("public-intel-notams-areas"), undefined);
+    assert.equal(map.getLayer("public-intel-notams-local-lines").minzoom, 10);
+    map.rendered = notices.map(item => ({...item, layer: map.getLayer("public-intel-notams-points")}));
+    map.emit("click", {point: {}, lngLat: [4, 51]});
+    assert.match(html, /2 notices here/);
+    assert.match(html, /Approximate position/);
+    assert.match(html, /&lt;em&gt;provider text/);
+    assert.match(html, /Starts within an hour/);
+    assert.doesNotMatch(html, /Notice x/);
+    assert.equal(await controller.setNotamView("all"), true);
+    assert.deepEqual(source.data.features.map(item => item.id), ["a", "r", "p"]);
+    assert.equal(settings.settings.notam_view, "all");
+    assert.equal(await controller.setNotamCategories(["runway"]), true);
+    assert.deepEqual(source.data.features.map(item => item.id), ["r"]);
+    assert.equal(await controller.setNotamCategories([]), true);
+    assert.deepEqual(source.data.features, []);
+    assert.deepEqual(settings.settings.notam_categories, []);
+    await tick();
+    assert.equal(downloads, 1);
+  } finally {
+    controller.destroy();
+  }
 });
 
 test("merged antimeridian results deduplicate features and retain partial-source warnings", () => {
@@ -120,6 +210,8 @@ test("aircraft popup keeps the essential picture compact and protects its photo 
   assert.match(html, /intel-aircraft-photo/);
   assert.match(html, /Flight details/);
   assert.match(html, /9144 m/);
+  assert.match(html, /icao=abcdef&amp;showTrace=\d{4}-\d{2}-\d{2}/);
+  assert.doesNotMatch(html.split("<details")[0], /<img|Airbus|ADSBDB/);
   const vessel = intelFeatureHtml({properties: {title: "MV EXAMPLE", vessel_type: "Cargo", speed_knots: 12}}, pack("vessels"), {});
   assert.match(vessel, /Vessel details/);
   assert.doesNotMatch(vessel, /Flight details/);
@@ -129,14 +221,42 @@ test("aircraft popup keeps the essential picture compact and protects its photo 
   assert.match(css, /\.intel-feature-popup\s*\{[^}]*max-block-size[^}]*overflow-y:\s*auto/s);
 });
 
-test("live traffic refresh keeps an expanded details disclosure open", () => {
-  let details = {open: true};
-  const popup = {
-    getElement: () => ({querySelector: selector => selector === ".intel-traffic-details" ? details : null}),
-    setHTML: () => { details = {open: false}; },
+test("live traffic refresh leaves the open disclosure and its scroll anchors mounted", () => {
+  const node = (tagName, textContent = "", children = []) => {
+    children.forEach((child, index) => { child.nextElementSibling = children[index + 1] || null; });
+    return {
+      tagName, className: "", textContent, children, firstElementChild: children[0], lastElementChild: children.at(-1),
+      matches: selectors => selectors.split(", ").includes(tagName.toLowerCase()),
+      isEqualNode(other) { return !children.length && tagName === other.tagName && this.textContent === other.textContent; },
+    };
   };
-  replaceTrafficPopup(popup, "updated traffic card");
+  const age = node("DD", "4s old");
+  const row = node("DIV", "", [node("DT", "Age"), age]);
+  const picture = node("IMG");
+  const details = {...node("DETAILS", "", [node("DL", "", [row]), picture]), open: true};
+  const card = node("ARTICLE", "", [details]);
+  const next = node("ARTICLE", "", [node("DETAILS", "", [node("DL", "", [node("DIV", "", [node("DT", "Age"), node("DD", "9s old")])]), node("IMG")])]);
+  const body = {
+    firstElementChild: card, scrollTop: 120,
+    ownerDocument: {createElement: () => ({content: {firstElementChild: next}})},
+    set innerHTML(value) { assert.fail("A refresh must not replace the mounted card"); },
+  };
+  replaceTrafficDetails(body, "updated traffic card");
+  assert.equal(age.textContent, "9s old");
   assert.equal(details.open, true);
+  assert.equal(details.children[1], picture);
+  assert.equal(body.scrollTop, 120);
+});
+
+test("vessel popups show a local thumbnail and escaped attribution only when present", () => {
+  const info = {title: "Fishing vessel", vessel_photo_url: "/api/intel-packs/live/vessels/227101600/thumbnail/1",
+    vessel_photo_credit: "Photo by A & B · CC BY 4.0", vessel_photo_source: "https://openvesselphotos.org/"};
+  const render = props => intelFeatureHtml({properties: props}, pack("vessels"), {});
+  assert.match(render(info), /<img src="\/api\/intel-packs\/live\/vessels\/227101600\/thumbnail\/1"/);
+  assert.doesNotMatch(render(info).split("<details")[0], /<img/);
+  assert.match(render(info), /Photo by A &amp; B · CC BY 4\.0/);
+  assert.doesNotMatch(render({...info, vessel_photo_url: "https://example.com/photo.jpg"}), /<img/);
+  assert.doesNotMatch(render({...info, vessel_photo_credit: ""}), /<img/);
 });
 
 test("status copy separates missing access, zoom, empty results and stale context", () => {
@@ -151,10 +271,10 @@ test("contour lines and metre labels remain below team data without changing cam
   const map = new FakeMap();
   installIntelLayers(map, pack("military"), {...empty, features: [feature("base")]});
   assert.equal(map.getSource("public-intel-military").data.features.length, 1);
-  assert.equal(map.added.length, 4);
+  assert.equal(map.added.length, 5);
   assert.ok(map.added.every(item => item.before === "base-labels"));
   installIntelLayers(map, pack("military"), empty);
-  assert.equal(map.added.length, 4); assert.equal(map.getSource("public-intel-military").data.features.length, 0);
+  assert.equal(map.added.length, 5); assert.equal(map.getSource("public-intel-military").data.features.length, 0);
   installIntelLayers(map, pack("elevation"), empty, contourUrl);
   const dem = map.getSource("public-intel-elevation");
   assert.equal(dem.type, "vector"); assert.equal(dem.minzoom, 9); assert.equal(dem.maxzoom, 15);
@@ -170,6 +290,56 @@ test("contour lines and metre labels remain below team data without changing cam
   assert.equal(map.getSource("public-intel-military"), undefined);
   assert.equal(map.getLayer("public-intel-military-points"), undefined);
   assert.ok(map.getLayer("verified-points"));
+});
+
+test("aircraft and vessel icons stay above contours even when contours install last", () => {
+  for (const order of [["elevation", "flights", "vessels"], ["vessels", "flights", "elevation"]]) {
+    const map = new FakeMap();
+    for (const id of order) installIntelLayers(map, pack(id), empty, contourUrl);
+    const checkOrder = () => {
+      const ids = [...map.layers.keys()];
+      for (const id of ["flights", "vessels"]) {
+        const icon = ids.indexOf(`public-intel-${id}-icons`);
+        assert.ok(icon >= 0);
+        for (const layer of ["lines", "labels", "minor-labels"]) {
+          const contour = ids.indexOf(`public-intel-elevation-${layer}`);
+          assert.ok(contour >= 0 && contour < icon);
+        }
+        assert.ok(icon < ids.indexOf("base-labels"));
+      }
+    };
+    checkOrder();
+    removeIntelLayers(map, "elevation");
+    installIntelLayers(map, pack("elevation"), empty, contourUrl);
+    checkOrder();
+  }
+});
+
+test("military land use, airfields and police fall back to the existing basemap until complete coverage is available", () => {
+  const map = new FakeMap();
+  map.addSource("offline", {type: "vector"});
+  const id = "public-intel-military-basemap";
+  installIntelLayers(map, pack("military"), empty);
+  assert.equal(map.getLayer(id)["source-layer"], "landuse");
+  assert.deepEqual(map.getLayer(id).filter, ["==", ["get", "class"], "military"]);
+  assert.equal(map.getLayer(`${id}-airfield`)["source-layer"], "aeroway");
+  const fallback = map.getLayer(`${id}-police`);
+  const stations = map.getLayer("public-intel-military-police-stations");
+  assert.equal(fallback["source-layer"], "poi");
+  assert.equal(fallback.type, "symbol");
+  assert.equal(stations.type, "symbol");
+  assert.equal(stations.layout["icon-image"], "public-police-shield");
+  assert.equal(fallback.layout["icon-image"], stations.layout["icon-image"]);
+  assert.deepEqual(stations.filter, ["==", ["get", "kind"], "police_station"]);
+  installIntelLayers(map, pack("military"), {...empty, worldwide_snapshot: true});
+  assert.equal(map.getLayer(id), undefined);
+  installIntelLayers(map, pack("military"), empty);
+  removeIntelLayers(map, "military");
+  assert.equal(map.getLayer(id), undefined);
+  assert.equal(map.getLayer(`${id}-airfield`), undefined);
+  assert.equal(map.getLayer(`${id}-police`), undefined);
+  assert.equal(map.getLayer("public-intel-military-police-stations"), undefined);
+  assert.ok(map.getSource("offline"));
 });
 
 test("AHN installs a bounded PDOK raster in DSM mode without a generic feature source", () => {
@@ -197,7 +367,7 @@ test("international LiDAR switches raster providers with the viewport", () => {
 });
 
 test("environment rasters install as bounded client-only map layers", () => {
-  for (const id of ["bathymetry", "worldcover", "nightlights"]) {
+  for (const id of ["bathymetry", "nightlights"]) {
     const map = new FakeMap();
     installIntelLayers(map, pack(id), empty);
     assert.equal(map.getSource(`public-intel-${id}`).type, "raster");
@@ -307,6 +477,27 @@ test("disabling a pack immediately hides it and a late fetch cannot restore it",
     finish(response({...empty, status: "fresh", features: [feature("late")]})); await tick();
     assert.equal(map.getSource("public-intel-military"), undefined);
     assert.equal(controller.getState().packs[0].enabled, false);
+  } finally { controller.destroy(); }
+});
+
+test("pausing an attached map aborts pending intel and resuming refreshes it", async () => {
+  const map = new FakeMap();
+  let pending, calls = 0;
+  const controller = createIntelPacks({fetchImpl: async (url, options) => {
+    if (url === "/api/intel-packs") return response(catalogue([pack("military")]));
+    if (++calls > 1) return response({...empty, status: "fresh", features: [feature("resumed")]});
+    return new Promise(resolve => { pending = {resolve, signal: options.signal}; });
+  }});
+  try {
+    await controller.ready; controller.attachMap(map); await tick();
+    controller.setMapPaused(map, true);
+    assert.equal(pending.signal.aborted, true);
+    pending.resolve(response({...empty, status: "fresh", features: [feature("late")]}));
+    await controller.refresh(); await tick();
+    assert.equal(calls, 1);
+    assert.deepEqual(map.getSource("public-intel-military").data.features, []);
+    controller.setMapPaused(map, false); await tick();
+    assert.equal(map.getSource("public-intel-military").data.features[0].id, "resumed");
   } finally { controller.destroy(); }
 });
 
@@ -467,8 +658,10 @@ test("UI keeps readable sources, blank password inputs and 44px mobile controls"
   const js = readFileSync(new URL("../src/retium/static/intel-packs.js", import.meta.url), "utf8");
   const css = readFileSync(new URL("../src/retium/static/intel-packs.css", import.meta.url), "utf8");
   assert.match(js, /type=\\?"password\\?"/);
-  assert.match(js, /Choices and access keys stay on this device/);
+  assert.match(js, /Your settings and access keys stay on this device/);
   assert.match(js, /Not a verified team report/);
+  assert.match(js, /Sentinel-1 TomoSAR analysis/);
+  assert.match(js, /ids-dinamis\.data-terra\.org\/tomosar-services/);
   assert.match(js, /prefers-reduced-motion|setInterval/);
   assert.match(css, /\.intel-packs-head button[\s\S]*?place-items: center[\s\S]*?width: 44px; height: 44px/);
   assert.match(css, /prefers-reduced-motion: reduce/);

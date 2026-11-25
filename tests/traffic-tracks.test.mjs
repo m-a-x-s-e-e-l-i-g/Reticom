@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {TrafficTracks, TRACK_SOURCE, TRACK_POINTS, TRACK_TARGETS, trafficRouteBounds} from "../src/retium/static/traffic-tracks.js";
+import {TrafficTracks, TRACK_SOURCE, TRACK_ESTIMATE_SOURCE, TRACK_POINTS, TRACK_TARGETS, trafficRouteBounds} from "../src/retium/static/traffic-tracks.js";
 import {TrafficMotion} from "../src/retium/static/traffic-motion.js";
 import {createIntelPacks} from "../src/retium/static/intel-packs.js";
 
@@ -17,6 +17,18 @@ test("provider history extends beyond the browser window and dateline bounds sta
   const bounds = trafficRouteBounds(route.data);
   assert.ok(bounds[1][0]-bounds[0][0]<1);
   assert.match(route.label,/Available history/);
+});
+
+test("a live duplicate preserves the provider's flight-leg break", () => {
+  const tracks = new TrafficTracks("flights");
+  tracks.ingest(data(fix(1020, [.002, 0])), 1020);
+  const route = tracks.route("one", 1030, {points: [
+    {time: 1000, point: [0, 0]}, {time: 1010, point: [.001, 0]},
+    {time: 1020, point: [.002, 0], breakBefore: true}, {time: 1030, point: [.003, 0]},
+  ]});
+  assert.deepEqual(route.data.features[0].geometry.coordinates, [
+    [[0, 0], [.001, 0]], [[.002, 0], [.003, 0]],
+  ]);
 });
 
 for (const pack of ["flights", "vessels"]) test(`${pack}: stores real fixes without cached duplicates or older rewinds`, () => {
@@ -65,6 +77,36 @@ test("date-line crossing stays short in both directions", () => {
   }
 });
 
+test("a sampled circle is drawn with curved sections through the original fixes", () => {
+  const model = new TrafficTracks("flights"), radius = .01;
+  const points = Array.from({length: 9}, (_, index) => {
+    const angle = index * Math.PI / 4;
+    return [Math.cos(angle) * radius, Math.sin(angle) * radius];
+  });
+  const history = {points: points.map((point, index) => ({point, time: 1000 + index * 10}))};
+  const route = model.route("plane", 1080, history);
+  const [line] = route.data.features[0].geometry.coordinates;
+  assert.equal(route.count, points.length);
+  assert.ok(line.length > points.length);
+  assert.deepEqual(line.filter(point => points.some(fix => fix[0] === point[0] && fix[1] === point[1])), points);
+  assert.ok(line.every(([x, y]) => Math.abs(Math.hypot(x, y) - radius) < radius * .055));
+});
+
+test("rounding keeps date-line endpoints and the original disconnected legs", () => {
+  const model = new TrafficTracks("vessels");
+  const track = {points: [
+    {time: 1000, point: [179.998, 0]}, {time: 1010, point: [179.999, .001]},
+    {time: 1020, point: [-180, .001]}, {time: 1030, point: [-179.999, 0]},
+    {time: 1040, point: [-179.997, 0], breakBefore: true}, {time: 1050, point: [-179.996, 0]},
+  ]};
+  const lines = model.route("vessel", 1050, track).data.features[0].geometry.coordinates;
+  assert.equal(lines.length, 3);
+  assert.deepEqual(lines[0].at(-1), [180, .001]);
+  assert.deepEqual(lines[1][0], [-180, .001]);
+  assert.deepEqual(lines[2], [[-179.997, 0], [-179.996, 0]]);
+  for (const line of lines) assert.ok(line.every(([lon, lat]) => Number.isFinite(lat) && Math.abs(lon) <= 180));
+});
+
 test("history is time-, point- and target-bounded and can be cleared", () => {
   const model=new TrafficTracks("flights");
   for(let i=0;i<TRACK_POINTS+10;i++) model.ingest(data(fix(1000+i,[i*.0001,0])),1000+i);
@@ -76,20 +118,29 @@ test("history is time-, point- and target-bounded and can be cleared", () => {
   model.ingest(data(fix(2001)),2001); model.clear(); assert.equal(model.tracks.size,0);
 });
 
-test("selection centers the marker without changing zoom; routes and updates never reframe the map", async () => {
-  const originalNow=Date.now; let now=1000, report=fix(now), popup, clicks=[], fetches=0, historyAvailable=false, pans=[], zoom=12, emptyFeed=false;
+test("traffic drawer follows the animated marker without reframing for route history", async () => {
+  const originalNow=Date.now; let now=1000, report=fix(now), clicks=[], fetches=0, historyAvailable=false, pans=[], zoom=12, emptyFeed=false;
   Date.now=()=>now*1000;
+  let frame;
+  globalThis.requestAnimationFrame = fn => { frame = fn; return 1; };
+  const element = () => ({handlers: {}, addEventListener(name, fn) { this.handlers[name] = fn; }});
+  const body = {...element(), querySelector: () => null};
+  const follow = element(), close = element();
+  const drawer = {...element(), querySelector: selector => ({".intel-traffic-drawer-body":body,"[data-traffic-follow]":follow,"[data-traffic-close]":close})[selector],
+    setAttribute() {}, contains: () => false, remove() { this.removed = true; }};
+  const container = {append() {}, ownerDocument: {createElement: tag => tag === "aside" ? drawer : {...element(), remove() {}}}};
+  drawer.ownerDocument = container.ownerDocument;
   const sources=new Map(),layers=new Map(),events=new Map();
-  const map={getStyle:()=>({layers:[...layers.values()]}),getZoom:()=>zoom,getBounds:()=>({west:-1,south:-1,east:1,north:1}),
+  let center = {lng: -.01, lat: 0};
+  const map={getStyle:()=>({layers:[...layers.values()]}),getZoom:()=>zoom,getBounds:()=>({west:-1,south:-1,east:1,north:1}),getContainer:()=>container,getCenter:()=>center,
+    project(point) { const x = point.lng ?? point[0]; return {x, dist: other => Math.abs(other.x - x)*100000}; },
     getSource:id=>sources.get(id),addSource:(id,value)=>sources.set(id,{...value,setData(data){this.data=data;}}),removeSource:id=>sources.delete(id),
     getLayer:id=>layers.get(id),addLayer:layer=>layers.set(layer.id,layer),removeLayer:id=>layers.delete(id),
     on:(name,fn)=>events.set(name,fn),off:name=>events.delete(name),queryRenderedFeatures:()=>clicks,
-    jumpTo:()=>assert.fail("Keep zoom"),fitBounds:()=>assert.fail("Never fit the route"),panTo:(center,options)=>{assert.equal(options.zoom,undefined);pans.push(center);}};
-  class Popup {
-    constructor(){popup=this;this.events=new Map();}
-    setLngLat(){return this;} setHTML(html){this.html=html;return this;} addTo(){return this;}
-    on(name,fn){this.events.set(name,fn);return this;} remove(){this.events.get("close")?.();}
-  }
+    jumpTo(options,event) { assert.deepEqual(Object.keys(options),["center"]); assert.equal(event.trafficFollow,true); pans.push(options.center);
+      center = {lng:options.center[0],lat:options.center[1]}; events.get("moveend")(event); },
+    fitBounds:()=>assert.fail("Never fit the route")};
+  class Popup { constructor() { assert.fail("Traffic uses a drawer"); } }
   let settings={enabled:["flights","vessels"]}, controller;
   const wait=()=>new Promise(resolve=>setTimeout(resolve,20));
   const click=(pack="flights",id="one")=>{
@@ -109,28 +160,47 @@ test("selection centers the marker without changing zoom; routes and updates nev
         : {settings,packs:["flights","vessels"].map(id=>({id,configured:true,enabled:settings.enabled.includes(id)}))}};
     }});
     await controller.ready;controller.attachMap(map,{Popup});await wait();
-    click();assert.match(popup.html,/Waiting for consecutive/);
+    click();assert.equal(drawer.hidden,false);assert.match(body.innerHTML,/Waiting for consecutive/);
     assert.deepEqual(pans.at(-1),report.geometry.coordinates);assert.equal(zoom,12);
     assert.equal(sources.get(TRACK_SOURCE).data.features.length,0);
+    assert.equal(sources.has(TRACK_ESTIMATE_SOURCE),false);
     now=1010;report=fix(now,[.001,0]);await controller.refresh();await wait();
     assert.equal(sources.get(TRACK_SOURCE).data.features.length,1);
     assert.deepEqual(layers.get(TRACK_SOURCE).paint["line-dasharray"],[3,2]);
-    assert.match(popup.html,/2 fixes/);
+    assert.equal(layers.get(TRACK_SOURCE).layout["line-cap"],"round");
+    assert.match(body.innerHTML,/2 fixes/);
+    now=1011;frame(1000);
+    const aircraftPoint = sources.get("public-intel-flights").data.features[0].geometry.coordinates;
+    assert.deepEqual(pans.at(-1), aircraftPoint);
+    assert.deepEqual(sources.get(TRACK_ESTIMATE_SOURCE).data.features[0].geometry.coordinates, [[[.001,0], aircraftPoint]]);
+    assert.deepEqual(sources.get(TRACK_SOURCE).data.features[0].geometry.coordinates, [[[0,0],[.001,0]]]);
+    assert.deepEqual(layers.get(TRACK_ESTIMATE_SOURCE).paint["line-dasharray"],[1,2]);
+    assert.notDeepEqual(pans.at(-1),[0,0]);
+    events.get("dragstart")();
+    assert.equal(follow.textContent,"Resume follow");
+    const paused=pans.length;now=1012;frame(1100);
+    assert.equal(pans.length,paused);
+    assert.deepEqual(sources.get(TRACK_ESTIMATE_SOURCE).data.features[0].geometry.coordinates[0].at(-1),
+      sources.get("public-intel-flights").data.features[0].geometry.coordinates);
+    follow.handlers.click();assert.equal(pans.length,paused+1);
     const count=fetches;click("vessels");
     assert.equal(sources.get(TRACK_SOURCE).data.features[0].properties.traffic_pack,"vessels");
     assert.equal(fetches,count+1,"Selecting a track requests its available history");
-    assert.deepEqual(pans.at(-1),report.geometry.coordinates,"Ship selection centers its marker too");
+    assert.deepEqual(pans.at(-1),sources.get("public-intel-vessels").data.features[0].geometry.coordinates,"Ship selection follows its marker too");
+    assert.deepEqual(sources.get(TRACK_ESTIMATE_SOURCE).data.features[0].geometry.coordinates[0].at(-1),
+      sources.get("public-intel-vessels").data.features[0].geometry.coordinates);
     assert.equal(zoom,12,"Ship selection preserves zoom");
     sources.clear();layers.clear();events.get("style.load")();await wait();
     assert.equal(sources.get(TRACK_SOURCE).data.features.length,1);
-    popup.remove();assert.equal(sources.has(TRACK_SOURCE),false);
-    click();clicks=[];events.get("click")({point:{x:9,y:9}});assert.equal(sources.has(TRACK_SOURCE),false);
-    click();await controller.setTrafficFilters("flights",{query:"not-present"});await wait();assert.equal(sources.has(TRACK_SOURCE),false);
+    close.handlers.click();assert.equal(drawer.hidden,true);assert.equal(sources.has(TRACK_SOURCE),false);
+    assert.equal(sources.has(TRACK_ESTIMATE_SOURCE),false);
+    click();clicks=[];events.get("click")({point:{x:9,y:9}});assert.equal(drawer.hidden,false);assert.equal(sources.has(TRACK_SOURCE),true);
+    await controller.setTrafficFilters("flights",{query:"not-present"});await wait();assert.equal(drawer.hidden,true);assert.equal(sources.has(TRACK_SOURCE),false);
     click("vessels");await controller.setEnabled("vessels",false);await wait();assert.equal(sources.has(TRACK_SOURCE),false);
     await controller.setTrafficFilters("flights",{});await wait();click();
     now=1300;await controller.refresh();await wait();assert.equal(sources.has(TRACK_SOURCE),true,"Last-seen target keeps its selection");
     now=1310;report=fix(now);await controller.refresh();await wait();click();
-    historyAvailable=true;const before=pans.length;click();await wait();
+    historyAvailable=true;center={lng:-.01,lat:0};const before=pans.length;click();await wait();
     assert.equal(pans.length,before+1,"Only the selection centers the marker");assert.equal(zoom,12,"Available history preserves zoom");
     emptyFeed=true;
     zoom=3;events.get("moveend")();
@@ -139,7 +209,7 @@ test("selection centers the marker without changing zoom; routes and updates nev
     assert.equal(sources.get("public-intel-flights").data.features.length,1,"Selected aircraft survives empty refresh at zoom 3");
     now=4000;await controller.refresh();await wait();
     assert.equal(sources.get("public-intel-flights").data.features.length,1,"Selected aircraft remains beyond normal cache expiry");
-    assert.match(popup.html,/Last seen/);
-    events.get("remove")();assert.equal(sources.has(TRACK_SOURCE),false);
-  } finally {controller?.destroy();Date.now=originalNow;}
+    assert.match(body.innerHTML,/Last seen/);
+    events.get("remove")();assert.equal(sources.has(TRACK_SOURCE),false);assert.equal(drawer.removed,true);
+  } finally {controller?.destroy();Date.now=originalNow;delete globalThis.requestAnimationFrame;}
 });

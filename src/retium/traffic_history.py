@@ -41,7 +41,7 @@ def fetch_trace(identity):
     from .traffic import _NoRedirect
     if not valid_identity("flights", identity):
         raise ValueError("Invalid aircraft identity")
-    url = f"https://adsb.lol/data/traces/{identity[-2:]}/trace_full_{identity}.json"
+    url = f"https://api.adsb.lol/1/trace/full/{identity.lower()}"
     with build_opener(_NoRedirect()).open(Request(url, headers={"User-Agent": "Reticom/0.2 public-traffic-history", "Accept-Encoding": "identity"}), timeout=15) as response:
         body = response.read(4_000_001)
     if len(body) > 4_000_000:

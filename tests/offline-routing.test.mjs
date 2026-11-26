@@ -56,7 +56,7 @@ test("driving selects the checked alternative and keeps its directions, distance
     calls.push(url);
     if(url==="/api/offline-routing/route") { assert.equal(JSON.parse(options.body).alternatives,true);return response({code:"outside_coverage"},false); }
     if(url.startsWith("https:")) { assert.match(url,/alternatives=true/);return response({code:"Ok",routes}); }
-    assert.equal(url,"/api/intel-packs/roads/check-route");
+    assert.equal(url,"/api/intel-packs/roads/check-route?driving=true");
     assert.deepEqual(JSON.parse(options.body),{routes:routes.map(r=>r.geometry.coordinates),cached_only:false});
     return response({selected:1,status:"checked",note:"Alternative chosen"});
   }});

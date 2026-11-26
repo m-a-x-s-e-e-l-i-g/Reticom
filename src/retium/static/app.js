@@ -3,11 +3,11 @@ import {isHardwarePttKeyboardEvent} from "./ptt-input.js?v=20260916-1";
 import {commsPositionEvent} from "./comms-only.js?v=20261125-1";
 import {createCommandWorkspace} from "./command-workspace.js?v=20260908-2";
 let commandCanvas = null;
-import {calculateDeviceRoute, initOfflineRoutingSettings, ROUTING_MODE_KEY} from "./offline-routing.js?v=20260909-7";
+import {calculateDeviceRoute, initOfflineRoutingSettings, ROUTING_MODE_KEY} from "./offline-routing.js?v=20261126-1";
 const offlineRoutingSettings = initOfflineRoutingSettings();
 import {hikingMapStyle, recenterOnFix, roadAndPathLayers, preferredMapStyle, nextMapStyle, satelliteWithTrails, MAP_STYLES, updateMapStyleControl, HIKING_RELIEF} from "./outdoor-map.js?v=20261125-2";
-import {createIntelPacks} from "./intel-packs.js?v=20261126-1";
-import {createSharedNavigation, navigationSharePayload} from "./shared-navigation.js?v=20260906-1";
+import {createIntelPacks} from "./intel-packs.js?v=20261126-2";
+import {createSharedNavigation, navigationSharePayload} from "./shared-navigation.js?v=20261126-1";
 import {HeadingTracker, HeadingOverlay, HeadingConnection} from "./live-heading.js?v=20260905-2";
 import {reportDraft, reportComposerHtml} from "./map-reports.js?v=20260905-1";
 import {reportProperties, REPORT_STATUS_LABELS} from "./marker-catalog.js?v=20260905-2";
@@ -16,7 +16,7 @@ import {teamApiUrl, teamPageUrl} from "./command-teams.js?v=20260908-2";
 import {initContinuitySettings} from "./continuity-settings.js?v=20260905-1";
 import {initMembershipSettings, membershipRequestLabel} from "./membership-settings.js?v=20261125-1";
 import {displayPositionSeries, distanceMeters, locationTime, MAX_AUTOMATIC_ACCURACY_METERS} from "./location-filter.js?v=20261125-1";
-import {nextWaypointLabel, withDisplayWaypointLabels} from "./map-labels.js?v=20260903-2";
+import {nextWaypointLabel, numberedWaypointSequence, withDisplayWaypointLabels} from "./map-labels.js?v=20261126-2";
 import {formatMapBytes, packProgress, tileCountForBounds} from "./map-offline.js?v=20260903-1";
 import {mapMessageReadStorageKey, mapOverlayMessages, parseReadMessageIds, shouldDismissMapMessage} from "./map-message-read.js?v=20260903-2";
 import {captureMapCamera, hasAddedMapMarker, mapMarkerIds, restoreMapCamera, shouldInitiallyFrameMap} from "./map-view.js?v=20260903-3";
@@ -82,6 +82,7 @@ let fieldMapReady = null;
 let mapMarkerClass = null;
 let mapPopupClass = null;
 const waypointMarkersByMap = new WeakMap();
+const mapFeaturePopups = new WeakMap();
 let fieldMapOnline = false;
 let fieldFeedOnline = false;
 let fieldTeamDestination = "";
@@ -1671,10 +1672,17 @@ function privateRouteLabel(event) {
   return `${event.callsign} → ${recipient}`;
 }
 
-function combinedFieldFeedEvents() {
-  return [...fieldEvents, ...privateMessages].sort((left, right) =>
+function combinedCommsEvents(events, mailbox) {
+  const personal = localIdentityHash && Array.isArray(mailbox) ? mailbox.filter(event =>
+    (event?.type === "private.message" || event?.type === "private.ptt")
+    && (event.recipient_hash === localIdentityHash || event.network?.sender_hash === localIdentityHash)) : [];
+  return [...events, ...personal].sort((left, right) =>
     Number(right.network?.received_at || right.created_at || 0)
       - Number(left.network?.received_at || left.created_at || 0));
+}
+
+function combinedFieldFeedEvents() {
+  return combinedCommsEvents(fieldEvents, privateMessages);
 }
 
 function arrowGeometry(points) {
@@ -3049,10 +3057,17 @@ async function renderFieldMap(events, {preserveView = localMapPositionHasCentere
         }
       }
       renderWaypointNavigationLine();
-    } else if (waypointNavigation?.targetKind === "waypoint" && !waypointNavigation.pinnedRoute && !events.some((event) => event.type === "marker.created" && event.id === waypointNavigation.id)) {
-      stopWaypointNavigation(false);
-      toast("Waypoint was removed · navigation ended", true);
     } else {
+      if (waypointNavigation?.targetKind === "waypoint" && !waypointNavigation.pinnedRoute && mapDataChanged) {
+        const waypoints = locations.filter(event => event.type === "marker.created" && event.marker_type === "waypoint");
+        if (waypoints.some(event => event.id === waypointNavigation.id)) {
+          updateNavigationWaypoints(waypointNavigation, waypoints);
+          $("waypointNavigationLabel").textContent = navigationWaypointLabel(waypointNavigation);
+        } else {
+          stopWaypointNavigation(false);
+          toast("Waypoint was removed · navigation ended", true);
+        }
+      }
       renderWaypointNavigationLine();
     }
     const coordinates = [
@@ -3699,23 +3714,23 @@ function renderWaypointNavigationLine() {
     : waypointNavigation?.currentPoint
       ? [waypointNavigation.currentPoint, waypointNavigation.target]
       : [];
-  source.setData({
-    type: "FeatureCollection",
-    features: points.length ? [{
-      type: "Feature",
-      geometry: {type: "LineString", coordinates: points},
-      properties: {mode: calculated ? "route" : "direct"},
-    }] : [],
-  });
+  const lines = points.length >= 2 ? [[points, calculated ? "route" : "direct"]] : [];
+  if (waypointNavigation?.remainingWaypoints?.length) {
+    lines.push([[waypointNavigation.target, ...waypointNavigation.remainingWaypoints.map(stop => stop.target)], "direct"]);
+  }
+  source.setData({type: "FeatureCollection", features: lines.map(([coordinates, mode]) => ({
+    type: "Feature", geometry: {type: "LineString", coordinates}, properties: {mode},
+  }))});
 }
 
-function fitCalculatedRoute(coordinates) {
+function fitCalculatedRoute(coordinates, maxZoom = 17) {
   if (!fieldMap || !coordinates?.length || waypointNavigation?.centered) return;
-  const lons = coordinates.map((point) => point[0]);
-  const lats = coordinates.map((point) => point[1]);
+  const points = [...coordinates, ...(waypointNavigation?.remainingWaypoints || []).map(stop => stop.target)];
+  const lons = points.map((point) => point[0]);
+  const lats = points.map((point) => point[1]);
   fieldMap.fitBounds(
     [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
-    {padding: 80, maxZoom: 17, duration: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 500},
+    {padding: 80, maxZoom, duration: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 500},
   );
   waypointNavigation.centered = true;
 }
@@ -3732,6 +3747,7 @@ function stopWaypointNavigation(announce = true, {unshare = true} = {}) {
   waypointNavigation?.routeAbortController?.abort();
   waypointNavigationWatchId = null;
   waypointNavigation = null;
+  intelPacks.setDrivingRoads(false);
   syncNativeLocationDemand();
   waypointArrivalReportPending = false;
   $("waypointNavigation").classList.add("hidden");
@@ -3800,7 +3816,7 @@ async function requestCalculatedRoute(currentPoint) {
       },
     });
     const route = parseCalculatedRoute(payload);
-    if (waypointNavigation !== navigation) return;
+    if (waypointNavigation !== navigation || navigation.routeAbortController !== controller) return;
     navigation.routeCoordinates = route.coordinates;
     navigation.routeDistance = route.distance;
     navigation.routeDuration = route.duration;
@@ -3813,17 +3829,30 @@ async function requestCalculatedRoute(currentPoint) {
     renderWaypointNavigationLine();
     fitCalculatedRoute(route.coordinates);
   } catch (error) {
-    if (waypointNavigation !== navigation) return;
+    if (waypointNavigation !== navigation || navigation.routeAbortController !== controller) return;
     navigation.routeCoordinates = null;
     navigation.routeError = error.name === "AbortError" ? "Route request timed out" : error.message;
   } finally {
     clearTimeout(timeout);
-    if (waypointNavigation === navigation) {
+    if (waypointNavigation === navigation && navigation.routeAbortController === controller) {
       navigation.routeLoading = false;
       navigation.routeAbortController = null;
       if (navigation.lastPosition) updateWaypointNavigation(navigation.lastPosition);
     }
   }
+}
+
+function navigationWaypointLabel(navigation) {
+  return navigation.waypointCount
+    ? `${navigation.label} · ${navigation.waypointCount - navigation.remainingWaypoints.length}/${navigation.waypointCount}`
+    : navigation.label;
+}
+
+function updateNavigationWaypoints(navigation, waypoints) {
+  const visited = (navigation.waypointCount || 1) - (navigation.remainingWaypoints?.length || 0);
+  navigation.remainingWaypoints = numberedWaypointSequence(waypoints, navigation.id).slice(1);
+  const count = visited + navigation.remainingWaypoints.length;
+  navigation.waypointCount = count > 1 ? count : 0;
 }
 
 function updateWaypointNavigation(position) {
@@ -3834,10 +3863,25 @@ function updateWaypointNavigation(position) {
   waypointNavigation.lastPosition = position;
   waypointNavigation.currentPoint = currentPoint;
   waypointNavigation.currentAccuracy = accuracy;
-  const directDistance = distanceMeters(currentPoint, waypointNavigation.target);
-  const bearing = bearingDegrees(currentPoint, waypointNavigation.target);
   const accurate = !position.coords.approximate && Number.isFinite(accuracy) && accuracy > 0 && accuracy <= WAYPOINT_MAX_ARRIVAL_ACCURACY_METERS;
-  const arrived = accurate && directDistance <= Math.max(WAYPOINT_ARRIVAL_RADIUS_METERS, accuracy);
+  let directDistance = distanceMeters(currentPoint, waypointNavigation.target);
+  let arrived = accurate && position !== waypointNavigation.lastWaypointArrival
+    && directDistance <= Math.max(WAYPOINT_ARRIVAL_RADIUS_METERS, accuracy);
+  const advancing = arrived && Boolean(waypointNavigation.remainingWaypoints?.length);
+  if (advancing) {
+    const stop = waypointNavigation.remainingWaypoints.shift();
+    waypointNavigation.routeAbortController?.abort();
+    Object.assign(waypointNavigation, stop, {
+      routeAbortController: null, routeOrigin: null, routeCoordinates: null, routeLoading: false,
+      lastRouteAttempt: 0, routeError: "", roadCheck: null, routeSource: null, lastWaypointArrival: position,
+      reported: false, lastReportAttempt: 0, shareDirty: true,
+      shareGeneration: (waypointNavigation.shareGeneration || 0) + 1,
+    });
+    directDistance = distanceMeters(currentPoint, stop.target);
+    arrived = false;
+  }
+  $("waypointNavigationLabel").textContent = navigationWaypointLabel(waypointNavigation);
+  const bearing = bearingDegrees(currentPoint, waypointNavigation.target);
   const calculated = waypointNavigation.mode === "route" && waypointNavigation.routeCoordinates?.length >= 2;
   const routeLabel = waypointNavigation.pinnedRoute ? "SHARED ROUTE" : `${waypointNavigation.routeSource === "offline" ? "OFFLINE · " : ""}${waypointNavigation.routeProfile === "walking" ? "WALKING ROUTE" : "ROAD ROUTE"}`;
   $("waypointNavigationMode").textContent = waypointNavigation.mode === "route" ? routeLabel : "STRAIGHT LINE";
@@ -3886,23 +3930,20 @@ function updateWaypointNavigation(position) {
     void requestCalculatedRoute(currentPoint);
   }
   if (waypointNavigation.mode !== "route" && !waypointNavigation.centered && fieldMap) {
-    fieldMap.fitBounds([currentPoint, waypointNavigation.target], {
-      padding: 80,
-      maxZoom: 16,
-      duration: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 500,
-    });
-    waypointNavigation.centered = true;
+    fitCalculatedRoute([currentPoint, waypointNavigation.target], 16);
   }
   renderNavigationSharing();
-  if (waypointNavigation.sharing && !waypointNavigation.sharePending && !waypointNavigation.routeLoading
-      && Date.now() - (waypointNavigation.lastSharedAt || 0) >= 20000
-      && (waypointNavigation.shareDirty || (waypointNavigation.mode === "direct" && !waypointNavigation.pinnedRoute
-        && distanceMeters(waypointNavigation.lastSharedOrigin || currentPoint, currentPoint) >= 25))) {
+  const sharedOrigin = waypointNavigation.lastSharedOrigin;
+  const directShareMoved = !waypointNavigation.pinnedRoute && (!sharedOrigin
+    || (waypointNavigation.lastSharedMode === "direct" && distanceMeters(sharedOrigin, currentPoint) >= 25));
+  const shareRefreshDue = !waypointNavigation.routeLoading && Date.now() - (waypointNavigation.lastSharedAt || 0) >= 20000;
+  if (waypointNavigation.sharing && !waypointNavigation.sharePending
+      && (advancing || shareRefreshDue && (waypointNavigation.shareDirty || directShareMoved))) {
     void publishNavigation(waypointNavigation);
   }
 }
 
-function startNavigation(properties, target, popup, targetKind, mode, sharedPlan = null, routeProfile = "driving") {
+function startNavigation(properties, target, popup, targetKind, mode, sharedPlan = null, routeProfile = "driving", waypoints = []) {
   if (nativeLocation ? !nativeLocation.hasLocationPermission() : !navigator.geolocation) return toast("Location permission is needed for navigation", true);
   stopWaypointNavigation(false);
   waypointNavigation = {
@@ -3934,6 +3975,7 @@ function startNavigation(properties, target, popup, targetKind, mode, sharedPlan
     sharePending: false,
     shareDirty: false,
     pinnedRoute: Boolean(sharedPlan),
+    ...(waypoints.length ? {...waypoints[0], remainingWaypoints: waypoints.slice(1), waypointCount: waypoints.length} : {}),
     ...(sharedPlan ? {
       routeOrigin: sharedPlan.origin,
       routeCoordinates: sharedPlan.coordinates,
@@ -3947,14 +3989,16 @@ function startNavigation(properties, target, popup, targetKind, mode, sharedPlan
     } : {}),
   };
   $("waypointNavigationMode").textContent = mode === "route" ? routeProfile === "walking" ? "WALKING ROUTE" : "ROAD ROUTE" : "STRAIGHT LINE";
+  intelPacks.setDrivingRoads(mode === "route" && routeProfile === "driving" && !sharedPlan);
   $("waypointNavigation").classList.toggle("calculated", mode === "route");
-  $("waypointNavigationLabel").textContent = waypointNavigation.label;
+  $("waypointNavigationLabel").textContent = navigationWaypointLabel(waypointNavigation);
   $("waypointNavigationDistance").textContent = "—";
   $("waypointNavigationBearing").textContent = "—";
   $("waypointNavigationState").textContent = "ACQUIRING POSITION";
   $("waypointNavigation").classList.remove("hidden", "arrived");
   popup?.remove();
   renderNavigationSharing();
+  if (waypoints.length) renderWaypointNavigationLine();
   if (sharedPlan) {
     $("waypointNavigationMode").textContent = `TEAM · ${mode === "route" ? "SHARED ROUTE" : "STRAIGHT LINE"}`;
     $("waypointNavigationDistance").textContent = formatNavigationDistance(sharedPlan.distance_m);
@@ -3962,9 +4006,9 @@ function startNavigation(properties, target, popup, targetKind, mode, sharedPlan
     $("waypointNavigationState").textContent = "SHARED PATH · ACQUIRING POSITION";
     renderWaypointNavigationLine();
     fitCalculatedRoute(sharedPlan.coordinates);
-    void publishNavigation(waypointNavigation);
   }
   const currentNavigation = waypointNavigation;
+  void publishNavigation(currentNavigation);
   if (nativeLocation) syncNativeLocationDemand();
   else waypointNavigationWatchId = navigator.geolocation.watchPosition(
     position => { if (waypointNavigation === currentNavigation) updateWaypointNavigation(position); },
@@ -3978,20 +4022,10 @@ function startNavigation(properties, target, popup, targetKind, mode, sharedPlan
   toast(`${mode === "route" ? routeProfile === "walking" ? "In-app walking route" : "In-app road route" : "Straight-line navigation"} · ${waypointNavigation.label}`);
 }
 
-function startDirectNavigation(properties, target, popup, targetKind) {
-  startNavigation(properties, target, popup, targetKind, "direct");
-}
-
-function startCalculatedNavigation(properties, target, popup, targetKind) {
-  startNavigation(properties, target, popup, targetKind, "route");
-}
-
 function renderNavigationSharing() {
   const button = $("shareWaypointNavigation");
   const navigation = waypointNavigation;
-  button.disabled = !navigation || navigation.sharePending || (!navigation.sharing
-    && (navigation.routeLoading || navigation.routeError || (!navigation.pinnedRoute
-      && (navigation.mode === "route" ? !navigation.routeCoordinates?.length : !navigation.currentPoint))));
+  button.disabled = !navigation || navigation.sharePending;
   button.textContent = navigation?.sharePending ? "SHARING…" : navigation?.sharing ? "SHARED" : "SHARE";
   button.setAttribute("aria-pressed", String(Boolean(navigation?.sharing)));
   button.setAttribute("aria-label", navigation?.sharing ? "Stop sharing route with team" : "Share route with team");
@@ -4036,7 +4070,8 @@ async function publishNavigation(navigation) {
     navigation.sharing = true;
     navigation.shareDirty = (navigation.shareGeneration || 0) !== generation;
     navigation.lastSharedAt = Date.now();
-    navigation.lastSharedOrigin = payload.origin;
+    navigation.lastSharedOrigin = payload.origin === payload.target ? null : payload.origin;
+    navigation.lastSharedMode = payload.mode;
     succeeded = true;
   } catch (error) {
     if (navigation === waypointNavigation && epoch === (navigation.shareEpoch || 0)) {
@@ -4085,6 +4120,7 @@ function synchronizeSharedNavigation(plans) {
 }
 
 function showMapFeaturePopup(map, Popup, feature, lngLat) {
+  mapFeaturePopups.get(map)?.remove();
   const properties = feature.properties || {};
   if (String(properties.kind).startsWith("shared-navigation-")) {
     sharedNavigation.showFeature(map, Popup, feature, lngLat);
@@ -4135,11 +4171,16 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
   }
   const pixel = map.project(lngLat);
   const below = pixel.y < map.getCanvas().clientHeight / 2;
-  if (properties.reportStatus) {
+  const scrollable = properties.reportStatus || properties.markerType === "waypoint";
+  if (scrollable) {
     content.style.maxHeight = `${Math.max(120, (below ? map.getCanvas().clientHeight - pixel.y : pixel.y) - 48)}px`;
     content.style.overflowY = "auto";
   }
-  const popup = new Popup({closeButton: true, offset: 12, ...(properties.reportStatus ? {anchor: below ? "top" : "bottom"} : {})}).setLngLat(lngLat).setDOMContent(content).addTo(map);
+  const popup = new Popup({closeButton: true, offset: 12, ...(scrollable ? {anchor: below ? "top" : "bottom"} : {})}).setLngLat(lngLat).setDOMContent(content).addTo(map);
+  mapFeaturePopups.set(map, popup);
+  popup.once("close", () => {
+    if (mapFeaturePopups.get(map) === popup) mapFeaturePopups.delete(map);
+  });
   const sharedPlan = kind === "operator" ? sharedNavigation.planFor(properties.senderHash) : null;
   if (sharedPlan) {
     const viewRoute = document.createElement("button");
@@ -4182,22 +4223,34 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
     actions.className = "map-popup-actions";
     const prompt = document.createElement("span");
     prompt.textContent = kind === "operator" ? "OPERATOR ACTIONS" : "WAYPOINT ACTIONS";
+    const sequence = capabilities.targetKind === "waypoint"
+      ? numberedWaypointSequence(Array.from(waypointMarkersByMap.get(map)?.values() || [], entry => entry.event), properties.id)
+      : [];
+    actions.append(prompt);
+    if (sequence.length) {
+      const note = document.createElement("small");
+      note.className = "map-navigation-note";
+      note.textContent = `Continues to ${sequence[1].label} on arrival.`;
+      actions.append(note);
+    }
+    const navigate = (mode, profile) => startNavigation(properties, feature.geometry.coordinates, popup, capabilities.targetKind,
+      mode, null, profile, sequence);
     const straight = document.createElement("button");
     straight.type = "button";
     straight.className = "map-navigation-choice";
     straight.innerHTML = '<b aria-hidden="true">↗</b><span>DIRECT LINE<small>Bearing + distance in Reticom</small></span>';
-    straight.addEventListener("click", () => startDirectNavigation(properties, feature.geometry.coordinates, popup, capabilities.targetKind));
+    straight.addEventListener("click", () => navigate("direct"));
     const calculated = document.createElement("button");
     calculated.type = "button";
     calculated.className = "map-navigation-choice secondary";
     calculated.innerHTML = '<b aria-hidden="true">⌁</b><span>DRIVING ROUTE<small>Road route inside Reticom</small></span>';
-    calculated.addEventListener("click", () => startCalculatedNavigation(properties, feature.geometry.coordinates, popup, capabilities.targetKind));
+    calculated.addEventListener("click", () => navigate("route", "driving"));
     const walking = document.createElement("button");
     walking.type = "button";
     walking.className = "map-navigation-choice secondary";
     walking.innerHTML = '<b aria-hidden="true">↟</b><span>WALKING ROUTE<small>Footpaths + walkable roads in Reticom</small></span>';
-    walking.addEventListener("click", () => startNavigation(properties, feature.geometry.coordinates, popup, capabilities.targetKind, "route", null, "walking"));
-    actions.append(prompt, straight, walking, calculated);
+    walking.addEventListener("click", () => navigate("route", "walking"));
+    actions.append(straight, walking, calculated);
     if (capabilities.privateChat) {
       const chat = document.createElement("button");
       chat.type = "button";
@@ -4286,7 +4339,7 @@ function renderJoinedCommand(events) {
     operators.set(sender, {sender_hash: sender, callsign: event.callsign, icon: event.icon, color: event.color, last_seen: event.network.received_at, event_count: (previous?.event_count || 0) + 1});
   }
   primeRecentVoiceTranscripts(events);
-  renderTimeline(events);
+  renderTimeline(combinedCommsEvents(events, privateMessages));
   renderOperators([...operators.values()], events);
   renderMapMessages(events, "commandLatestMessages");
   queueIncomingAlerts(events);
@@ -4824,13 +4877,18 @@ async function refresh({pullFeed = true} = {}) {
     }
     if (role === "gateway") {
       commandEvents = withDisplayWaypointLabels(state.events || []);
-      primeRecentVoiceTranscripts(commandEvents);
+      const mailbox = state.team.created ? await fetch("/api/private/messages", {cache: "no-store"})
+        .then(response => response.ok ? response.json() : null)
+        .catch(() => null) : null;
+      const comms = combinedCommsEvents(commandEvents, mailbox?.messages);
+      primeRecentVoiceTranscripts(comms);
       $("destinationHash").textContent = state.network.destination;
-      renderTimeline(commandEvents); renderOperators(state.operators || [], commandEvents);
+      renderTimeline(comms); renderOperators(state.operators || [], commandEvents);
       renderMapMessages(commandEvents, "commandLatestMessages");
       queueIncomingAlerts(commandEvents);
       if (state.team.created) renderMap(commandEvents);
     } else if (commandDisplay()) {
+      if (fieldTeamDestination !== (state.team.destination || "")) privateMessages = [];
       fieldTeamDestination = state.team.destination || "";
       fieldQueuedEvents = Number(state.network.queued_events || 0);
       fieldEvents = withDisplayWaypointLabels(state.events || []);

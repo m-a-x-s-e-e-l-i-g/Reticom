@@ -262,11 +262,11 @@ class RoadDisruptions:
         self.next_fetch = {}
         self.failed = set()
 
-    def snapshot(self, key, *, cached_only=False):
+    def snapshot(self, key, *, cached_only=False, driving=False):
         source = SOURCES[key]
         path = self.directory / f"{key}.json"
         with self.locks[key]:
-            if not self.store.is_enabled("roads"):
+            if not driving and not self.store.is_enabled("roads"):
                 return None
             now = self.clock()
             cached = self.store._read(path)
@@ -289,7 +289,7 @@ class RoadDisruptions:
                 if now - published > EXPIRE_SECONDS:
                     self.failed.add(key)
                     return cached
-                if not self.store.is_enabled("roads"):
+                if not driving and not self.store.is_enabled("roads"):
                     return None
                 cached = {"version":2, "received_at":now, "published_at":published, "features":features}
                 self.store._write(path, cached)
@@ -298,20 +298,20 @@ class RoadDisruptions:
                 self.failed.add(key)  # Never expose upstream response details.
             return cached
 
-    def load(self, bounds, zoom, *, cached_only=False):
+    def load(self, bounds, zoom, *, cached_only=False, driving=False):
         from .intel_packs import validate_bounds
         bounds = validate_bounds(bounds)
         if not math.isfinite(zoom) or not 0 <= zoom <= 24:
             raise ValueError("Enter a valid map zoom")
         empty = {"type":"FeatureCollection", "features":[], "replaced_sources":[], "status":"disabled"}
-        if not self.store.is_enabled("roads"):
+        if not driving and not self.store.is_enabled("roads"):
             return empty
         selected = [key for key, source in SOURCES.items() if overlaps(bounds, source["bounds"])]
         if not selected:
             return {**empty, "status":"uncovered", "note":"No connected road feed for this area. Coverage: Netherlands and North Carolina, US."}
         features, replaced, missing = [], [], []
         for key in selected:
-            snapshot = self.snapshot(key, cached_only=cached_only)
+            snapshot = self.snapshot(key, cached_only=cached_only, driving=driving)
             if not snapshot:
                 missing.append(SOURCES[key]["name"])
                 continue
@@ -330,7 +330,7 @@ class RoadDisruptions:
                 features.append({**feature, "properties":{**p, "confirmed_at":confirmed,
                     "stale_at":confirmed + STALE_SECONDS, "expires_at":confirmed + EXPIRE_SECONDS,
                     "stale":key in self.failed or now - confirmed > STALE_SECONDS}})
-        if not self.store.is_enabled("roads"):
+        if not driving and not self.store.is_enabled("roads"):
             return empty
         stale = missing or any(f["properties"]["stale"] for f in features)
         return {"type":"FeatureCollection", "features":features, "replaced_sources":replaced,

@@ -654,7 +654,7 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, in
         return result
 
     @router.post("/roads/check-route")
-    async def check_road_route(request: Request):
+    async def check_road_route(request: Request, driving: bool = False):
         from .road_navigation import assess_routes
         raw = bytearray()
         async for chunk in request.stream():
@@ -663,7 +663,7 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, in
                 raise HTTPException(413, "Route comparison request is too large")
         try:
             body = json.loads(raw)
-            return await asyncio.to_thread(assess_routes, roads, body)
+            return await asyncio.to_thread(assess_routes, roads, body, driving=driving)
         except (ValueError, UnicodeDecodeError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -866,7 +866,7 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, in
             raise HTTPException(422, str(exc)) from exc
 
     @router.get("/{pack_id}")
-    async def features(request: Request, pack_id: str, west: float, south: float, east: float, north: float, zoom: float):
+    async def features(request: Request, pack_id: str, west: float, south: float, east: float, north: float, zoom: float, driving: bool = False):
         try:
             bounds = (west, south, east, north)
             if pack_id == "transit":
@@ -879,7 +879,7 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, in
                 if result["status"] != "disabled" and not store.is_enabled(pack_id):
                     result = store._empty(pack_id, "disabled")
             elif pack_id == "roads":
-                result = await asyncio.to_thread(roads.load, bounds, zoom)
+                result = await asyncio.to_thread(roads.load, bounds, zoom, driving=driving)
             else:
                 result = await asyncio.to_thread(store.load, pack_id, bounds, zoom)
                 if pack_id in SHARED_INTEL_KEYS and result["status"] == "needs_key":

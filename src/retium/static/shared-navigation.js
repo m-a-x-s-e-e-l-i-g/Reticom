@@ -1,23 +1,28 @@
-import {latestNavigationPlans, sharedNavigationFeatures} from "./shared-navigation-model.js?v=20260906-1";
+import {encodeRouteGeometry, latestNavigationPlans, sharedNavigationFeatures} from "./shared-navigation-model.js?v=20260906-1";
 import {routeInstruction, formatRouteDuration} from "./route-navigation.js?v=20260903-1";
 
 export function navigationSharePayload(navigation, distanceBetween) {
   if (!navigation) throw new Error("Start navigation first");
   const following = navigation.following;
-  const origin = navigation.pinnedRoute || navigation.mode === "route" ? navigation.routeOrigin : navigation.currentPoint;
-  const coordinates = navigation.pinnedRoute || navigation.mode === "route" ? navigation.routeCoordinates : [origin, navigation.target];
-  if (!origin || !coordinates?.length || coordinates.length < 2 || navigation.routeLoading || navigation.routeError) {
-    throw new Error(navigation.mode === "route" ? "Wait for the calculated route before sharing" : "Wait for your location before sharing");
+  let useRoute = Boolean((navigation.pinnedRoute || navigation.mode === "route") && navigation.routeOrigin
+    && navigation.routeCoordinates?.length >= 2 && !navigation.routeLoading && !navigation.routeError);
+  if (useRoute) {
+    try { useRoute = encodeRouteGeometry(navigation.routeCoordinates).length <= 10000; }
+    catch { useRoute = false; }
   }
-  const directions = navigation.pinnedRoute ? navigation.sharedDirections || [] : (navigation.routeSteps || []).map(step => ({
-    text: routeInstruction([step]), distance_m: Number(step.distance) || 0,
-  }));
+  const mode = useRoute ? navigation.mode : "direct";
+  const origin = useRoute ? navigation.routeOrigin : navigation.currentPoint || navigation.target;
+  const coordinates = useRoute ? navigation.routeCoordinates : [origin, navigation.target];
+  const directions = useRoute ? (navigation.pinnedRoute ? navigation.sharedDirections || [] : (navigation.routeSteps || []).map(step => ({
+    text: routeInstruction([step]).slice(0, 160), distance_m: Number(step.distance) || 0,
+  }))).slice(0, 64) : [];
+  while (new TextEncoder().encode(JSON.stringify(directions)).length > 1024) directions.pop();
   return {
-    label: navigation.label, mode: navigation.mode, origin, target: navigation.target,
+    label: navigation.label, mode, origin, target: navigation.target,
     target_kind: following ? "shared" : navigation.targetKind,
     target_id: navigation.id || "", coordinates,
-    distance_m: navigation.mode === "route" ? navigation.routeDistance : distanceBetween(origin, navigation.target),
-    duration_s: navigation.mode === "route" ? navigation.routeDuration : 0,
+    distance_m: mode === "route" ? navigation.routeDistance : origin === navigation.target ? 0 : distanceBetween(origin, navigation.target),
+    duration_s: mode === "route" ? navigation.routeDuration : 0,
     ...(following ? {following: {sender_hash: following.sender_hash, route_id: following.route_id}} : {}),
     ...(directions.length ? {directions} : {}),
   };
@@ -86,7 +91,8 @@ export function createSharedNavigation({fetchImpl, urlFor, getIdentity, getRole,
   }
   function metadata(plan) {
     const updated = new Date(Number(plan.created_at || plan.timestamp || 0) * 1000);
-    return `${plan.mode === "route" ? "Road route" : "Direct line"} · ${distance(plan.distance_m)}${plan.mode === "route" ? ` · ${formatRouteDuration(plan.duration_s)}` : ""}`
+    const path = plan.mode === "direct" && !plan.distance_m ? "Destination" : `${plan.mode === "route" ? "Road route" : "Direct line"} · ${distance(plan.distance_m)}`;
+    return `${path}${plan.mode === "route" ? ` · ${formatRouteDuration(plan.duration_s)}` : ""}`
       + `${queued(plan) ? " · queued" : " · shared"}${Number.isFinite(updated.getTime()) && updated.getTime() > 0 ? ` · ${updated.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}` : ""}`;
   }
   function show(plan, map, Popup, position = plan.target) {

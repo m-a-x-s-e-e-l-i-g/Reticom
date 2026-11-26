@@ -68,10 +68,17 @@ def test_bad_geometry_is_rejected(body):
     with pytest.raises(ValueError): validate_routes(body)
 
 
-def test_route_check_endpoint_validation_and_disabled_state(tmp_path):
-    app=FastAPI(); app.include_router(intel_router(tmp_path))
+def test_route_check_endpoint_validation_and_disabled_state(tmp_path, monkeypatch):
+    store = IntelPackStore(tmp_path, clock=lambda: NOW)
+    monkeypatch.setattr("retium.intel_sources.fetch_bytes", lambda *args, **kwargs: ndw())
+    app=FastAPI(); app.include_router(intel_router(tmp_path, store=store))
     with TestClient(app) as client:
         url="/api/intel-packs/roads/check-route"
         assert client.post(url,json={"routes":[MAIN]}).json()["status"] == "disabled"
+        assert client.post(f"{url}?driving=true", json={"routes":[MAIN, DETOUR]}).json()["selected"] == 1
+        overlay = "/api/intel-packs/roads?west=4&south=51&east=5&north=53&zoom=12"
+        assert client.get(f"{overlay}&driving=true").json()["features"]
+        assert client.get(overlay).json()["status"] == "disabled"
+        assert not store.is_enabled("roads")
         assert client.post(url,json={"routes":[]}).status_code == 422
         assert client.post(url,content=b'x'*4_000_001).status_code == 413

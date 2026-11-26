@@ -3,17 +3,17 @@
 ## Gebruik
 
 1. Tik op een waypoint of operator en start een directe lijn of berekende route.
-2. Kies **SHARE WITH TEAM** zodra een positie/route beschikbaar is. Een mislukte routeberekening wordt niet als een berekende route gedeeld.
+2. Bij de start deelt Reticom de bestemming automatisch met het team. Zodra een berekende route beschikbaar is, kan het gedeelde plan ook het traject tonen.
 3. **Ops → Shared routes** toont de plannen. Tik op een route om deze op de kaart te bekijken, inclusief de richtingen. **FOLLOW & SHARE** volgt dezelfde geometrie en maakt jouw navigatie zichtbaar voor het team.
 4. Command ziet routes in de zijbalk, op de kaart en via een operator-popup. All Teams houdt routes gescheiden per team.
 
-Een volger krijgt wijzigingen van de oorspronkelijke deler. Als die de route beëindigt of vervangt, eindigt het volgen; een nieuwe route wordt niet zonder keuze geactiveerd. **STOP SHARING** maakt navigatie privé. **END** stopt navigatie en publiceert een stop. Een gesloten of gesuspendeerde WebView verwijdert een gedeeld plan niet: open het in Ops om te hervatten of het delen te stoppen.
+Een volger krijgt wijzigingen van de oorspronkelijke deler. Als die de route beëindigt of vervangt, eindigt het volgen. Tik op **SHARED** in de navigatiebalk om het delen voor de lopende route te stoppen. Het kruisje beëindigt de navigatie en stopt het delen. Een gesloten of gesuspendeerde WebView verwijdert een gedeeld plan niet: open het in Ops om te hervatten of het delen te stoppen.
 
 Routes zijn gestippelde plannen met eigenaar, bestemming en tijdstip. De GPS-positie en bewegingstrace zijn afzonderlijke gegevens. De app claimt geen live voortgang of gesproken turn-by-turn navigatie wanneer alleen een route beschikbaar is.
 
 ## Netwerk en privacy
 
-- Navigatie is standaard privé; delen is expliciet. Volgen deelt jouw gekozen plan, niet een nieuwe persoonlijke berekening.
+- Nieuwe navigatie wordt standaard gedeeld met je huidige team. Bij het volgen deelt Reticom het gekozen traject.
 - `navigation.updated` en `navigation.stopped` zijn ondertekende, teamgebonden events over geauthenticeerde, versleutelde Reticulum Links. De afzender komt uit de geverifieerde envelope, nooit uit een requestveld.
 - Eén huidig plan per afzender. Revisions zijn oplopende, persistente tellers, onafhankelijk van telefoonklokken. Een stop blijft als tombstone bewaard zodat oude events of oudere snapshots de route niet herstellen.
 - De bestaande duurzame Field-outbox bundelt opeenvolgende updates tot de nieuwste gewenste toestand. **Queued** betekent nog niet afgeleverd. Mission sync bewaart de nieuwste navigatiestatus buiten de beperkte chatgeschiedenis.

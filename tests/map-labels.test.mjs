@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {nextWaypointLabel, withDisplayWaypointLabels} from "../src/retium/static/map-labels.js";
+import {nextWaypointLabel, numberedWaypointSequence, withDisplayWaypointLabels} from "../src/retium/static/map-labels.js";
 
 function waypoint(label) {
   return {id: crypto.randomUUID(), type: "marker.created", marker_type: "waypoint", label};
@@ -36,4 +36,14 @@ test("gives legacy generic waypoints stable visible numbers", () => {
 
   assert.equal(events.find((event) => event.id === older.id).display_label, "Waypoint 1");
   assert.equal(events.find((event) => event.id === newer.id).display_label, "Waypoint 2");
+});
+test("a numbered route starts at the selected waypoint and continues through unique consecutive numbers", () => {
+  const stops = [3, 6, 2, 1, 5, 4, 7].map(number => ({
+    ...waypoint(`Waypoint ${number}`), id: String(number), lon: 4, lat: 51 + number / 100,
+  }));
+  assert.deepEqual(numberedWaypointSequence(stops, "1").map(stop => stop.id), ["1", "2", "3", "4", "5", "6", "7"]);
+  assert.deepEqual(numberedWaypointSequence(stops, "5").map(stop => stop.id), ["5", "6", "7"]);
+  assert.deepEqual(numberedWaypointSequence(stops.filter(stop => stop.id !== "4"), "1").map(stop => stop.id), ["1", "2", "3"]);
+  assert.deepEqual(numberedWaypointSequence([...stops, {...stops[0], id: "duplicate"}], "1").map(stop => stop.id), ["1", "2"]);
+  assert.deepEqual(numberedWaypointSequence(stops, "7"), []);
 });

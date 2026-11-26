@@ -55,12 +55,18 @@ test("resuming your own saved direct plan also preserves its old origin and geom
   assert.deepEqual(payload.coordinates, directPoints);
 });
 
-test("unavailable GPS and incomplete or failed route calculation are not shared as a misleading route", () => {
+test("sharing always sends the destination and uses a direct line until a calculated route is available", () => {
   assert.throws(() => navigationSharePayload(null, distanceBetween), /Start navigation/);
-  assert.throws(() => navigationSharePayload(navigation({mode: "direct", currentPoint: null}), distanceBetween), /location/);
-  assert.throws(() => navigationSharePayload(navigation({routeCoordinates: null}), distanceBetween), /calculated route/);
-  assert.throws(() => navigationSharePayload(navigation({routeLoading: true}), distanceBetween), /calculated route/);
-  assert.throws(() => navigationSharePayload(navigation({routeError: "No route"}), distanceBetween), /calculated route/);
+  const targetOnly = navigationSharePayload(navigation({mode: "direct", currentPoint: null}), distanceBetween);
+  assert.deepEqual(targetOnly.coordinates, [points.at(-1), points.at(-1)]);
+  assert.equal(targetOnly.distance_m, 0);
+  for (const unavailable of [{routeCoordinates: null}, {routeLoading: true}, {routeError: "No route"}]) {
+    const state = navigation(unavailable);
+    const payload = navigationSharePayload(state, distanceBetween);
+    assert.equal(payload.mode, "direct");
+    assert.deepEqual(payload.coordinates, [state.currentPoint, state.target]);
+    assert.equal("directions" in payload, false);
+  }
 });
 
 test("writes serialize PUT before DELETE and capture each operation's team at enqueue", async () => {

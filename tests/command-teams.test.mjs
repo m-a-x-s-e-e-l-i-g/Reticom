@@ -10,10 +10,31 @@ test('Command position is scoped to the selected team, including when default is
 });
 
 test('each tab scopes HTTP, audio, QR and websocket traffic to its selected team', () => {
-  for (const path of ['/api/state', '/api/send', '/api/audio/clip', '/api/team/qr?v=1', 'ws://localhost:8780/api/voice/live', 'ws://localhost:8780/api/live']) {
+  for (const path of ['/api/state', '/api/send', '/api/private/messages', '/api/audio/clip', '/api/team/qr?v=1', 'ws://localhost:8780/api/voice/live', 'ws://localhost:8780/api/live']) {
     assert.equal(new URL(teamApiUrl(path, 'http://localhost:8780/?team=alpha')).searchParams.get('team'), 'alpha');
     assert.equal(new URL(teamApiUrl(path, 'http://localhost:8780/?team=bravo')).searchParams.get('team'), 'bravo');
   }
+});
+
+test('joined Command shows its own private mailbox in Intel and keeps the map on team events', () => {
+  const js = readFileSync(new URL('../src/retium/static/app.js', import.meta.url), 'utf8');
+  const combine = js.slice(js.indexOf('function combinedCommsEvents('), js.indexOf('function arrowGeometry('));
+  const render = js.slice(js.indexOf('function renderJoinedCommand('), js.indexOf('function renderCommandUser('));
+  const message = (id, sender_hash, recipient_hash, received_at) => ({
+    id, type: 'private.message', recipient_hash, network: {sender_hash, received_at},
+  });
+  const events = [{id: 'team', type: 'chat.message', network: {sender_hash: 'field', received_at: 3}}];
+  const mailbox = [message('sent', 'command', 'field', 1), message('incoming', 'field', 'command', 4),
+    message('unrelated', 'field', 'other', 5)];
+  const visible = [], mapEvents = [];
+  runInNewContext(`${combine}\n${render}\nrenderJoinedCommand(events)`, {
+    events, privateMessages: mailbox, localIdentityHash: 'command', commandEvents: [], teamOperational: true,
+    renderTimeline: rows => visible.push(...rows),
+    renderMap: rows => mapEvents.push(...rows),
+    renderOperators() {}, renderMapMessages() {}, primeRecentVoiceTranscripts() {}, queueIncomingAlerts() {},
+  });
+  assert.deepEqual(visible.map(row => row.id), ['incoming', 'team', 'sent']);
+  assert.deepEqual(mapEvents, events);
 });
 test('Field, legacy Command, external routes and workspace management remain unscoped', () => {
   assert.equal(teamApiUrl('/api/state', 'http://localhost:8780/'), 'http://localhost:8780/api/state');

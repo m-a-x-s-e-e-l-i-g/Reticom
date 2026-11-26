@@ -503,8 +503,8 @@ Android changes also require a real build, `adb install -r` and physical-device 
 Push an unused `vMAJOR.MINOR.PATCH` tag. GitHub Actions builds versioned Android and Windows packages in parallel, runs browser/Python tests and the frozen Windows backend smoke test, then publishes both binaries and SHA-256 files together.
 
 ```powershell
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 The tag sets Android `versionName`; `versionCode = major × 1000000 + minor × 1000 + patch`. Never reuse a release tag.

@@ -1131,11 +1131,17 @@ class GatewayReceiver:
                 raise ProtocolError("only the original sender can remove this drawing")
         envelope_hash = RNS.Identity.full_hash(envelope).hex()
         received_at = int(time.time())
+        moderation = admin and verified_event["type"] in {
+            "message.deleted", "marker.deleted", "marker.status", "drawing.deleted", "report.dismissed",
+        }
+        interface_name = (
+            "Team admin · Authenticated Reticulum Link" if moderation else "Hosted Field origin · Reticulum feed"
+        )
         inserted = self.store.insert(
             verified_event,
             sender_hash,
             packet_hash=envelope_hash,
-            interface_name="Team admin · Authenticated Reticulum Link" if admin and verified_event["type"] in {"marker.status", "report.dismissed"} else "Hosted Field origin · Reticulum feed",
+            interface_name=interface_name,
         )
         if not inserted:
             raise ProtocolError("field event already exists")
@@ -1148,7 +1154,7 @@ class GatewayReceiver:
                         "verified": True,
                         "sender_hash": sender_hash,
                         "packet_hash": envelope_hash,
-                        "interface": "Hosted Field origin · Reticulum feed",
+                        "interface": interface_name,
                         "received_at": received_at,
                         "rssi": None,
                         "snr": None,

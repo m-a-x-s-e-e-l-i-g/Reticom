@@ -1,8 +1,9 @@
 import json
 
 import RNS
+import pytest
 
-from retium.protocol import new_event
+from retium.protocol import ProtocolError, new_event
 from retium.store import EventStore
 from retium.transport import GatewayReceiver
 from membership_helpers import approve_test_members
@@ -103,3 +104,27 @@ def test_hosted_field_event_keeps_the_field_identity(tmp_path):
     assert delivery["transport"] == "local signed origin · Reticulum feed"
     assert saved["network"]["sender_hash"] == field_identity.hash.hex()
     assert saved["network"]["interface"] == "Hosted Field origin · Reticulum feed"
+
+
+@pytest.mark.parametrize(("kind", "details"), [
+    ("marker", {"marker_type": "waypoint", "label": "Waypoint 5", "lat": 51, "lon": 4}),
+    ("drawing", {"drawing_type": "trace", "points": [[4, 51], [5, 51]]}),
+])
+def test_hosted_field_admin_removes_another_operators_map_item(tmp_path, kind, details):
+    store = EventStore(tmp_path / "events.sqlite3")
+    receiver = GatewayReceiver.__new__(GatewayReceiver)
+    receiver.store = store
+    updates = []
+    receiver.event_callback = updates.append
+    receiver.destination = type("Destination", (), {"hash": b"hosted-destination"})()
+    item = new_event(f"{kind}.created", "COMMAND", **details)
+    store.insert(item, RNS.Identity().hash.hex())
+    removal = new_event(f"{kind}.deleted", "FIELD", **{f"{kind}_id": item["id"]})
+    phone = RNS.Identity()
+
+    with pytest.raises(ProtocolError):
+        receiver.publish_local_field_event(removal, phone)
+    assert [event["id"] for event in store.mission_events()] == [item["id"]]
+    receiver.publish_local_field_event(removal, phone, admin=True)
+    assert store.mission_events() == []
+    assert updates[-1]["network"]["interface"] == "Team admin · Authenticated Reticulum Link"

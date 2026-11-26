@@ -89,9 +89,9 @@ def route_closures(route, features):
     return found
 
 
-def assess_routes(roads, body):
+def assess_routes(roads, body, *, driving=False):
     routes = validate_routes(body)
-    if not roads.store.is_enabled("roads"):
+    if not driving and not roads.store.is_enabled("roads"):
         return {"selected":0, "status":"disabled", "warning":"Road closure checks are off. Enable Road closures & disruptions in Map layers."}
     points = [point for route in routes for point in route]
     west, east = min(p[0] for p in points), max(p[0] for p in points)
@@ -99,7 +99,7 @@ def assess_routes(roads, body):
     if east-west > 180 or south < -80 or north > 80:
         return {"selected":0, "status":"unavailable", "warning":"Road closure checks are unavailable for this route."}
     data = roads.load((max(-180,west-.002), max(-90,south-.002), min(180,east+.002), min(90,north+.002)), 10,
-                      cached_only=body.get("cached_only", False))
+                      cached_only=body.get("cached_only", False), driving=driving)
     if data["status"] in {"error", "uncovered", "disabled"}:
         return {"selected":0, "status":data["status"], "warning":"Road closure data is unavailable for this route. Conditions have not been checked."}
     try:
@@ -121,7 +121,7 @@ def assess_routes(roads, body):
         notes.append("Parts of this route have no connected road feed.")
         warning = " ".join(filter(None, [warning, notes[-1]]))
     notes.append("Road reports are incomplete; lane, direction and access details still need checking.")
-    if not roads.store.is_enabled("roads"):
+    if not driving and not roads.store.is_enabled("roads"):
         return {"selected":0, "status":"disabled", "warning":"Road closure checks were switched off."}
     return {"selected":selected, "status":"closures" if count else "checked", "warning":warning,
             "note":" ".join(notes), "closures":matches[selected][:10], "counts":[len(m) for m in matches]}

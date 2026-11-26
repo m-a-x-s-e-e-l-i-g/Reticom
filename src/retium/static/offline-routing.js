@@ -22,7 +22,7 @@ export async function calculateDeviceRoute(origin, target, profile, {
     const checkTimeout = setTimeout(cancelCheck, 20000);
     let assessment;
     try {
-      const response = await fetcher("/api/intel-packs/roads/check-route", {
+      const response = await fetcher("/api/intel-packs/roads/check-route?driving=true", {
         method:"POST", headers:{"content-type":"application/json"}, signal:checkController.signal,
         body:JSON.stringify({routes:candidates.map(r => r.geometry?.coordinates), cached_only:offlineOnly}),
       });

@@ -34,3 +34,22 @@ export function nextWaypointLabel(events) {
   });
   return `Waypoint ${highestNumber + 1}`;
 }
+
+export function numberedWaypointSequence(waypoints, startId) {
+  const first = waypoints.find(event => event.id === startId);
+  const start = waypointNumber(first?.display_label || first?.label);
+  if (!Number.isSafeInteger(start) || start < 1) return [];
+  const stops = new Map([[start, first]]);
+  for (const event of waypoints) {
+    const number = waypointNumber(event.display_label || event.label);
+    if (!Number.isSafeInteger(number) || number <= start) continue;
+    stops.set(number, stops.has(number) ? null : event);
+  }
+  const sequence = [];
+  for (let number = start; stops.get(number); number++) {
+    const event = stops.get(number);
+    if (!Number.isFinite(event.lon) || !Number.isFinite(event.lat)) break;
+    sequence.push({id: event.id, label: event.display_label || event.label, target: [event.lon, event.lat]});
+  }
+  return sequence.length > 1 ? sequence : [];
+}

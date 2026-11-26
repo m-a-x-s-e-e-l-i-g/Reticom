@@ -90,6 +90,33 @@ class FakeMap {
   jumpTo() { assert.fail("Public intel must not move the map"); }
 }
 
+test("driving temporarily enables road closures and obstructions without saving map preferences", async () => {
+  for (const previouslyEnabled of [false, true]) {
+    const map = new FakeMap(), requests = [], now = Date.now() / 1000;
+    const reports = [["closures", "closed"], ["vehicle_obstruction", "incident"], ["accidents", "closed"], ["roadworks", "restricted"]]
+      .map(([road_type, road_impact]) => ({...feature(road_type), properties: {road_type, road_impact, starts_at: now - 5, expires_at: now + 60}}));
+    const road_filters = {types: ["roadworks"], impacts: ["restricted"]};
+    const model = catalogue([pack("roads", previouslyEnabled)]);
+    model.settings.road_filters = road_filters;
+    const controller = createIntelPacks({fetchImpl: async (url, options) => {
+      assert.notEqual(options?.method, "PATCH");
+      requests.push(url);
+      return response(url === "/api/intel-packs" ? model : {...empty, status: "fresh", features: reports});
+    }});
+    const visible = () => map.getSource("public-intel-roads")?.data.features.map(item => item.id);
+    try {
+      await controller.ready; controller.attachMap(map); await tick();
+      assert.deepEqual(visible(), previouslyEnabled ? ["roadworks"] : undefined);
+      controller.setDrivingRoads(true); await tick();
+      assert.match(requests.at(-1), /&driving=true$/);
+      assert.deepEqual(visible(), ["closures", "vehicle_obstruction", "accidents", "roadworks"]);
+      controller.setDrivingRoads(false); await tick();
+      assert.deepEqual(visible(), previouslyEnabled ? ["roadworks"] : undefined);
+      assert.deepEqual(controller.getState().settings.road_filters, road_filters);
+    } finally { controller.destroy(); }
+  }
+});
+
 test("public transport installs and refreshes reported and estimated vehicle markers", () => {
   const map = new FakeMap();
   const transit = pack("transit");

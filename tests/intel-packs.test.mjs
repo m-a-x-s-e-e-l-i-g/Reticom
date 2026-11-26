@@ -10,6 +10,7 @@ test("intel credit strip stays hidden without hiding base-map attribution or sou
   assert.match(html, /© OpenStreetMap contributors/);
 });
 import {readFileSync} from "node:fs";
+import {DAYLIGHT_HIKING_NAME} from "../src/retium/static/outdoor-map.js";
 import {intelNoteText} from "../src/retium/static/intel-packs.js";
 import {intelLayerWarning} from "../src/retium/static/intel-packs.js";
 
@@ -98,13 +99,52 @@ test("public transport installs and refreshes reported and estimated vehicle mar
   installIntelLayers(map, transit, data);
   const {source} = map.added[0].layer;
   assert.equal(map.getSource(source).data, data);
-  assert.deepEqual(map.added.map(({layer}) => layer.type), ["circle", "symbol"]);
+  assert.deepEqual(map.added.map(({layer}) => layer.type), ["symbol"]);
+  assert.deepEqual(map.getLayer(`${source}-icons`).layout["icon-image"].slice(0, 3), ["concat", "public-transit-", ["get", "kind"]]);
   assert.match(intelFeatureHtml(bus, transit, {}), /Estimated from realtime trip updates/);
   assert.match(intelFeatureHtml(bus, transit, {}), /&lt;Route 64&gt;/);
   installIntelLayers(map, transit, empty);
   assert.equal(map.getSource(source).data, empty);
   removeIntelLayers(map, "transit");
   assert.equal(map.getSource(source), undefined);
+});
+
+test("clicking a bus draws its trip and follows new reported fixes until the map is dragged", async () => {
+  const map = new FakeMap(), moves = [], views = [];
+  map.bounds = {west: 3.9999, south: 50.9999, east: 4.0001, north: 51.0001};
+  let bus = feature("bus", "Route 64");
+  const now = Date.now()/1000 - 5;
+  bus.properties = {...bus.properties, trip_ref: "20261125_12:00_us-ma-mbta_trip_1", observed_at: now,
+    position_time: now, traffic_pack: "transit", kind: "bus", identity: "bus"};
+  map.getCenter = () => ({lng: 4, lat: 51});
+  map.project = () => ({dist: () => 10});
+  map.jumpTo = ({center}, options) => { assert.equal(options.trafficFollow, true); moves.push(center); };
+  const route = [[4, 51], [4.001, 51], [4.002, 51]];
+  const controller = createIntelPacks({fetchImpl: async url => {
+    if (url === "/api/intel-packs") return response(catalogue([pack("transit")]));
+    if (url.startsWith("/api/intel-packs/transit/route?")) return response({points: route});
+    views.push(new URL(url, "http://localhost").searchParams);
+    return response({...empty, status: "fresh", features: [bus]});
+  }});
+  try {
+    await controller.ready;
+    controller.attachMap(map);
+    await tick();
+    map.rendered = [{...bus, layer: map.getLayer("public-intel-transit-icons")}];
+    map.emit("click", {point: {}});
+    await tick();
+    assert.deepEqual(map.getSource("public-traffic-track").data.features[0].geometry.coordinates, [route]);
+    bus = {...bus, geometry: {...bus.geometry, coordinates: [4.001, 51]}, properties: {...bus.properties, position_time: now + 3}};
+    await controller.refresh();
+    await tick();
+    assert.deepEqual(moves.at(-1), [4.001, 51]);
+    assert.ok(Number(views.at(-1).get("east")) > 4.02, "follow viewport includes a bus that leaves the street-level view");
+    map.emit("dragstart");
+    const movesBefore = moves.length;
+    await controller.refresh();
+    await tick();
+    assert.equal(moves.length, movesBefore);
+  } finally { controller.destroy(); }
 });
 
 test("viewport queries wrap the world and split the antimeridian without oversized boxes", () => {
@@ -372,9 +412,45 @@ test("environment rasters install as bounded client-only map layers", () => {
     installIntelLayers(map, pack(id), empty);
     assert.equal(map.getSource(`public-intel-${id}`).type, "raster");
     assert.equal(map.getLayer(`public-intel-${id}-raster`).type, "raster");
+    if (id === "bathymetry") {
+      assert.equal(map.getSource(`public-intel-${id}`).maxzoom, 9);
+      assert.equal(map.getLayer(`public-intel-${id}-raster`).maxzoom, undefined);
+    }
     removeIntelLayers(map, id);
     assert.equal(map.getSource(`public-intel-${id}`), undefined);
   }
+});
+
+test("daylight hiking styles military areas from either source in dark red", () => {
+  const map = new FakeMap();
+  map.getStyle = () => ({name: DAYLIGHT_HIKING_NAME, layers: [...map.layers.values()]});
+  map.addSource("offline", {type: "vector"});
+  installIntelLayers(map, pack("military"), empty);
+  const base = map.getLayer("public-intel-military-basemap");
+  const areas = map.getLayer("public-intel-military-areas");
+  assert.equal(base.paint["fill-color"], "#762b2e");
+  assert.equal(areas.paint["fill-color"].at(-1), base.paint["fill-color"]);
+  assert.notEqual(areas.paint["fill-color"][3], base.paint["fill-color"], "police remains visually distinct");
+});
+
+test("the Malta contour source is selected for close views and released on zoom-out", async () => {
+  const map = new FakeMap();
+  map.bounds = {west: 14.49, south: 35.89, east: 14.51, north: 35.90};
+  map.zoom = 17;
+  const calls = [];
+  const controller = createIntelPacks({prepareContours: async malta => { calls.push(malta); return contourUrl; },
+    fetchImpl: async () => response(catalogue([pack("elevation")]))});
+  try {
+    await controller.ready; controller.attachMap(map); await tick();
+    assert.deepEqual(calls, [true]);
+    assert.equal(map.getSource("public-intel-elevation").maxzoom, 18);
+    assert.match(controller.getState().results.elevation.note, /^2 m/);
+    map.zoom = 15;
+    map.emit("moveend");
+    await new Promise(resolve => setTimeout(resolve, 720));
+    assert.deepEqual(calls, [true, false]);
+    assert.equal(map.getSource("public-intel-elevation").maxzoom, 15);
+  } finally { controller.destroy(); }
 });
 
 test("AHN uses only its raster source and waits for the close zoom", async () => {

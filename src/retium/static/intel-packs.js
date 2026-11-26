@@ -1,12 +1,12 @@
 // Public map context is device-local: never insert it into the signed team feed.
-import {ROAD_COLOR} from "./outdoor-map.js?v=20260907-5";
+import {ROAD_COLOR, MAP_STYLES, DAYLIGHT_HIKING_NAME, HIKING_RELIEF, hikingReliefTone} from "./outdoor-map.js?v=20261125-2";
 import {GDACS_TYPES, GDACS_COLOR, GDACS_ICON, gdacsCode, gdacsIconSvg, gdacsDisplayData, normalizeGdacsTypes, installGdacsIcons} from "./gdacs-markers.js?v=20260907-1";
-import {prepareContourTiles, contourLayers, contourInterval, CONTOUR_MIN_ZOOM, CONTOUR_MAX_ZOOM} from "./terrain-contours.js?v=20260907-3";
-import {lidarLayers, lidarModeLabel, lidarModeForProvider, lidarProviderForBounds, lidarSource, lidarTileUrl, normalizeAhnMode, AHN_MODES} from "./ahn-layer.js?v=20261125-1";
-import {environmentLayers, environmentSource, environmentTileUrl, ENVIRONMENT_RASTER_IDS, ENVIRONMENT_RASTERS, ENVIRONMENT_MIN_ZOOM} from "./environment-layers.js?v=20261125-1";
-import {TRAFFIC_IDS, TRAFFIC_TYPES, normalizeTrafficFilters, trafficDisplayData, installTrafficIcons, trafficLayers} from "./traffic-map.js?v=20261125-1";
+import {prepareContourTiles, contourLayers, contourInterval, CONTOUR_MIN_ZOOM, CONTOUR_MAX_ZOOM, MALTA_CONTOUR_MAX_ZOOM} from "./terrain-contours.js?v=20261126-1";
+import {lidarLayers, lidarModeLabel, lidarModeForProvider, lidarProviderForBounds, lidarSource, lidarTileUrl, normalizeAhnMode, AHN_MODES} from "./ahn-layer.js?v=20261125-2";
+import {environmentLayers, environmentSource, environmentTileUrl, ENVIRONMENT_RASTER_IDS, ENVIRONMENT_RASTERS, ENVIRONMENT_MIN_ZOOM} from "./environment-layers.js?v=20261126-1";
+import {TRAFFIC_IDS, TRAFFIC_TYPES, normalizeTrafficFilters, trafficDisplayData, installTrafficIcons, installTransitIcons, trafficLayers} from "./traffic-map.js?v=20261125-3";
 import {TrafficMotion, createTrafficAnimator} from "./traffic-motion.js?v=20260909-3";
-import {TrafficTracks, trafficKey, showTrafficTrack, showTrafficEstimate, clearTrafficTrack} from "./traffic-tracks.js?v=20261125-2";
+import {TrafficTracks, trafficKey, showTrafficTrack, showTrafficEstimate, clearTrafficTrack, transitRouteFeature} from "./traffic-tracks.js?v=20261125-3";
 import {retainTraffic} from "./traffic-cache.js?v=20260909-3";
 import {retainIntel} from "./intel-cache.js?v=20260909-4";
 import {roadDisplayData, retainRoads, roadLayers, ROAD_IMPACTS, ROAD_TYPES, normalizeRoadFilters, filterRoadReports} from "./road-disruptions.js?v=20260909-7";
@@ -15,6 +15,7 @@ const EMPTY = () => ({type: "FeatureCollection", features: []});
 const IDS = ["military", "roads", "firms", "gdacs", "notams", "transit", "elevation", "ahn", ...ENVIRONMENT_RASTER_IDS, ...TRAFFIC_IDS];
 const CLIENT_RASTER_IDS = new Set(["elevation", "ahn", ...ENVIRONMENT_RASTER_IDS]);
 const COLORS = {trails: "#8f9c77", military: "#ad9774", firms: "#c49367", gdacs: "#b6a578", notams: "#c4a3ff"};
+const DAYLIGHT_MILITARY = "#762b2e";
 const PREFIX = "public-intel-";
 const ACCESS = {
   firms_key: {pack: "firms", title: "NASA FIRMS map key", url: "https://firms.modaps.eosdis.nasa.gov/api/map_key/", link: "Get a NASA FIRMS map key"},
@@ -27,9 +28,9 @@ const ACCESS = {
 const SHARED_LAYERS = ["notams", "firms"];
 const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[char]);
 const sourceId = id => `${PREFIX}${id}`;
-const TRAFFIC_SOURCES = new Set(TRAFFIC_IDS.map(sourceId));
+const TRAFFIC_SOURCES = new Set([...TRAFFIC_IDS, "transit"].map(sourceId));
 const isEnvironmentRaster = id => ENVIRONMENT_RASTER_IDS.includes(id);
-const layerIds = id => (TRAFFIC_IDS.includes(id) ? ["points", "icons", "labels"] : id === "transit" ? ["points", "labels"] : id === "notams" ? ["lines", "local-lines", "points"] : id === "elevation" ? ["lines", "labels", "minor-labels"] : id === "ahn" || ENVIRONMENT_RASTER_IDS.includes(id) ? ["raster"] : id === "gdacs" ? ["areas", "lines", "tracks", "points", "icons", "labels"] : id === "military" ? ["areas", "lines", "points", "police-stations", "labels"] : id === "trails" ? ["areas", "lines", "points", "labels", "route-labels"] : ["areas", "lines", "points", "labels"]).map(kind => `${PREFIX}${id}-${kind}`);
+const layerIds = id => (TRAFFIC_IDS.includes(id) ? ["points", "icons", "labels"] : id === "transit" ? ["icons"] : id === "notams" ? ["lines", "local-lines", "points"] : id === "elevation" ? ["lines", "labels", "minor-labels"] : id === "ahn" || ENVIRONMENT_RASTER_IDS.includes(id) ? ["raster"] : id === "gdacs" ? ["areas", "lines", "tracks", "points", "icons", "labels"] : id === "military" ? ["areas", "lines", "points", "police-stations", "labels"] : id === "trails" ? ["areas", "lines", "points", "labels", "route-labels"] : ["areas", "lines", "points", "labels"]).map(kind => `${PREFIX}${id}-${kind}`);
 const MILITARY_BASEMAP = `${PREFIX}military-basemap`;
 const POLICE_COLOR = "#8db9d0";
 const POLICE_ICON = "public-police-shield";
@@ -214,8 +215,10 @@ export function intelFeatureHtml(feature, pack, result) {
   const observed = stamp(props.observed_at || props.date);
   if (pack.id === "transit") {
     const position = props.estimated ? "Estimated from realtime trip updates" : props.feed_timestamp ? "Reported position · feed timestamp" : "Reported vehicle position";
+    const age = Math.max(0, Math.floor(Date.now() / 1000 - Number(props.observed_at)));
+    const updated = props.position_pending ? "Waiting for a new position" : Number.isFinite(age) ? `${age < 60 ? `${age} s` : `${Math.floor(age / 60)} min`} ago` : "";
     return `<article class="intel-feature-popup"><small>${escape(props.mode_label)} · ${escape(props.source)}</small><strong>${escape(title)}</strong>
-      <p>${position}${observed ? ` · ${escape(observed)}` : ""}</p>${props.vehicle ? `<p>Vehicle ${escape(props.vehicle)}</p>` : ""}
+      <p>${position}${updated ? ` · ${escape(updated)}` : ""}</p>${props.track_label ? `<small>${escape(props.track_label)}</small>` : ""}
       ${source ? `<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">${escape(props.source)} ↗</a>` : ""}</article>`;
   }
   if (pack.id === "notams") {
@@ -329,44 +332,44 @@ export function replaceTrafficDetails(body, html) {
 }
 
 // MapLibre keeps the same camera; adding/removing public layers never calls fitBounds.
-export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null, ahnMode = "dtm", lidarProvider = null) {
+export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null, ahnMode = "dtm", lidarProvider = null, maltaContours = false) {
   const id = sourceId(pack.id);
-  const layers = map.getStyle?.()?.layers || [];
+  const style = map.getStyle?.();
+  const daylight = style?.name === DAYLIGHT_HIKING_NAME;
+  const layers = style?.layers || [];
   // Contour tiles can finish loading after the live traffic layers have been installed.
   const before = layers.find(layer => (pack.id === "elevation" && TRAFFIC_SOURCES.has(layer.source))
     || isTeamLayer(layer) || (layer.type === "symbol" && !layer.id.startsWith(PREFIX)))?.id;
   if (pack.id === "elevation") {
     if (!contourUrl) return;
-    if (!map.getSource(id)) map.addSource(id, {type: "vector", tiles: [contourUrl], minzoom: CONTOUR_MIN_ZOOM, maxzoom: CONTOUR_MAX_ZOOM});
-    for (const layer of contourLayers(id)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
+    if (!map.getSource(id)) map.addSource(id, {type: "vector", tiles: [contourUrl], minzoom: CONTOUR_MIN_ZOOM,
+      maxzoom: maltaContours ? MALTA_CONTOUR_MAX_ZOOM : CONTOUR_MAX_ZOOM});
+    for (const layer of contourLayers(id, {daylight})) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
     return;
   }
   if (pack.id === "transit") {
+    installTransitIcons(map);
     if (!map.getSource(id)) map.addSource(id, {type: "geojson", data});
     else map.getSource(id).setData(data);
     const estimated = ["boolean", ["get", "estimated"], false];
-    const mode = ["get", "kind"];
-    const definitions = [
-      {id: `${id}-points`, type: "circle", paint: {
-        "circle-color": ["case", estimated, "#17383a", "#75ddd0"], "circle-radius": 8,
-        "circle-stroke-color": "#75ddd0", "circle-stroke-width": 1.3, "circle-opacity": ["case", estimated, .72, .95]}},
-      {id: `${id}-labels`, type: "symbol", layout: {
-        "text-field": ["match", mode, "bus", "B", "train", "R", "metro", "M", "tram", "T", "ferry", "F", "•"],
-        "text-font": ["Noto Sans Regular"], "text-size": 10, "text-allow-overlap": true, "text-ignore-placement": true},
-        paint: {"text-color": ["case", estimated, "#b6fff2", "#102a2d"]}},
-    ];
-    for (const layer of definitions) if (!map.getLayer(layer.id)) map.addLayer({...layer, source: id}, before);
+    const selected = ["boolean", ["get", "traffic_selected"], false];
+    if (!map.getLayer(`${id}-icons`)) map.addLayer({id: `${id}-icons`, type: "symbol", source: id, layout: {
+      "icon-image": ["concat", "public-transit-", ["get", "kind"], ["case", estimated, "-estimate", ""], ["case", selected, "-selected", ""]],
+      "icon-size": ["case", selected, 1.16, .9], "icon-allow-overlap": true, "icon-ignore-placement": true}}, before);
     return;
   }
   if (pack.id === "ahn") {
     const provider = lidarProvider || lidarProviderForBounds(map.getBounds?.());
     if (!provider) return;
-    const tile = lidarTileUrl(ahnMode, provider);
+    const relief = hikingReliefTone(style);
+    const tile = lidarTileUrl(ahnMode, provider, relief);
+    if (!tile) return;
     if (map.getSource(id)?.tiles?.[0] !== tile) {
       if (map.getSource(id)) removeIntelLayers(map, pack.id);
-      map.addSource(id, lidarSource(id, provider, ahnMode));
+      map.addSource(id, lidarSource(id, provider, ahnMode, relief));
     }
-    for (const layer of lidarLayers(id, provider)) if (!map.getLayer(layer.id)) map.addLayer(layer, before);
+    const beforeRelief = relief && map.getLayer("offline-water") ? "offline-water" : before;
+    for (const layer of lidarLayers(id, provider, relief)) if (!map.getLayer(layer.id)) map.addLayer(layer, beforeRelief);
     return;
   }
   if (ENVIRONMENT_RASTER_IDS.includes(pack.id)) {
@@ -379,7 +382,8 @@ export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null,
     installPoliceIcon(map);
     const showBasemap = map.getSource("offline") && (data.basemap_fallback ?? (!data.features.length && !data.worldwide_snapshot));
     for (const layer of MILITARY_FALLBACK_LAYERS) {
-      if (showBasemap && !map.getLayer(layer.id)) map.addLayer({...layer, source: "offline"}, before);
+      const styled = daylight && layer.id === MILITARY_BASEMAP ? {...layer, paint: {"fill-color": DAYLIGHT_MILITARY, "fill-opacity": .23, "fill-outline-color": DAYLIGHT_MILITARY}} : layer;
+      if (showBasemap && !map.getLayer(layer.id)) map.addLayer({...styled, source: "offline"}, before);
       else if (!showBasemap && map.getLayer(layer.id)) map.removeLayer(layer.id);
     }
   }
@@ -413,11 +417,13 @@ export function installIntelLayers(map, pack, data = EMPTY(), contourUrl = null,
     for (const layer of definitions) if (!map.getLayer(layer.id)) map.addLayer({...layer, source: id}, before);
     return;
   }
-  const color = pack.id === "military" ? ["match", ["get", "kind"], ["police_station", "police_property"], POLICE_COLOR, COLORS.military]
+  const color = pack.id === "military" ? ["match", ["get", "kind"], ["police_station", "police_property"], POLICE_COLOR,
+    ["airfield", "airstrip", "runway"], COLORS.military, daylight ? DAYLIGHT_MILITARY : COLORS.military]
     : pack.id === "gdacs" ? GDACS_COLOR : COLORS[pack.id] || COLORS.gdacs;
   const pointFilter = ["==", ["geometry-type"], "Point"];
   const definitions = [
-    {id: `${id}-areas`, type: "fill", filter: ["==", ["geometry-type"], "Polygon"], paint: {"fill-color": color, "fill-opacity": .12}},
+    {id: `${id}-areas`, type: "fill", filter: ["==", ["geometry-type"], "Polygon"], paint: {"fill-color": color,
+      "fill-opacity": daylight && pack.id === "military" ? ["case", ["==", color, DAYLIGHT_MILITARY], .23, .12] : .12}},
     {id: `${id}-lines`, type: "line", filter: pack.id === "gdacs" ? ["==", ["geometry-type"], "Polygon"] : ["!=", ["geometry-type"], "Point"], layout: {"line-join": "round", "line-cap": pack.id === "trails" ? "butt" : "round"}, paint: {"line-color": pack.id === "trails" ? ROAD_COLOR : color, "line-width": pack.id === "trails" ? 2 : 1.5, "line-opacity": pack.id === "trails" ? .82 : .8, ...(pack.id === "trails" || pack.id === "military" ? {"line-dasharray": [3, 2]} : {})}},
     ...(pack.id === "gdacs" ? [{id: `${id}-tracks`, type: "line", filter: ["==", ["geometry-type"], "LineString"], paint: {"line-color": color, "line-width": 2, "line-dasharray": [3, 2], "line-opacity": .85}}] : []),
     {id: `${id}-points`, type: "circle", filter: pack.id === "military" ? ["all", pointFilter, ["!", POLICE_STATION]] : pointFilter, paint: {"circle-radius": pack.id === "gdacs" ? 13 : pack.id === "firms" ? 4 : 6, "circle-color": pack.id === "gdacs" ? "#10160f" : color, "circle-opacity": pack.id === "gdacs" ? .95 : .7, "circle-stroke-color": pack.id === "gdacs" ? color : "#1a1d15", "circle-stroke-width": 1.5}},
@@ -439,7 +445,8 @@ export function removeIntelLayers(map, id) {
 
 export function createIntelPacks({button = null, panel = null, fetchImpl = globalThis.fetch?.bind(globalThis), getMapStyle = () => "hiking", setMapStyle = null, prepareContours = prepareContourTiles} = {}) {
   let catalogue = {packs: [], credentials: {}}, enabled = new Set(), gdacsTypes = normalizeGdacsTypes(), firmsDays = 3, ahnMode = "dtm", saving = false, destroyed = false, catalogueGeneration = 0, notice = "";
-  let contourUrl = null, contourPending = null, contourFailed = false;
+  const contourSources = {global: {}, malta: {}};
+  const useMaltaContours = map => map.getZoom() >= 16 && lidarProviderForBounds(map.getBounds?.())?.id === "malta";
   let trafficFilters = normalizeTrafficFilters();
   let roadFilters = normalizeRoadFilters();
   let notamCategories = [], notamView = "local";
@@ -477,10 +484,18 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   const isVisible = context => !context.paused && globalThis.document?.visibilityState !== "hidden" && (!context.map.getContainer?.()?.getClientRects || context.map.getContainer().getClientRects().length > 0);
   const activeMap = () => [...maps.values()].reverse().find(isVisible);
   const packSource = pack => {
+    if (pack.id === "elevation" && activeMap()?.maltaContours) {
+      return {url: "https://portal.data.gov.mt/dataset/digital-terrain-model-2018", label: "Malta Planning Authority · CC BY 4.0"};
+    }
     if (pack.id !== "ahn") return {url: safeLink(pack.source_url), label: pack.source || "Source"};
-    const provider = lidarProviderForBounds(activeMap()?.map.getBounds?.());
-    return provider ? {url: provider.source_url, label: provider.source} : {url: safeLink(pack.source_url), label: "Provider source"};
+    const map = activeMap()?.map;
+    return lidarAttribution(lidarProviderForBounds(map?.getBounds?.()), map, pack);
   };
+  function lidarAttribution(provider, map, pack) {
+    const shade = hikingReliefTone(map?.getStyle?.()) && provider?.hillshade;
+    return {url: safeLink(shade?.attribution_url || provider?.attribution_url || pack.source_url),
+      label: shade?.attribution || provider?.attribution || "Provider source"};
+  }
   const hasParsedStyle = context => {
     try { return Array.isArray(context.map.getStyle?.()?.layers); } catch { return false; }
   };
@@ -488,8 +503,14 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   const animatedData = (context, id, data, now = Date.now()/1000) => {
     const selected = context.selectedTraffic;
     if (selected?.pack === id) {
-      const reported = data.features.find(feature => trafficKey(feature) === selected.key);
-      if (reported && reported.properties.position_time >= selected.feature.properties.position_time) selected.feature = reported;
+      const reference = selected.feature.properties.trip_ref;
+      const reported = data.features.find(feature => trafficKey(feature) === selected.key) || (id === "transit" && reference
+        ? data.features.find(feature => feature.properties.trip_ref === reference) : null);
+      if (reported && (reported.properties.position_time >= selected.feature.properties.position_time
+          || (id === "transit" && !reported.properties.estimated && selected.feature.properties.estimated))) {
+        selected.feature = reported;
+        selected.key = trafficKey(reported);
+      }
       data = {...data, features: [...data.features.filter(feature => trafficKey(feature) !== selected.key),
         trafficDetailFeature(context, selected.feature, id, {traffic_selected: true})]};
     }
@@ -543,7 +564,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       <header class="intel-packs-head"><h2 id="mapLayersHeading">Map layers</h2><button type="button" data-intel-close aria-label="Close map layers">×</button></header>
       <section class="map-layer-options">
         <h3>Map & terrain</h3>
-        ${setMapStyle ? '<label class="map-style-select">Base map<select data-map-style><option value="hiking">Hiking map</option><option value="satellite">Satellite</option></select></label>' : ''}
+        ${setMapStyle ? `<label class="map-style-select">Base map<select data-map-style>${MAP_STYLES.map(style => `<option value="${style.id}">${style.label}</option>`).join("")}</select></label>` : ''}
         <div data-map-features></div>
       </section>
       <h3 class="intel-section-title">Public layers</h3>
@@ -562,6 +583,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     listen(panel, "change", event => {
       const id = event.target?.dataset?.intelPack;
       if (id) void setEnabled(id, event.target.checked);
+      if (event.target?.matches?.("[data-flights-fallback]")) void save({personal_flight_fallback: event.target.checked});
       if (event.target?.matches?.("[data-ahn-mode]")) void setAhnMode(event.target.value);
       if (event.target?.matches?.("[data-firms-days]")) void setFirmsDays(Number(event.target.value));
       const type = event.target?.dataset?.gdacsType;
@@ -663,23 +685,22 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       }
       mapFeatures.insertAdjacentHTML("beforeend", `<section class="intel-analysis-card"><strong>Sentinel-1 TomoSAR analysis</strong><p>Multi-baseline 3D radar analysis is generated on demand from an SLC stack; there is no reliable public live tile layer to toggle here.</p><a href="https://ids-dinamis.data-terra.org/tomosar-services" target="_blank" rel="noopener noreferrer">Open TomoSAR service ↗</a></section>`);
     }
-    panel?.querySelector('[data-pack-row="ahn"]')?.insertAdjacentHTML("beforeend", `<label class="intel-ahn-mode">Elevation view<select name="ahn-mode" data-ahn-mode aria-label="LiDAR elevation view">${Object.entries(AHN_MODES).map(([value, label]) => `<option value="${value}">${escape(label)}</option>`).join("")}</select></label><p class="intel-pack-note">Available coverage includes the Netherlands, England, France, Malta and the United States. Online only.</p>`);
+    panel?.querySelector('[data-pack-row="ahn"]')?.insertAdjacentHTML("beforeend", `<label class="intel-ahn-mode">Elevation view<select name="ahn-mode" data-ahn-mode aria-label="LiDAR elevation view">${Object.entries(AHN_MODES).map(([value, label]) => `<option value="${value}">${escape(label)}</option>`).join("")}</select></label><p class="intel-pack-note" data-lidar-mode-note></p>`);
     if (gdacsRow) gdacsRow.insertAdjacentHTML("beforeend", `<details class="intel-disaster-filter" ${filtersOpen ? "open" : ""}><summary>Disaster types <span data-gdacs-summary></span></summary><div class="intel-disaster-actions"><button type="button" data-gdacs-select="all">All</button><button type="button" data-gdacs-select="none">None</button></div><div class="intel-disaster-grid">${disasterTypes().map(type => `<label><input type="checkbox" data-gdacs-type="${escape(type.id)}"/>${gdacsIconSvg(type.id)}<span>${escape(type.label)}</span></label>`).join("")}</div><p>Icon shows the disaster type. Color shows the GDACS alert level, not whether an area is safe.</p></details>`);
     for (const id of TRAFFIC_IDS) {
       const selected = trafficDrafts.get(id) || trafficFilters[id];
       const options = (items, value) => Object.entries(items).map(([key, label]) => `<option value="${key}" ${key === value ? "selected" : ""}>${escape(label)}</option>`).join("");
       panel?.querySelector(`[data-pack-row="${id}"]`)?.insertAdjacentHTML("beforeend", `<details class="intel-traffic-filter" data-traffic-filter="${id}" ${trafficOpen.includes(id) ? "open" : ""}><summary>Filters · classification & type</summary><form data-traffic-form="${id}"><label>Classification<select name="affiliation">${options({all:"All classifications",military:id === "flights" ? "Military (provider flag)" : "Military / restricted (AIS 35)", commercial:id === "flights" ? "Commercial / airline (estimated)" : "Commercial (AIS type)",unknown:"Other / unknown ownership"},selected.affiliation)}</select></label><label>Type<select name="type">${options({all:"All types",...TRAFFIC_TYPES[id]},selected.type)}</select></label><label>${id === "flights" ? "Callsign, registration or model" : "Vessel name, callsign or MMSI"}<input name="query" type="search" maxlength="64" value="${escape(selected.query)}" placeholder="Search received traffic"/></label><p>${id === "flights" ? "Commercial is an estimate from callsign and aircraft category, not confirmed ownership. Missing military flags do not prove civilian status." : "AIS type is self-reported and can arrive after a position. Type 35 includes military and other restricted operations. Unknown vessels stay separate."}</p></form></details>`);
     }
-    if (packById("flights")?.personal_fallback) {
-      panel?.querySelector('[data-pack-row="flights"] .intel-pack-meta')?.insertAdjacentHTML("beforeend",
-        '<a href="https://adsb.fi/" target="_blank" rel="noopener noreferrer">adsb.fi fallback ↗</a>');
-    }
+    panel?.querySelector('[data-pack-row="flights"]')?.insertAdjacentHTML("beforeend",
+      '<label class="intel-pack-switch"><span>Use adsb.fi fallback</span><input type="checkbox" role="switch" data-flights-fallback aria-describedby="flights-fallback-terms"/><i aria-hidden="true"></i></label><small id="flights-fallback-terms" class="intel-pack-download-note"><a href="https://github.com/adsbfi/opendata#terms" target="_blank" rel="noopener noreferrer">Personal, non-commercial use ↗</a></small>');
     renderStatus();
     const restore = focusedTraffic ? panel?.querySelector(`[data-traffic-form="${focusedTraffic}"] [name="${focusedName}"]`) : ACCESS[focusedCredential] ? panel?.querySelector(`[name="${focusedCredential}"]`) : null;
     restore?.focus();
     if (restore && selectionStart != null) restore.setSelectionRange(selectionStart, selectionEnd);
     if (focusedPack && IDS.includes(focusedPack)) panel.querySelector(`[data-intel-pack="${focusedPack}"]`)?.focus();
     if (focusedAhnMode) panel.querySelector("[data-ahn-mode]")?.focus();
+    if (active?.matches?.("[data-flights-fallback]")) panel.querySelector("[data-flights-fallback]")?.focus();
     if (focusedType && GDACS_TYPES.some(type => type.id === focusedType)) panel.querySelector(`[data-gdacs-type="${focusedType}"]`)?.focus();
     if (focusedCategory) [...panel.querySelectorAll("[data-notam-category]")].find(input => input.dataset.notamCategory === focusedCategory)?.focus();
     if (focusedName === "notam-view") panel.querySelector("[data-notam-view]")?.focus();
@@ -687,10 +708,28 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   }
 
   function renderStatus() {
+    const fallback = panel?.querySelector("[data-flights-fallback]");
+    if (fallback) { fallback.checked = catalogue.settings?.personal_flight_fallback === true; fallback.disabled = saving; }
     const windowSelect = panel?.querySelector("[data-firms-days]");
     if (windowSelect) { windowSelect.value = String(firmsDays); windowSelect.disabled = saving; }
     const ahnSelect = panel?.querySelector("[data-ahn-mode]");
-    if (ahnSelect) { ahnSelect.value = ahnMode; ahnSelect.disabled = saving; }
+    if (ahnSelect) {
+      const relief = hikingReliefTone(activeMap()?.map.getStyle?.());
+      ahnSelect.value = relief ? "dtm" : ahnMode;
+      ahnSelect.disabled = saving || Boolean(relief);
+      panel.querySelector("[data-lidar-mode-note]").textContent = relief
+        ? "Hiking uses bare-earth relief where available."
+        : "Satellite uses the provider’s elevation raster.";
+    }
+    for (const id of ["ahn", "elevation"]) {
+      const pack = packById(id);
+      const link = panel?.querySelector(`[data-pack-row="${id}"] .intel-pack-meta a`);
+      if (pack && link) {
+        const source = packSource(pack);
+        link.href = source.url;
+        link.textContent = `${source.label} ↗`;
+      }
+    }
     const count = enabled.size;
     if (button) {
       button.classList.add("intel-packs-toggle");
@@ -781,7 +820,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         notice = "";
         // Recreate failed vector tiles so reconnecting retries contour generation.
         for (const context of maps.values()) if (hasParsedStyle(context)) for (const id of ["elevation", "ahn", ...ENVIRONMENT_RASTER_IDS]) removeIntelLayers(context.map, id);
-        contourFailed = false;
+        for (const source of Object.values(contourSources)) source.failed = false;
         results.delete("elevation");
         results.delete("ahn");
         for (const id of ENVIRONMENT_RASTER_IDS) results.delete(id);
@@ -988,9 +1027,14 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const credits = new Map();
     for (const pack of currentPacks().filter(pack => pack.enabled && pack.configured !== false)) {
       const provider = pack.id === "ahn" ? lidarProviderForBounds(context.map.getBounds?.()) : null;
-      const url = pack.id === "elevation" ? "https://github.com/tilezen/joerd/blob/master/docs/attribution.md" : pack.id === "ahn" && provider ? provider.attribution_url : ["trails", "military"].includes(pack.id) ? "https://www.openstreetmap.org/copyright" : safeLink(pack.attribution_url || pack.source_url);
-      const label = pack.id === "elevation" ? "Terrain: Mapzen / data providers" : pack.id === "ahn" && provider ? provider.attribution : pack.attribution || pack.source || pack.title;
+      if (pack.id === "ahn" && !context.map.getSource(sourceId("ahn"))) continue;
+      const lidar = pack.id === "ahn" && lidarAttribution(provider, context.map, pack);
+      const url = pack.id === "elevation" ? "https://github.com/tilezen/joerd/blob/master/docs/attribution.md" : lidar ? lidar.url : ["trails", "military"].includes(pack.id) ? "https://www.openstreetmap.org/copyright" : safeLink(pack.attribution_url || pack.source_url);
+      const label = pack.id === "elevation" ? "Terrain: Mapzen / data providers" : lidar ? lidar.label : pack.attribution || pack.source || pack.title;
       credits.set(label, url);
+      if (pack.id === "elevation" && context.maltaContours && context.map.getSource(sourceId("elevation"))) {
+        credits.set("Malta Planning Authority · CC BY 4.0", "https://portal.data.gov.mt/dataset/digital-terrain-model-2018");
+      }
     }
     context.credit.innerHTML = [...credits].map(([label, url]) => url ? `<a href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(label)}</a>` : escape(label)).join(" · ");
     context.credit.hidden = !credits.size;
@@ -1006,30 +1050,41 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (!enabled.has(id) || pack?.configured === false || (id === "elevation" && pack?.enabled === false)) { removeIntelLayers(map, id); context.motion.get(id)?.clear(); context.tracks.get(id)?.clear(); }
       else if (pack) {
         try {
-          if (id === "elevation" && !contourUrl) {
-            if (!contourPending && !contourFailed) {
-              results.set(id, {status: "loading"});
-              contourPending = Promise.resolve().then(prepareContours).then(url => {
-                contourUrl = url;
-                if (destroyed) return;
-                results.delete("elevation");
-                for (const current of maps.values()) { syncLayers(current); schedule(current, 0); }
-              }).catch(error => {
-                contourFailed = true;
-                if (!destroyed) { results.set(id, {status: "error", error: `Contour lines unavailable: ${error.message}`}); renderStatus(); }
-              }).finally(() => { contourPending = null; });
+          let contourUrl = null;
+          if (id === "elevation") {
+            const malta = useMaltaContours(map) && !contourSources.malta.failed;
+            const contour = malta ? contourSources.malta : contourSources.global;
+            if (!contour.url) {
+              if (!contour.pending && !contour.failed) {
+                results.set(id, {status: "loading"});
+                contour.pending = Promise.resolve().then(() => prepareContours(malta)).then(url => {
+                  contour.url = url;
+                  if (destroyed) return;
+                  results.delete(id);
+                  for (const current of maps.values()) { syncLayers(current); schedule(current, 0); }
+                }).catch(error => {
+                  contour.failed = true;
+                  if (destroyed) return;
+                  if (malta) for (const current of maps.values()) syncLayers(current);
+                  else { results.set(id, {status: "error", error: `Contour lines unavailable: ${error.message}`}); renderStatus(); }
+                }).finally(() => { contour.pending = null; });
+              }
+              continue;
             }
-            continue;
+            contourUrl = contour.url;
+            if (map.getSource(sourceId(id)) && context.maltaContours !== malta) removeIntelLayers(map, id);
+            context.maltaContours = malta;
           }
           const provider = id === "ahn" ? lidarProviderForBounds(map.getBounds?.()) : null;
           const source = map.getSource(sourceId(id));
-          const desiredTile = id === "ahn" && provider && Number(map.getZoom?.()) >= provider.minzoom ? lidarTileUrl(ahnMode, provider) : isEnvironmentRaster(id) ? environmentTileUrl(id) : null;
+          const relief = id === "ahn" ? hikingReliefTone(map.getStyle?.()) : null;
+          const desiredTile = id === "ahn" && provider && Number(map.getZoom?.()) >= provider.minzoom ? lidarTileUrl(ahnMode, provider, relief) : isEnvironmentRaster(id) ? environmentTileUrl(id) : null;
           if ((id === "ahn" || isEnvironmentRaster(id)) && source && source.tiles?.[0] !== desiredTile) {
             removeIntelLayers(map, id);
           }
-          const rasterReady = id === "ahn" ? Boolean(provider && Number(map.getZoom?.()) >= provider.minzoom) : isEnvironmentRaster(id) ? Number(map.getZoom?.()) >= ENVIRONMENT_MIN_ZOOM[id] : true;
+          const rasterReady = id === "ahn" ? Boolean(desiredTile) : isEnvironmentRaster(id) ? Number(map.getZoom?.()) >= ENVIRONMENT_MIN_ZOOM[id] : true;
           const needsInstall = id === "ahn" || isEnvironmentRaster(id) ? Boolean(rasterReady && (!map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer)))) : !CLIENT_RASTER_IDS.has(id) || !map.getSource(sourceId(id)) || layerIds(id).some(layer => !map.getLayer(layer));
-          if (needsInstall) installIntelLayers(map, pack, animatedData(context, id, context.data.get(id) || EMPTY()).data, contourUrl, ahnMode, provider);
+          if (needsInstall) installIntelLayers(map, pack, animatedData(context, id, context.data.get(id) || EMPTY()).data, contourUrl, ahnMode, provider, context.maltaContours);
         }
         catch (error) { results.set(id, {status: "error", error: `Map layer unavailable: ${error.message}`}); }
       }
@@ -1049,6 +1104,18 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     context.timer = setTimeout(() => void refreshMap(context), delay);
   }
 
+  function mapRequestBounds(context, id) {
+    const bounds = context.map.getBounds();
+    if (id !== "transit" || context.selectedTraffic?.pack !== "transit" || !context.selectedTraffic.following) return bounds;
+    const boxes = intelViewportBoxes(bounds);
+    if (boxes.length !== 1) return bounds;
+    const {west, south, east, north} = boxes[0];
+    // Keep fast vehicles in the query when the camera is zoomed to street level.
+    const x = Math.max(0, (.08 - (east - west)) / 2);
+    const y = Math.max(0, (.08 - (north - south)) / 2);
+    return {west: west - x, east: east + x, south: south - y, north: north + y};
+  }
+
   async function refreshMap(context, trafficOnly = false, onlyPack = null) {
     if (destroyed || !isVisible(context) || !hasParsedStyle(context)) return;
     context.needsRefresh = false;
@@ -1057,16 +1124,18 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     // Reconcile it before updating status so MapLibre never keeps the previous
     // country's raster alive under the new viewport.
     syncLayers(context);
-    if (enabled.has("elevation") && contourUrl && results.get("elevation")?.status !== "error") {
-      const interval = contourInterval(map.getZoom());
+    if (enabled.has("elevation") && map.getSource(sourceId("elevation")) && results.get("elevation")?.status !== "error") {
+      const interval = contourInterval(map.getZoom(), context.maltaContours);
       results.set("elevation", interval ? {status: "ready", note: `${interval} m contour interval · labels in metres`} : {status: "zoom_in", note: "Zoom in to see contour lines"});
     }
     if (enabled.has("ahn")) {
       const provider = lidarProviderForBounds(map.getBounds?.());
+      const relief = hikingReliefTone(map.getStyle?.());
       const providerMode = provider ? lidarModeForProvider(provider, ahnMode) : "dtm";
-      if (!provider) results.set("ahn", {status: "uncovered", note: "No national high-resolution LiDAR source is available for this map area · global contours remain available"});
+      if (relief && !provider?.hillshade) results.set("ahn", {status: "uncovered", note: "Using standard terrain shading here."});
+      else if (!provider) results.set("ahn", {status: "uncovered", note: "No national high-resolution LiDAR source is available for this map area · global contours remain available"});
       else if (map.getZoom() < provider.minzoom) results.set("ahn", {status: "zoom_in", note: `Zoom in to level ${provider.minzoom} to view ${provider.label} LiDAR`});
-      else results.set("ahn", {status: "ready", note: `${provider.label} · ${lidarModeLabel(provider, providerMode)} · ${provider.resolution} raster`});
+      else results.set("ahn", {status: "ready", note: `${provider.label} · ${relief ? "Bare-earth hillshade" : lidarModeLabel(provider, providerMode)} · ${provider.resolution} raster`});
     }
     for (const id of ENVIRONMENT_RASTER_IDS) if (enabled.has(id)) {
       const pack = packById(id);
@@ -1087,8 +1156,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         // The backend can also return disk-cached geometry at this zoom.
         results.set(pack.id, {...context.data.get(pack.id), status: "zoom_in", note: "Showing saved areas. Zoom in to download additional coverage."});
       }
-      const requestedBoxes = intelViewportBoxes(map.getBounds());
-      const requestedUrls = intelPackUrls(pack.id, map.getBounds(), map.getZoom());
+      const bounds = mapRequestBounds(context, pack.id);
+      const requestedBoxes = intelViewportBoxes(bounds);
+      const requestedUrls = intelPackUrls(pack.id, bounds, map.getZoom());
       const viewport = requestedUrls.join("|");
       const regional = traffic && (belowZoom || context.rejectedTrafficViews.get(pack.id) === viewport);
       const urls = (regional ? context.trafficRegions.get(pack.id) || [] : requestedUrls)
@@ -1158,7 +1228,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         clearTimeout(timeout);
         if (context.requests.get(pack.id) === pending) {
           context.requests.delete(pack.id);
-          const moved = intelPackUrls(pack.id, map.getBounds(), map.getZoom()).join("|") !== viewport;
+          const moved = intelPackUrls(pack.id, mapRequestBounds(context, pack.id), map.getZoom()).join("|") !== viewport;
           if (!destroyed && enabled.has(pack.id) && (moved || context.needsRefresh)) schedule(context, 0);
         }
         renderStatus();
@@ -1246,21 +1316,54 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     const visible = animatedData(context, selected.pack, context.data.get(selected.pack) || EMPTY()).data.features;
     const feature = enabled.has(selected.pack) && pack?.configured !== false
       ? visible.find(item => trafficKey(item) === selected.key) : null;
-    if (!feature) {
+    const transit = selected.pack === "transit";
+    if (!feature && (!transit || !enabled.has(selected.pack))) {
       closeTrafficDrawer(context);
       return;
     }
     const route = context.tracks.get(selected.pack).route(selected.key, Date.now()/1000, selected.history);
     context.map.getSource(sourceId(selected.pack))?.setData({type: "FeatureCollection", features: visible});
+    if (transit) {
+      const reference = selected.feature.properties.trip_ref;
+      if (reference && selected.tripRef !== reference) {
+        selected.tripRef = reference;
+        selected.tripRoute = null;
+        void loadTransitRoute(context, selected, reference);
+      } else if (!reference && selected.tripRef && selected.vehicleTrip !== selected.feature.properties.vehicle_trip) {
+        selected.tripRef = null;
+        selected.tripRoute = null;
+      } else if (reference && (!selected.tripRoute || selected.routeLabel === "Route segment") && Date.now() - selected.tripRequestAt > 15000) {
+        void loadTransitRoute(context, selected, reference);
+      }
+      if (selected.tripRoute) route.data.features.unshift(selected.tripRoute);
+      route.label = selected.tripRoute ? `${selected.routeLabel} · Transitous` : route.count > 1 ? "Recent reported path" : "Waiting for route or position reports";
+      selected.vehicleTrip = selected.feature.properties.vehicle_trip;
+    }
     showTrafficTrack(context.map, route.data);
     showTrafficEstimate(context.map, feature);
     if (context.drawer) {
       context.drawer.hidden = false;
       context.followButton.textContent = selected.following ? "Pause follow" : "Resume follow";
-      replaceTrafficDetails(context.drawerBody, intelFeatureHtml(trafficDetailFeature(context, feature, selected.pack, {track_label: route.label}), pack, results.get(selected.pack)));
+      replaceTrafficDetails(context.drawerBody, intelFeatureHtml(trafficDetailFeature(context, feature || selected.feature, selected.pack,
+        {track_label: route.label, position_pending: !feature}), pack, results.get(selected.pack)));
     }
     followTraffic(context, feature);
     if (selected.history && Date.now() - selected.historyAt > 60000) void loadTrafficRoute(context, selected);
+  }
+
+  async function loadTransitRoute(context, selected, reference) {
+    selected.tripRequestAt = Date.now();
+    try {
+      const route = await request(`/api/intel-packs/transit/route?${new URLSearchParams({trip: reference})}`);
+      if (context.selectedTraffic !== selected || selected.tripRef !== reference) return;
+      const shape = transitRouteFeature(route.points);
+      if (!shape) return;
+      selected.tripRoute = shape;
+      selected.routeLabel = route.label === "Route segment" ? "Route segment" : "Trip route";
+      updateTrafficTrack(context);
+    } catch {
+      // Live reports and their observed path are independent of route geometry.
+    }
   }
 
   async function loadTrafficRoute(context, selected) {
@@ -1281,7 +1384,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
 
   function attachMap(map, {Popup} = {}) {
     if (maps.has(map)) { if (Popup) maps.get(map).Popup = Popup; return; }
-    const context = {map, Popup, motion: new Map(TRAFFIC_IDS.map(id => [id, new TrafficMotion(id)])), tracks: new Map(TRAFFIC_IDS.map(id => [id, new TrafficTracks(id)])), selectedTraffic: null, trafficProfiles: new Map(), trafficRegions: new Map(), rejectedTrafficViews: new Map(), trafficClient: globalThis.crypto?.randomUUID?.() || `map-${Math.random().toString(36).slice(2)}`, requests: new Map(), data: new Map(), timer: null, popup: null, credit: null, needsRefresh: true};
+    const context = {map, Popup, motion: new Map(TRAFFIC_IDS.map(id => [id, new TrafficMotion(id)])), tracks: new Map([...TRAFFIC_IDS, "transit"].map(id => [id, new TrafficTracks(id)])), selectedTraffic: null, trafficProfiles: new Map(), trafficRegions: new Map(), rejectedTrafficViews: new Map(), trafficClient: globalThis.crypto?.randomUUID?.() || `map-${Math.random().toString(36).slice(2)}`, requests: new Map(), data: new Map(), timer: null, popup: null, credit: null, needsRefresh: true};
     maps.set(map, context);
     const container = map.getContainer?.();
     if (container?.ownerDocument) {
@@ -1296,7 +1399,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       context.credit.addEventListener("pointerdown", event => event.stopPropagation());
       context.drawer = container.ownerDocument.createElement("aside");
       context.drawer.className = "intel-traffic-drawer";
-      context.drawer.setAttribute("aria-label", "Aircraft and vessel details");
+      context.drawer.setAttribute("aria-label", "Traffic details");
       context.drawer.hidden = true;
       context.drawer.innerHTML = `<div class="intel-traffic-drawer-body"></div><div class="intel-traffic-drawer-actions"><button type="button" data-traffic-follow>Pause follow</button><button type="button" data-traffic-close aria-label="Close traffic details">×</button></div>`;
       context.drawerBody = context.drawer.querySelector(".intel-traffic-drawer-body");
@@ -1329,12 +1432,14 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (context.needsRefresh && !context.requests.size && isVisible(context)) { syncLayers(context); schedule(context, 0); }
     };
     context.onError = event => {
-      if (enabled.has("elevation") && (event.sourceId === sourceId("elevation") || event.error?.message?.includes("/api/intel-packs/elevation/"))) {
+      if (event.sourceId !== HIKING_RELIEF && enabled.has("elevation") && (event.sourceId === sourceId("elevation") || event.error?.message?.includes("/api/intel-packs/elevation/"))) {
         results.set("elevation", {status: "error", error: "Terrain tiles unavailable here. Cached tiles may still be visible."});
         renderStatus();
       }
       if (enabled.has("ahn") && (event.sourceId === sourceId("ahn") || event.error?.message?.includes("service.pdok.nl/rws/ahn/") || event.error?.message?.includes("environment.data.gov.uk/spatialdata/") || event.error?.message?.includes("elevation.nationalmap.gov/arcgis/"))) {
-        results.set("ahn", {status: "error", error: "National LiDAR tiles unavailable here. Try again later or use the global contour layer."});
+        results.set("ahn", {status: "error", error: hikingReliefTone(map.getStyle?.())
+          ? "National LiDAR tiles unavailable. Standard terrain shading is still available."
+          : "National LiDAR tiles unavailable here. Try again later or use the global contour layer."});
         renderStatus();
       }
       for (const id of ENVIRONMENT_RASTER_IDS) if (enabled.has(id) && event.sourceId === sourceId(id)) {
@@ -1353,7 +1458,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       const id = IDS.find(id => feature.layer.id.startsWith(`${PREFIX}${id}-`));
       const pack = packById(id);
       if (!pack || !enabled.has(id)) return;
-      if (TRAFFIC_IDS.includes(id)) {
+      if (TRAFFIC_IDS.includes(id) || id === "transit") {
         closeTrafficDrawer(context);
         const key = trafficKey(feature);
         const observed = context.data.get(id)?.features.find(item => trafficKey(item) === key);
@@ -1363,7 +1468,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         const selected = {pack: id, key, feature: original, following: true, recenter: true};
         context.selectedTraffic = selected;
         updateTrafficTrack(context);
-        if (context.selectedTraffic === selected) {
+        if (id !== "transit" && context.selectedTraffic === selected) {
           void loadTrafficRoute(context, selected);
           void loadTrafficProfile(context, id, feature.properties?.identity);
         }
@@ -1452,7 +1557,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
   const interval = setInterval(() => { for (const context of maps.values()) if (isVisible(context) && !context.requests.size) schedule(context, 0); }, 60000);
   const transitInterval = setInterval(() => {
     if (enabled.has("transit")) for (const context of maps.values()) if (isVisible(context) && !context.needsRefresh) void refreshMap(context, false, "transit");
-  }, 30000);
+  }, 10000);
   const trafficInterval = setInterval(() => {
     if (enabled.has("notams")) for (const context of maps.values()) {
       const source = context.map.getSource(sourceId("notams")), original = context.data.get("notams");

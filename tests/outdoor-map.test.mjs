@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {readFileSync} from "node:fs";
-import {hikingMapStyle, recenterOnFix, roadAndPathLayers, ROAD_COLOR, PATH_FILTER, preferredMapStyle, nextMapStyle, satelliteWithTrails} from "../src/retium/static/outdoor-map.js";
+import {hikingMapStyle, recenterOnFix, roadAndPathLayers, ROAD_COLOR, PATH_FILTER, preferredMapStyle, nextMapStyle, satelliteWithTrails, updateMapStyleControl} from "../src/retium/static/outdoor-map.js";
 import {installIntelLayers} from "../src/retium/static/intel-packs.js";
 import {calculatedRouteUrl} from "../src/retium/static/route-navigation.js";
 
@@ -20,9 +20,44 @@ test("hiking is the default and migrates plain dark while respecting online sate
   assert.equal(preferredMapStyle("satellite"), "satellite");
   assert.equal(preferredMapStyle("satellite", false), "hiking");
   assert.equal(nextMapStyle("hiking", {type: "click"}), "satellite");
-  assert.equal(nextMapStyle("satellite", {type: "click"}), "hiking");
+  assert.equal(nextMapStyle("satellite", {type: "click"}), "satellite-hybrid");
+  assert.equal(nextMapStyle("satellite-hybrid"), "hiking-light");
+  assert.equal(nextMapStyle("hiking-light"), "hiking");
+  assert.equal(nextMapStyle("hiking", undefined, false), "hiking-light");
+  assert.equal(preferredMapStyle("hiking-light", false), "hiking-light");
+  assert.equal(preferredMapStyle("satellite-hybrid", false), "hiking");
   assert.equal(nextMapStyle("hiking", "satellite"), "satellite");
   assert.equal(nextMapStyle("satellite", "hiking"), "hiking");
+});
+
+test("daylight hiking recolors the cached basemap, trails and contour overlays", () => {
+  const base = {sources: {offline: {tiles: ["/api/map/tiles/{z}/{x}/{y}.pbf"]}}, layers: [
+    {id: "offline-background", type: "background", paint: {"background-color": "#0b0f0c"}},
+    ...roadAndPathLayers(),
+  ]};
+  const light = hikingMapStyle(base, {daylight: true});
+  assert.deepEqual(light.sources, base.sources);
+  assert.equal(light.layers[0].paint["background-color"], "#f5f1e5");
+  assert.equal(base.layers[0].paint["background-color"], "#0b0f0c");
+  assert.equal(light.layers.find(layer => layer.id === "hiking-paths").paint["line-color"], "#3f624c");
+  const added = [];
+  installIntelLayers({getStyle: () => light, getSource: () => null, addSource() {}, getLayer: () => null,
+    addLayer: layer => added.push(layer)}, {id: "elevation"}, undefined, "reticom-contours://tile");
+  assert.equal(added[0].paint["line-color"], "#8f6342");
+});
+
+test("hiking shades cached terrain below waterways and uses a softer night treatment", () => {
+  const terrainTiles = "/api/intel-packs/elevation/tiles/{z}/{x}/{y}.png?relief=true";
+  const base = {sources: {offline: {type: "vector", tiles: ["tiles"]}}, layers: [
+    {id: "offline-water", type: "fill", paint: {"fill-color": "#123456"}},
+  ]};
+  const day = hikingMapStyle(base, {daylight: true, terrainTiles});
+  const night = hikingMapStyle(base, {terrainTiles});
+  assert.equal(day.sources["hiking-relief"].encoding, "terrarium");
+  assert.deepEqual(day.sources["hiking-relief"].tiles, [terrainTiles]);
+  assert.equal(day.layers[0].type, "hillshade");
+  assert.equal(day.layers[1].id, "offline-water");
+  assert.ok(night.layers[0].paint["hillshade-exaggeration"] < day.layers[0].paint["hillshade-exaggeration"]);
 });
 
 test("satellite keeps dashed tile-based trails without adding solid roads or moving the camera", () => {
@@ -36,6 +71,23 @@ test("satellite keeps dashed tile-based trails without adding solid roads or mov
   assert.equal(result.layers[1].paint["line-color"], ROAD_COLOR);
   assert.deepEqual(result.layers[1].paint["line-dasharray"], [3, 2]);
   assert.equal(result.layers[1].minzoom, undefined);
+});
+
+test("satellite hybrid adds roads and labels to the same imagery and credits both sources", () => {
+  const vector = hikingMapStyle({glyphs: "cached-glyphs", sources: {offline: {type: "vector", tiles: ["tiles"]}}, layers: [
+    ...roadAndPathLayers(), {id: "offline-place-labels", type: "symbol", paint: {"text-color": "#999999"}},
+  ]});
+  const satellite = {sources: {satellite: {type: "raster"}}, layers: [{id: "satellite-base", type: "raster"}]};
+  const hybrid = satelliteWithTrails(satellite, vector, {hybrid: true});
+  assert.deepEqual(hybrid.layers[0], satellite.layers[0]);
+  assert.ok(hybrid.layers.find(layer => layer.id === "offline-roads"));
+  assert.deepEqual(hybrid.layers.find(layer => layer.id === "hiking-paths").paint["line-dasharray"], [3, 2]);
+  assert.equal(hybrid.layers.find(layer => layer.id === "offline-place-labels").paint["text-color"], "#f2ede0");
+  const button = {setAttribute(name, value) { this[name] = value; }};
+  const credit = {};
+  updateMapStyleControl(button, credit, "satellite-hybrid");
+  assert.equal(button.textContent, "Daylight hiking");
+  assert.match(credit.innerHTML, /© Esri.*© OSM/);
 });
 
 test("manual fix only pans; zoom, bearing and pitch remain untouched", () => {

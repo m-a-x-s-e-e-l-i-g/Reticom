@@ -55,9 +55,9 @@ function smoothLine(points) {
 }
 
 // Split gaps and date-line crossings instead of drawing a line across the world.
-function segments(points) {
+function segments(points, smooth = true) {
   const lines = []; let line = [];
-  const finish = () => { if (line.length > 1) lines.push(smoothLine(line)); line = []; };
+  const finish = () => { if (line.length > 1) lines.push(smooth ? smoothLine(line) : line); line = []; };
   for (const fix of points) {
     if (fix.breakBefore) finish();
     const point = fix.point, previous = line.at(-1);
@@ -89,7 +89,7 @@ export class TrafficTracks {
       if (!key || p.traffic_pack !== this.pack || feature.geometry?.type !== "Point" || !Array.isArray(point)
         || !finite(point[0]) || !finite(point[1]) || Math.abs(point[0]) > 180 || Math.abs(point[1]) > 90
         || !finite(time) || time > now + 30 || now - time > (this.pack === "flights" ? 120 : 600)
-        || p.display_estimated || p.prediction_seconds > 0) continue;
+        || p.estimated || p.display_estimated || p.prediction_seconds > 0) continue;
       const points = this.tracks.get(key) || [], last = points.at(-1);
       if (last && time <= last.time) continue; // Cached/older reports do not grow history.
       const gap = last ? time - last.time : 0;
@@ -147,8 +147,16 @@ export function showTrafficTrack(map, data) {
   if (!map.getLayer(TRACK_SOURCE)) {
     const before = map.getStyle()?.layers?.find(layer => layer.type === "symbol")?.id;
     map.addLayer({id: TRACK_SOURCE, source: TRACK_SOURCE, type: "line", layout: {"line-join": "round", "line-cap": "round"},
-      paint: {"line-color": ["case", ["==", ["get", "traffic_pack"], "vessels"], "#a5b8ac", "#c2b58d"], "line-width": 2.5, "line-opacity": .85, "line-dasharray": [3, 2]}}, before);
+      paint: {"line-color": ["match", ["get", "traffic_pack"], "vessels", "#a5b8ac", "transit", "#75ddd0", "transit-route", "#82a8ff", "#c2b58d"], "line-width": 2.5, "line-opacity": .85, "line-dasharray": [3, 2]}}, before);
   }
+}
+
+export function transitRouteFeature(points) {
+  if (!Array.isArray(points) || points.length > 4000 || points.some(point => !Array.isArray(point) ||
+    point.length !== 2 || !point.every(finite) || Math.abs(point[0]) > 180 || Math.abs(point[1]) > 90)) return null;
+  const lines = segments(points.map(point => ({point})), false);
+  return lines.length ? {type: "Feature", properties: {traffic_pack: "transit-route"},
+    geometry: {type: "MultiLineString", coordinates: lines}} : null;
 }
 
 export function showTrafficEstimate(map, feature) {

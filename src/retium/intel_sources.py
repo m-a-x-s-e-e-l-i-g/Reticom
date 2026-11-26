@@ -52,6 +52,7 @@ _GDACS_CACHE_LOCK = threading.Lock()
 FIRMS_ROOT = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
 NOTAM_URL = "https://api.bravoecho.ai/v1/notams"
 TRANSITOUS_URL = "https://api.transitous.org/api/v6/map/trips"
+TRANSITOUS_TRIP_URL = "https://api.transitous.org/api/v6/trip"
 TRANSIT_POSITION_URLS = {
     "openov": "https://gtfs.ovapi.nl/nl/vehiclePositions.pb",
     "hsl": "https://realtime.hsl.fi/realtime/vehicle-positions/v2/hsl",
@@ -143,10 +144,10 @@ def fetch_bytes(url: str, *, data: bytes | None = None, headers: dict | None = N
     parts = urlsplit(url)
     allowed = (
         url == OVERPASS_URL or _gdacs_endpoint(url) or url in ROAD_URLS
-        or url in TRANSIT_POSITION_URLS.values() or url.partition("?")[0] == TRANSITOUS_URL
+        or url in TRANSIT_POSITION_URLS.values() or url.partition("?")[0] in (TRANSITOUS_URL, TRANSITOUS_TRIP_URL)
         or (parts.scheme == "https" and parts.netloc == "api.bravoecho.ai" and parts.path == "/v1/notams")
         or (parts.scheme == "https" and parts.netloc == "malta.coverage.wetransform.eu"
-            and parts.path in {"/wms/dtm_1m_2018/ows", "/wms/dsm_1m_2018/ows"})
+            and parts.path in {"/wms/dtm_1m_2018/ows", "/wms/dsm_1m_2018/ows", "/dtm_1m_2018/ows"})
         or (parts.scheme == "https" and parts.netloc == "firms.modaps.eosdis.nasa.gov" and parts.path.startswith("/api/area/csv/"))
     )
     if not allowed or parts.username or parts.password or parts.fragment:

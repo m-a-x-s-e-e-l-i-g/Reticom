@@ -44,8 +44,8 @@
   - MGRS/UPS grid worldwide, including copyable grid references.
   - Numeric compass, waypoint bearing and contact bearing.
   - Live phone-facing direction for deliberate pointing.
-  - Dark hiking/vector map for low-light use.
-  - Satellite view for current visual context.
+  - Dark and daylight hiking maps using offline-capable vector tiles.
+  - Satellite imagery and a hybrid view with roads, trails and labels.
   - Metre-labelled contour lines rendered locally from cached elevation tiles.
   - Trails, paths, peaks, parks and labels from the vector basemap.
   - **34 manual tactical marker types** across operations, medical, control, threat, hazard, support and unit categories.

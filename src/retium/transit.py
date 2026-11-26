@@ -11,7 +11,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
-from .intel_sources import TRANSITOUS_URL, TRANSIT_POSITION_URLS, _coord, _inside, _json, _text, fetch_bytes
+from .intel_sources import TRANSITOUS_TRIP_URL, TRANSITOUS_URL, TRANSIT_POSITION_URLS, _coord, _inside, _json, _text, fetch_bytes
 from .navigation import decode_coordinates
 from .osm_cache import intersects
 
@@ -36,6 +36,8 @@ MODES = {
 MODE_LABELS = {"bus": "Bus", "train": "Train", "metro": "Metro", "tram": "Tram", "ferry": "Ferry", "vehicle": "Transit vehicle"}
 POSITION_MAX_AGE = 120
 ESTIMATE_MAX_AGE = 90
+TRIP_REFERENCE = re.compile(r"\d{8}_\d{2}:\d{2}(?::\d{2})?_([^_\s]{1,64})_([^\s]{1,170})")
+DATASET_FEED = {tag: key for key, (_, _, _, tags) in FEEDS.items() for tag in tags}
 
 
 def _varint(data, offset):
@@ -133,6 +135,8 @@ def decode_vehicles(payload, key, now):
                   "trip": _wire_text(trip, 1), "route": route, "vehicle": label or identity,
                   "mode": mode, "estimated": False,
                   "source": agency, "source_url": url, "feed": key}
+        if key == "hsl":
+            report["hsl_run"] = (_wire_text(trip, 3), _wire_text(trip, 2)[:5], route)
         previous = vehicles.get(identity)
         if previous is None or (observed or 0) >= (previous["measured_at"] or 0):
             vehicles[identity] = report
@@ -172,70 +176,93 @@ def _route_position(points, ratio):
     return points[-1]
 
 
-def _transitous_segment(rows, now, bounds):
+def _transitous_segments(rows):
     if not isinstance(rows, list):
         raise ValueError("Invalid Transitous response")
-    candidates = {}
+    segments = []
     for row in rows[:4000]:
-        if not isinstance(row, dict) or row.get("realTime") is not True or not isinstance(row.get("trips"), list):
+        if not isinstance(row, dict) or not isinstance(row.get("trips"), list):
             continue
         start, end = _epoch(row.get("departure")), _epoch(row.get("arrival"))
-        if start is None or end is None or not start <= now < end:
+        if start is None or end is None or start >= end:
             continue
-        try:
-            points = decode_coordinates(row.get("polyline"))
-        except ValueError:
-            start_place, end_place = row.get("from"), row.get("to")
-            if not isinstance(start_place, dict) or not isinstance(end_place, dict):
-                continue
-            points = [_coord([place.get("lon"), place.get("lat")]) for place in (start_place, end_place)]
-            if any(point is None for point in points):
-                continue
-        point = _route_position(points, (now - start) / (end - start))
-        if not point or not _inside(point, bounds):
-            continue
+        polyline = row.get("polyline")
+        points = []
+        if row.get("realTime") is True:
+            try:
+                points = decode_coordinates(polyline)
+            except ValueError:
+                stops = [row.get("from"), row.get("to")]
+                if all(isinstance(place, dict) for place in stops):
+                    fallback = [_coord([place.get("lon"), place.get("lat")]) for place in stops]
+                    if all(fallback):
+                        points = fallback
         mode = MODES.get(str(row.get("mode")), "vehicle")
+        trips = []
         for trip in row["trips"][:20]:
             if not isinstance(trip, dict) or not isinstance(trip.get("tripId"), str):
                 continue
             identity = trip["tripId"]
-            parts = re.fullmatch(r"\d{8}_\d{2}:\d{2}(?::\d{2})?_([^_]+)_(.{1,170})", identity)
+            parts = TRIP_REFERENCE.fullmatch(identity)
             if not parts:
                 continue
             dataset, trip_id = parts.groups()
-            report = {"id": f"transitous:{identity}", "dataset": dataset.lower(), "trip": trip_id,
-                      "point": point, "mode": mode, "route": _text(trip.get("displayName"), 88), "vehicle": "",
-                      "at": now, "estimated": True, "source": "Transitous", "source_url": TRANSIT_PACK["source_url"]}
-            if identity not in candidates or start > candidates[identity][0]:
-                candidates[identity] = start, report
-    return [row for _, row in candidates.values()]
+            dataset = dataset.lower()
+            feed = DATASET_FEED.get(dataset) or ("entur" if dataset.startswith("no-entur-") else None)
+            trips.append({"id": f"transitous:{identity}", "trip_ref": identity, "feed": feed, "trip": trip_id,
+                          "mode": mode, "route": _text(trip.get("displayName"), 88)})
+        if trips:
+            segments.append((start, end, points, trips, polyline))
+    return segments
 
 
-def _merge(direct, estimates, bounds, now):
-    reports, by_trip, covered = [], {}, set()
+def _merge(direct, segments, bounds, now, route_modes, *, estimate_positions=True):
+    metadata, estimates, hsl_runs, hsl_lines = {}, {}, {}, {}
+    for start, end, points, trips, _polyline in segments:
+        point = _route_position(points, (now - start) / (end - start)) if estimate_positions and start <= now < end else None
+        for trip in trips:
+            metadata[(trip["feed"], trip["trip"])] = trip
+            if trip["feed"] == "hsl":
+                # HSL publishes the service date, departure time and route instead of a trip ID.
+                day, departure, *_ = trip["trip_ref"].split("_", 3)
+                route = trip["trip"].split("_", 1)[0]
+                key = (day, departure[:5], route)
+                hsl_runs.setdefault(key, {})[trip["trip_ref"]] = trip
+                hsl_lines[route] = trip
+            if point and _inside(point, bounds) and (trip["id"] not in estimates or start > estimates[trip["id"]][0]):
+                estimates[trip["id"]] = start, {**trip, "point": point, "vehicle": "", "at": now,
+                                                "estimated": True, "source": "Transitous", "source_url": TRANSIT_PACK["source_url"]}
+    reports, by_trip, covered = [], set(), set()
     for row in direct:
         if not -30 <= now - row["at"] <= POSITION_MAX_AGE:
             continue
         covered.add(row["feed"])
         if row["trip"]:
-            by_trip.setdefault((row["feed"], row["trip"]), []).append(row)
+            by_trip.add((row["feed"], row["trip"]))
         if _inside(row["point"], bounds):
-            reports.append(row.copy())
-    visible = {row["id"]: row for row in reports}
-    for estimate in estimates:
-        if now - estimate["at"] > ESTIMATE_MAX_AGE or not _inside(estimate["point"], bounds):
-            continue
-        dataset = estimate["dataset"]
-        feed = next((key for key, (_, _, _, tags) in FEEDS.items()
-                     if any(dataset == tag or tag.endswith("-") and dataset.startswith(tag) for tag in tags)), None)
-        matches = by_trip.get((feed, estimate["trip"]), [])
-        if matches:
-            for match in matches:
-                if match["id"] in visible:
-                    report = visible[match["id"]]
-                    if report["mode"] == "vehicle":
-                        report["mode"] = estimate["mode"]
-                    report["route"] = estimate["route"] or report["route"]
+            route_key = (row["feed"], row["route"])
+            trip = metadata.get((row["feed"], row["trip"]))
+            if row["feed"] == "hsl":
+                runs = hsl_runs.get(row.get("hsl_run"), {})
+                if len(runs) == 1:
+                    trip = next(iter(runs.values()))
+                elif line := hsl_lines.get(row["route"]):
+                    row = {**row, "route": line["route"] or row["route"], "mode": line["mode"]}
+            if trip:
+                row = {**row, "trip_ref": trip["trip_ref"], "route": trip["route"] or row["route"],
+                       "mode": trip["mode"] if row["mode"] == "vehicle" else row["mode"]}
+            if route_key[1]:
+                if row["mode"] != "vehicle":
+                    route_modes[route_key] = row["mode"]
+                    route_modes.move_to_end(route_key)
+                    if len(route_modes) > 2048:
+                        route_modes.popitem(last=False)
+                elif mode := route_modes.get(route_key):
+                    row = {**row, "mode": mode}
+            reports.append(row)
+    for _, estimate in estimates.values():
+        feed = estimate["feed"]
+        if (feed, estimate["trip"]) in by_trip:
             continue
         # HSL publishes positions without trip IDs. Its own live snapshot is the
         # safest source for HSL vehicles when it is active, even on busy routes.
@@ -250,6 +277,9 @@ def _feature(row):
     return {"type": "Feature", "id": row["id"], "geometry": {"type": "Point", "coordinates": row["point"]},
             "properties": {"id": row["id"], "title": row["route"] or mode, "kind": row["mode"], "mode_label": mode,
                            "vehicle": row["vehicle"], "estimated": row["estimated"], "observed_at": row["at"],
+                           "position_time": row["at"], "traffic_pack": "transit", "identity": row["id"],
+                           "trip_ref": row.get("trip_ref", ""),
+                           "vehicle_trip": "/".join(row["hsl_run"]) if "hsl_run" in row else row["trip"],
                            "feed_timestamp": not row["estimated"] and row.get("measured_at") is None,
                            "source": row["source"], "source_url": row["source_url"]}}
 
@@ -259,9 +289,10 @@ class PublicTransit:
         self.fetch, self.clock = fetch, clock
         self.lock = threading.Lock()
         self.cache = OrderedDict()
+        self.route_modes = OrderedDict()
         self.next_request = {}
 
-    def _get(self, key, provider, ttl, load):
+    def _get(self, key, provider, ttl, load, *, interval=15):
         entry = self.cache.get(key)
         now = self.clock()
         if entry and now - entry[0] < ttl:
@@ -274,7 +305,7 @@ class PublicTransit:
         except (ValueError, OSError):
             self.next_request[provider] = (now + 60, False)
             return (entry[1] if entry else []), False
-        self.next_request[provider] = (now + 15, True)
+        self.next_request[provider] = (now + interval, True)
         self.cache[key] = (now, rows)
         self.cache.move_to_end(key)
         while len(self.cache) > 36:
@@ -291,18 +322,20 @@ class PublicTransit:
             for key, (_, _, coverage, _) in FEEDS.items():
                 if not intersects(coverage, bounds):
                     continue
-                rows, ok = self._get(key, key, 30, lambda now: decode_vehicles(
+                interval = 20 if key == "openov" else 10
+                rows, ok = self._get(key, key, interval, lambda now: decode_vehicles(
                     self.fetch(TRANSIT_POSITION_URLS[key], headers={"ET-Client-Name": "reticom-reticom"} if key == "entur" else None, timeout=6, max_bytes=4_000_000),
-                    key, self.clock()))
+                    key, self.clock()), interval=interval)
                 direct.extend(rows)
                 healthy.append(ok)
             w, s, e, n = bounds
             region = (max(-180, math.floor(w*20)/20), max(-90, math.floor(s*20)/20),
                       min(180, math.ceil(e*20)/20), min(90, math.ceil(n*20)/20))
-            estimates, ok = self._get(region, "transitous", 60, lambda now: self._estimates(region, now))
+            segments, ok = self._get(region, "transitous", 60, lambda now: self._segments(region, now))
             healthy.append(ok)
             now = self.clock()
-            reports = _merge(direct, estimates, bounds, now)
+            recent_timing = now - self.cache.get(region, (0,))[0] <= ESTIMATE_MAX_AGE
+            reports = _merge(direct, segments, bounds, now, self.route_modes, estimate_positions=recent_timing)
         count = len(reports)
         failed = False in healthy
         status = "fresh" if reports else "uncovered"
@@ -319,10 +352,45 @@ class PublicTransit:
                 "fetched_at": now, "truncated": count > 2000, "note": note,
                 "error": note if status in {"error", "stale"} else None}
 
-    def _estimates(self, bounds, now):
+    def _segments(self, bounds, now):
         w, s, e, n = bounds
         stamp = lambda seconds: datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         query = urlencode({"min": f"{s},{w}", "max": f"{n},{e}", "zoom": 11,
-                           "startTime": stamp(now - 3), "endTime": stamp(now + 12)})
+                           "startTime": stamp(now - 30), "endTime": stamp(now + ESTIMATE_MAX_AGE)})
         rows = _json(self.fetch(f"{TRANSITOUS_URL}?{query}", timeout=10, max_bytes=8_000_000))
-        return _transitous_segment(rows, now, bounds)
+        return _transitous_segments(rows)
+
+    def route(self, reference):
+        if not TRIP_REFERENCE.fullmatch(reference):
+            raise ValueError("Invalid public transport trip")
+        with self.lock:
+            route, _ = self._get(("route", reference), "transitous-trip", 3600,
+                                 lambda _now: self._trip_geometry(reference), interval=2)
+            if route:
+                return route
+            now = self.clock()
+            candidates = [(abs((start + end) / 2 - now), polyline)
+                          for key, (cached_at, segments) in self.cache.items()
+                          if isinstance(key, tuple) and len(key) == 4 and now - cached_at < ESTIMATE_MAX_AGE
+                          for start, end, _, trips, polyline in segments
+                          if any(trip["trip_ref"] == reference for trip in trips)]
+        for _, polyline in sorted(candidates, key=lambda candidate: candidate[0])[:4]:
+            try:
+                return {"points": decode_coordinates(polyline), "label": "Route segment"}
+            except ValueError:
+                continue
+        return {"points": [], "label": "Route unavailable"}
+
+    def _trip_geometry(self, reference):
+        query = urlencode({"tripId": reference})
+        payload = _json(self.fetch(f"{TRANSITOUS_TRIP_URL}?{query}", timeout=6, max_bytes=750_000))
+        for leg in payload.get("legs", []) if isinstance(payload, dict) else []:
+            if not isinstance(leg, dict) or leg.get("tripId") != reference or leg.get("cancelled"):
+                continue
+            geometry = leg.get("legGeometry")
+            if isinstance(geometry, dict):
+                try:
+                    return {"points": decode_coordinates(geometry.get("points"), precision=6), "label": "Trip route"}
+                except ValueError:
+                    continue
+        return {}

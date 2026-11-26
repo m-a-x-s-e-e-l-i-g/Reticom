@@ -5,12 +5,20 @@ export const AHN_MAX_ZOOM = 21;
 export const AHN_BOUNDS = Object.freeze([3.0, 50.65, 7.5, 53.7]);
 export const AHN_WMS_URL = "https://service.pdok.nl/rws/ahn/wms/v1_0";
 export const AHN_MODES = Object.freeze({dtm: "Bare-earth terrain (DTM)", dsm: "Surface / buildings (DSM)"});
+const AHN_RELIEF_URL = "https://ahn.arcgisonline.nl/arcgis/rest/services/Hoogtebestand/AHN4_DTM_50cm/ImageServer";
+const ENGLAND_DTM_URL = "https://environment.data.gov.uk/spatialdata/lidar-composite-digital-terrain-model-dtm-1m/wms";
+const USGS_WMS_URL = "https://elevation.nationalmap.gov/arcgis/services/3DEPElevation/ImageServer/WMSServer";
+const MERCATOR_BBOX = "{bbox-epsg-3857}";
+const ahnReliefQuery = new URLSearchParams({f: "image", bbox: MERCATOR_BBOX, bboxSR: "3857", imageSR: "3857",
+  size: "256,256", format: "png32", renderingRule: JSON.stringify({rasterFunction: "AHN - Hillshade (Multidirectionaal)"})});
 
 const AHN_PROVIDER = Object.freeze({
   id: "ahn", label: "AHN · Netherlands", bounds: AHN_BOUNDS, minzoom: AHN_MIN_ZOOM,
   maxzoom: AHN_MAX_ZOOM, resolution: "0.5 m", source: "PDOK / AHN",
   source_url: "https://www.pdok.nl/introductie/-/article/actueel-hoogtebestand-nederland-ahn",
   attribution: "PDOK / AHN", attribution_url: "https://www.pdok.nl/introductie/-/article/actueel-hoogtebestand-nederland-ahn",
+  hillshade: {tiles: `${AHN_RELIEF_URL}/exportImage?${ahnReliefQuery}`.replace("%7Bbbox-epsg-3857%7D", MERCATOR_BBOX),
+    attribution: "AHN4 / Esri Nederland", attribution_url: AHN_RELIEF_URL},
   modes: Object.freeze({dtm: {layer: "dtm_05m", label: AHN_MODES.dtm, wms: AHN_WMS_URL}, dsm: {layer: "dsm_05m", label: AHN_MODES.dsm, wms: AHN_WMS_URL}}),
 });
 
@@ -19,8 +27,9 @@ const ENGLAND_PROVIDER = Object.freeze({
   maxzoom: 21, resolution: "1 m", source: "Environment Agency / Defra",
   source_url: "https://environment.data.gov.uk/dataset/13787b9a-26a4-4775-8523-806d13af58fc",
   attribution: "Environment Agency / Defra", attribution_url: "https://environment.data.gov.uk/dataset/13787b9a-26a4-4775-8523-806d13af58fc",
+  hillshade: {layer: "Lidar_Composite_Hillshade_DTM_1m", style: "hillshade", wms: ENGLAND_DTM_URL},
   modes: Object.freeze({
-    dtm: {layer: "Lidar_Composite_DTM_1m", label: AHN_MODES.dtm, wms: "https://environment.data.gov.uk/spatialdata/lidar-composite-digital-terrain-model-dtm-1m/wms"},
+    dtm: {layer: "Lidar_Composite_DTM_1m", label: AHN_MODES.dtm, wms: ENGLAND_DTM_URL},
     dsm: {layer: "Lidar_Composite_LZ_DSM_1m", label: AHN_MODES.dsm, wms: "https://environment.data.gov.uk/spatialdata/lidar-composite-digital-surface-model-last-return-dsm-1m/wms"},
   }),
 });
@@ -30,9 +39,10 @@ const USGS_PROVIDER = Object.freeze({
   maxzoom: 21, resolution: "1 m where available", source: "USGS 3DEP",
   source_url: "https://www.usgs.gov/3d-elevation-program/about-3dep-products-services",
   attribution: "USGS 3DEP", attribution_url: "https://www.usgs.gov/3d-elevation-program/about-3dep-products-services",
+  hillshade: {layer: "3DEPElevation:Hillshade Multidirectional", wms: USGS_WMS_URL},
   // The public 3DEP dynamic service is bare-earth only; an explicit DTM
   // fallback keeps the mode selector honest when the map moves to the US.
-  modes: Object.freeze({dtm: {layer: "3DEPElevation", label: AHN_MODES.dtm, wms: "https://elevation.nationalmap.gov/arcgis/services/3DEPElevation/ImageServer/WMSServer"}}),
+  modes: Object.freeze({dtm: {layer: "3DEPElevation", label: AHN_MODES.dtm, wms: USGS_WMS_URL}}),
 });
 
 const MALTA_PROVIDER = Object.freeze({
@@ -48,13 +58,15 @@ const MALTA_PROVIDER = Object.freeze({
 });
 
 const IGN_WMS_URL = "https://data.geopf.fr/wms-r/wms";
+const IGN_DTM_SHADE = {label: "Bare-earth hillshade (DTM)", layer: "IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW", wms: IGN_WMS_URL};
 const FRANCE_PROVIDER = Object.freeze({
   id: "france", label: "IGN LiDAR HD · France", bounds: Object.freeze([-5.2, 41.2, 9.7, 51.2]),
   minzoom: 12, maxzoom: 19, resolution: "0.5 m source grid", source: "IGN / Géoplateforme",
   source_url: "https://www.data.gouv.fr/datasets/mnt-lidar-hd",
   attribution: "IGN · LiDAR HD", attribution_url: "https://geoservices.ign.fr/lidarhd",
+  hillshade: IGN_DTM_SHADE,
   modes: Object.freeze({
-    dtm: {label: "Bare-earth hillshade (DTM)", layer: "IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW", wms: IGN_WMS_URL},
+    dtm: IGN_DTM_SHADE,
     dsm: {label: "Surface hillshade (DSM)", layer: "IGNF_LIDAR-HD_MNS_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW", wms: IGN_WMS_URL},
   }),
 });
@@ -116,14 +128,14 @@ export function lidarProviderForBounds(bounds) {
   }) || null;
 }
 
-export function lidarTileUrl(mode = "dtm", provider = AHN_PROVIDER) {
-  const actualMode = providerMode(provider, mode);
-  const selected = provider.modes[actualMode];
+export function lidarTileUrl(mode = "dtm", provider = AHN_PROVIDER, relief = null) {
+  const selected = relief ? provider.hillshade : provider.modes[providerMode(provider, mode)];
+  if (!selected) return null;
   if (selected.tiles) return selected.tiles;
   const query = new URLSearchParams({
     service: "WMS", request: "GetMap", version: "1.3.0", layers: selected.layer,
-    styles: "", format: "image/png", transparent: "true", width: "256", height: "256",
-    crs: "EPSG:3857", bbox: "{bbox-epsg-3857}",
+    styles: selected.style || "", format: "image/png", transparent: "true", width: "256", height: "256",
+    crs: "EPSG:3857", bbox: MERCATOR_BBOX,
   });
   return `${selected.wms}?${query}`.replaceAll("%7B", "{").replaceAll("%7D", "}");
 }
@@ -132,11 +144,11 @@ export function ahnTileUrl(mode = "dtm") {
   return lidarTileUrl(mode, AHN_PROVIDER);
 }
 
-export function lidarSource(source, provider = AHN_PROVIDER, mode = "dtm") {
+export function lidarSource(source, provider = AHN_PROVIDER, mode = "dtm", relief = null) {
   return {
-    type: "raster", tiles: [lidarTileUrl(mode, provider)], tileSize: 256,
+    type: "raster", tiles: [lidarTileUrl(mode, provider, relief)], tileSize: 256,
     minzoom: provider.minzoom, maxzoom: provider.maxzoom, bounds: provider.bounds,
-    attribution: provider.attribution,
+    attribution: (relief && provider.hillshade?.attribution) || provider.attribution,
   };
 }
 
@@ -148,9 +160,10 @@ export function ahnLayers(source) {
   return lidarLayers(source, AHN_PROVIDER);
 }
 
-export function lidarLayers(source, provider = AHN_PROVIDER) {
+export function lidarLayers(source, provider = AHN_PROVIDER, relief = null) {
   return [{
     id: `${source}-raster`, type: "raster", source, minzoom: provider.minzoom,
-    paint: {"raster-opacity": 0.62, "raster-fade-duration": 0},
+    paint: {"raster-opacity": relief === "daylight" ? .36 : relief === "night" ? .22 : .62, "raster-fade-duration": 0,
+      ...(relief ? {"raster-saturation": -1, "raster-brightness-max": relief === "night" ? .31 : 1} : {})},
   }];
 }

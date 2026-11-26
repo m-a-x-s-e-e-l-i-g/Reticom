@@ -10,7 +10,9 @@ The optional **National LiDAR elevation** layer is available under **Map layers 
 
 The source is selected from the map center. When no supported national source covers the current area, Reticom reports that high-resolution LiDAR is unavailable there and leaves the existing global contour layer available as broad terrain context.
 
-Use **Bare-earth terrain (DTM)** to see the ground with buildings and vegetation removed. Use **Surface / buildings (DSM)** to see the measured surface, including buildings and vegetation. Source resolution varies by provider.
+Daylight hiking uses visible relief and night hiking uses low-contrast relief. Both show the standard terrain hillshade from the cached elevation tiles. With **National LiDAR elevation** enabled and at close zoom, they can also use bare-earth hillshade from AHN4 in the Netherlands, the Environment Agency in England, IGN in France, or USGS 3DEP in the United States. Malta uses standard terrain shading in hiking views.
+
+Satellite and Satellite hybrid keep each provider’s existing raster. Use **Bare-earth terrain (DTM)** to see the ground with buildings and vegetation removed. Use **Surface / buildings (DSM)** to see the measured surface, including buildings and vegetation. Source resolution varies by provider.
 
 Reticom requests these online tiles when the layer is enabled and the map reaches the provider's minimum zoom. Reticom serves Malta's geographic tiles in Web Mercator through its local backend. The other providers supply Web Mercator directly.
 

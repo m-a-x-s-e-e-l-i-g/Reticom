@@ -1,5 +1,6 @@
 import json
 import struct
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 import pytest
@@ -7,9 +8,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from retium.intel_packs import IntelPackStore, intel_router
-from retium.intel_sources import TRANSITOUS_URL, TRANSIT_POSITION_URLS
+from retium.intel_sources import TRANSITOUS_TRIP_URL, TRANSITOUS_URL, TRANSIT_POSITION_URLS
 from retium.navigation import encode_coordinates
-from retium.transit import PublicTransit, decode_vehicles
+from retium.transit import PublicTransit, _merge, _transitous_segments, decode_vehicles
 
 
 NOW = 1_800_000_000
@@ -84,6 +85,7 @@ def test_combines_live_feeds_and_falls_back_without_schedule_only_trips():
     assert result["status"] == "fresh"
     assert gps["properties"]["title"] == "Route 64"
     assert gps["properties"]["estimated"] is False
+    assert gps["properties"]["trip_ref"] == rows[0]["trips"][0]["tripId"]
     assert estimate["properties"]["estimated"] is True
     assert estimate["geometry"]["coordinates"] == pytest.approx([-71.12, 42.3])
     assert transit.load(BOSTON, 12) == result
@@ -97,6 +99,64 @@ def test_combines_live_feeds_and_falls_back_without_schedule_only_trips():
         assert [f["properties"]["estimated"] for f in fallback["features"]] == expected
 
 
+def test_positions_advance_along_cached_timing_and_trip_route_has_precision_six():
+    row = segment("us-flixbus", "vehicle")
+    reference = row["trips"][0]["tripId"]
+    points = [[-71.180001, 42.3], [-71.060001, 42.3]]
+    calls = []
+    now = NOW
+
+    def fetch(url, **options):
+        calls.append(url.partition("?")[0])
+        if url.startswith(TRANSITOUS_TRIP_URL):
+            return json.dumps({"legs": [{"tripId": reference, "legGeometry": {
+                "points": encode_coordinates(points, precision=6)}}]}).encode()
+        if url == TRANSIT_POSITION_URLS["mbta"]:
+            return transport_snapshot()
+        return json.dumps([row]).encode()
+
+    transit = PublicTransit(fetch=fetch, clock=lambda: now)
+    initial = transit.load(BOSTON, 12)["features"][-1]
+    now += 10
+    next_fix = transit.load(BOSTON, 12)["features"][-1]
+    assert initial["geometry"]["coordinates"][0] == pytest.approx(-71.12)
+    assert next_fix["geometry"]["coordinates"][0] == pytest.approx(-71.10)
+    assert calls.count(TRANSITOUS_URL) == 1
+    assert calls.count(TRANSIT_POSITION_URLS["mbta"]) == 2
+    assert transit.route(reference)["points"] == points
+    assert transit.route(reference)["points"] == points
+    assert calls.count(TRANSITOUS_TRIP_URL) == 1
+    with pytest.raises(ValueError, match="Invalid"):
+        transit.route("invalid")
+
+
+def test_known_route_mode_survives_a_view_without_matching_trip_metadata():
+    (report,) = decode_vehicles(transport_snapshot(), "openov", NOW)
+    segments = _transitous_segments([segment("nl-openov", "trip_1")])
+    modes = OrderedDict()
+    (first,) = _merge([report], segments, BOSTON, NOW, modes)
+    assert first["mode"] == "bus"
+    (next_fix,) = _merge([{**report, "trip": "trip_2"}], [], BOSTON, NOW, modes)
+    assert next_fix["mode"] == "bus"
+    assert "trip_ref" not in next_fix
+
+
+def test_unrelated_trip_geometry_falls_back_to_matching_route_segment():
+    row = segment("us-flixbus", "vehicle")
+    reference = row["trips"][0]["tripId"]
+
+    def fetch(url, **options):
+        if url.startswith(TRANSITOUS_TRIP_URL):
+            return b'{"legs":[{"tripId":"differentTrip"}]}'
+        if url == TRANSIT_POSITION_URLS["mbta"]:
+            return transport_snapshot()
+        return json.dumps([row]).encode()
+
+    transit = PublicTransit(fetch=fetch, clock=lambda: NOW)
+    transit.load(BOSTON, 12)
+    assert transit.route(reference) == {"points": [[-71.18, 42.3], [-71.06, 42.3]], "label": "Route segment"}
+
+
 def test_shared_map_endpoint_is_opt_in_and_uses_standard_empty_message_in_malta(tmp_path, monkeypatch):
     transit = PublicTransit(fetch=lambda *args, **kwargs: b"[]", clock=lambda: NOW)
     assert transit.load(MALTA, 5)["status"] == "zoom_in"
@@ -107,7 +167,9 @@ def test_shared_map_endpoint_is_opt_in_and_uses_standard_empty_message_in_malta(
     with TestClient(app) as client:
         url = "/api/intel-packs/transit?west=14.2&south=35.8&east=14.6&north=36.1&zoom=12"
         assert client.get(url).json()["status"] == "disabled"
+        assert client.get("/api/intel-packs/transit/route?trip=invalid").status_code == 404
         store.update({"enabled": ["transit"]})
+        assert client.get("/api/intel-packs/transit/route?trip=invalid").status_code == 422
         result = client.get(url).json()
     assert result["status"] == "uncovered"
     assert result["features"] == []

@@ -43,6 +43,24 @@ test("Malta uses local reprojected tiles and France uses IGN hillshade", () => {
   }
 });
 
+test("hiking shades bare earth with regional LiDAR and keeps satellite elevation colors", () => {
+  const {ahn, england, france, malta, usgs} = LIDAR_PROVIDERS;
+  const day = new URL(lidarTileUrl("dsm", ahn, "daylight"));
+  assert.match(day.pathname, /AHN4_DTM_50cm\/ImageServer\/exportImage$/);
+  assert.match(day.searchParams.get("renderingRule"), /Multidirectionaal/);
+  assert.equal(day.searchParams.get("bbox"), "{bbox-epsg-3857}");
+  assert.match(lidarTileUrl("dsm", england, "night"), /Lidar_Composite_Hillshade_DTM_1m/);
+  assert.match(lidarTileUrl("dsm", france, "daylight"), /LIDAR-HD_MNT_ELEVATION/);
+  assert.match(lidarTileUrl("dtm", usgs, "night"), /Hillshade\+Multidirectional/);
+  assert.equal(lidarTileUrl("dtm", malta, "daylight"), null);
+  assert.match(lidarTileUrl("dsm", malta), /\/malta\/dsm\//);
+  assert.match(lidarTileUrl("dsm", ahn), /layers=dsm_05m/);
+  const paint = tone => lidarLayers("lidar", ahn, tone)[0].paint;
+  assert.ok(paint("night")["raster-opacity"] < paint("daylight")["raster-opacity"]);
+  assert.ok(paint("night")["raster-brightness-max"] < paint("daylight")["raster-brightness-max"]);
+  assert.equal(paint(null)["raster-saturation"], undefined);
+});
+
 test("international WMS rasters use provider layers and honest mode fallbacks", () => {
   const england = LIDAR_PROVIDERS.england;
   const usgs = LIDAR_PROVIDERS.usgs;

@@ -3,19 +3,20 @@ import {allTeamsModel, overviewBounds} from "./all-teams-model.js?v=20260908-3";
 import {addDrawingDecorationLayers} from "./map-drawings.js?v=20260905-2";
 import {teamPageUrl} from "./command-teams.js";
 import {HeadingTracker, HeadingOverlay, HeadingConnection} from "./live-heading.js?v=20260905-2";
+import {MAP_STYLES, updateMapStyleControl, HIKING_RELIEF} from "./outdoor-map.js?v=20261125-2";
 
 const $ = (id) => document.getElementById(id);
 const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[c]);
 const stamp = (seconds) => seconds ? new Date(seconds * 1000).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit"}) : "No reports yet";
 const urlFor = (id) => teamPageUrl(id, location.href);
 
-export async function startAllTeamsView({mapStyle, initialStyle = "hiking", saveStyle, onMapReady}) {
+export async function startAllTeamsView({mapStyle, initialStyle = "hiking", setStyle, onMapReady}) {
   let map, popup, popupId, model, snapshot = {teams: []}, loading = false, framed = false, disconnected = false;
   let styleMode = initialStyle, teamSignature = "", feedSignature = "";
   window.addEventListener("reticom-map-style", event => {
-    if (!map || !["dark", "hiking", "satellite"].includes(event.detail)) return;
+    if (!MAP_STYLES.some(style => style.id === event.detail) || styleMode === event.detail) return;
     styleMode = event.detail;
-    map.setStyle(mapStyle(styleMode));
+    map?.setStyle(mapStyle(styleMode), {diff: false});
     updateStyleButton();
   });
   onLandmarkResolved(() => render());
@@ -156,19 +157,9 @@ export async function startAllTeamsView({mapStyle, initialStyle = "hiking", save
   $("fitAllTeams").addEventListener("click", () => fit());
   $("showAllTeams").addEventListener("click", () => { hidden.clear(); render(); });
   $("refreshAllTeams").addEventListener("click", refresh);
-  $("allTeamsMapStyle").addEventListener("click", () => {
-    if (!map) return;
-    styleMode = styleMode === "satellite" ? "hiking" : "satellite";
-    saveStyle(styleMode);
-    updateStyleButton();
-    map.setStyle(mapStyle(styleMode)); // No fitBounds: retain the current camera.
-  });
+  $("allTeamsMapStyle").addEventListener("click", () => { if (map) void setStyle(); });
   function updateStyleButton() {
-    $("allTeamsMapStyle").textContent = styleMode === "satellite" ? "MAP" : "SATELLITE";
-    $("allTeamsMapStyle").setAttribute("aria-pressed", String(styleMode === "satellite"));
-    $("allTeamsMapCredit").innerHTML = styleMode === "satellite"
-      ? '<a href="https://www.esri.com/" target="_blank" rel="noreferrer">Imagery © Esri</a>'
-      : '<a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OSM</a>';
+    updateMapStyleControl($("allTeamsMapStyle"), $("allTeamsMapCredit"), styleMode, {online: navigator.onLine});
   }
   updateStyleButton();
   void refresh();
@@ -180,13 +171,14 @@ export async function startAllTeamsView({mapStyle, initialStyle = "hiking", save
     const {Map: LibreMap, NavigationControl, Popup} = await import("/vendor/maplibre-gl/maplibre-gl.mjs?v=6.6.0");
     map = new LibreMap({container: "allTeamsMap", style: mapStyle(styleMode), center: [0, 18], zoom: 1.25,
       attributionControl: false, pitchWithRotate: false, dragRotate: false,
+      locale: {"NavigationControl.ResetBearing": "North Up"},
       transformRequest: (url) => ({url: mapUrl(url)}),
     });
-    map.addControl(new NavigationControl({showCompass: false}), "bottom-right");
+    map.addControl(new NavigationControl(), "bottom-right");
     map.on("style.load", () => { addLayers(); render(); });
     onMapReady?.(map, Popup);
     map.on("movestart", (event) => { if (event.originalEvent) framed = true; });
-    map.on("error", () => { $("allTeamsMapStatus").textContent = "Some map detail could not load. Saved team reports remain available."; });
+    map.on("error", event => { if (event.sourceId !== HIKING_RELIEF) $("allTeamsMapStatus").textContent = "Some map detail could not load. Saved team reports remain available."; });
     map.on("click", (event) => {
       if (!map.getLayer("all-team-points")) return;
       const [feature] = map.queryRenderedFeatures(event.point, {layers: ["all-team-points", "all-team-lines", "all-team-areas", "all-team-drawings-names", "all-team-drawings-fill", "all-team-drawings-pattern"]});

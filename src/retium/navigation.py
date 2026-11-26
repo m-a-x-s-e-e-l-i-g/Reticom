@@ -15,25 +15,26 @@ MAX_EVENT_BYTES = 12000
 MAX_REVISION = 1_000_000_000
 
 
-def coordinate(value):
+def coordinate(value, *, precision=5):
     if not isinstance(value, list) or len(value) != 2:
         raise ValueError("navigation coordinate must be [longitude, latitude]")
     result = []
     for component, bound in zip(value, (180, 90)):
         if type(component) not in (int, float) or not math.isfinite(component) or not -bound <= component <= bound:
             raise ValueError("invalid navigation coordinate")
-        result.append(round(component, 5))
+        result.append(round(component, precision))
     return result
 
 
-def encode_coordinates(points):
+def encode_coordinates(points, *, precision=5):
     if not isinstance(points, list) or not 2 <= len(points) <= MAX_POINTS:
         raise ValueError(f"shared route must contain 2-{MAX_POINTS} points; route was not shared")
     output, previous = [], [0, 0]
+    scale = 10 ** precision
     for point in points:
-        lon, lat = coordinate(point)
+        lon, lat = coordinate(point, precision=precision)
         for axis, value in enumerate((lat, lon)):
-            number = round(value * 100000)
+            number = round(value * scale)
             delta = number - previous[axis]
             previous[axis] = number
             encoded = ~(delta << 1) if delta < 0 else delta << 1
@@ -44,10 +45,11 @@ def encode_coordinates(points):
     return "".join(output)
 
 
-def decode_coordinates(polyline):
+def decode_coordinates(polyline, *, precision=5):
     if not isinstance(polyline, str) or not 2 <= len(polyline) <= MAX_EVENT_BYTES:
         raise ValueError("invalid shared route geometry")
     offset, previous, points = 0, [0, 0], []
+    scale = 10 ** precision
     while offset < len(polyline):
         for axis in (0, 1):
             number, shift = 0, 0
@@ -63,10 +65,10 @@ def decode_coordinates(polyline):
                 if part < 32:
                     break
             previous[axis] += ~(number >> 1) if number & 1 else number >> 1
-        points.append(coordinate([previous[1] / 100000, previous[0] / 100000]))
+        points.append(coordinate([previous[1] / scale, previous[0] / scale], precision=precision))
         if len(points) > MAX_POINTS:
             raise ValueError("shared route has too many points")
-    if len(points) < 2 or encode_coordinates(points) != polyline:
+    if len(points) < 2 or encode_coordinates(points, precision=precision) != polyline:
         raise ValueError("invalid shared route geometry")
     return points
 

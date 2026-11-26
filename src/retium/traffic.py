@@ -44,8 +44,7 @@ PERSONAL_FLIGHT_FALLBACK = personal_flight_fallback_enabled()
 TRAFFIC_PACKS = [
     {"id": "flights", "title": "Live aircraft", "source": "ADSB.lol", "source_url": "https://www.adsb.lol/docs/open-data/api/",
      "attribution": "ADSB.lol contributors · ODbL", "description": "Public aircraft positions, heading and altitude. Incomplete coverage; not an air-traffic safety service.",
-     "min_zoom": 6, "ttl_seconds": 10, "credential_fields": [],
-     "personal_fallback": PERSONAL_FLIGHT_FALLBACK},
+     "min_zoom": 6, "ttl_seconds": 10, "credential_fields": []},
     {"id": "vessels", "title": "Live boats & ships", "source": "Open Waters AIS", "source_url": "https://openwaters.io/ais/",
      "description": "Public AIS positions. Uses AISStream when configured, with Open Waters AIS and optional AISHub fallback.",
      "min_zoom": 6, "ttl_seconds": 5, "credential_fields": []},
@@ -505,6 +504,7 @@ class LiveTraffic:
         self.flight_lock = asyncio.Lock()
         self.flight_data, self.flight_at, self.flight_next = [], 0, 0
         self.primary_flight_next = self.fallback_flight_next = 0
+        self.personal_flight_fallback = store.personal_flight_fallback
         self.flight_views = OrderedDict()
         self.flight_clients = OrderedDict()
         self.flight_epoch = 0
@@ -681,11 +681,11 @@ class LiveTraffic:
                 now = self.clock()
                 if isinstance(error, HTTPError) and error.code == 429:
                     self.primary_flight_next = flight_retry_at(error, now, (int(now) // 86400 + 1) * 86400)
-                elif not PERSONAL_FLIGHT_FALLBACK:
+                elif not self.personal_flight_fallback:
                     raise
                 else:
                     self.primary_flight_next = now + 30
-        if not PERSONAL_FLIGHT_FALLBACK or now < self.fallback_flight_next:
+        if not self.personal_flight_fallback or now < self.fallback_flight_next:
             raise FlightFeedCooldown
         batches = []
         for index, query in enumerate(queries):
@@ -712,6 +712,10 @@ class LiveTraffic:
     async def flights(self, bounds, empty, queries, client):
         async with self.flight_lock:
             now = self.clock()
+            fallback = self.store.personal_flight_fallback
+            if fallback and not self.personal_flight_fallback and now < self.primary_flight_next:
+                self.flight_next = min(self.flight_next, max(now, self.fallback_flight_next))
+            self.personal_flight_fallback = fallback
             bounds = tuple(bounds)
             self.flight_clients[client] = (bounds, now)
             self.flight_clients.move_to_end(client)
@@ -765,7 +769,11 @@ class LiveTraffic:
                     chosen.update(features=features, capped=capped, fetched_at=self.clock(), error=None)
                 except FlightFeedCooldown:
                     self.flight_next = self.clock() + 30
-                    current["error"] = chosen["error"] = "Aircraft provider is cooling down. Last-seen positions stay visible until they expire."
+                    current["error"] = chosen["error"] = (
+                        "Aircraft providers are cooling down. Last-seen positions stay visible until they expire."
+                        if self.personal_flight_fallback else
+                        "ADSB.lol is cooling down. For personal use, enable the adsb.fi fallback in Live aircraft."
+                    )
                 except Exception:
                     self.flight_next = self.clock() + 30
                     chosen["error"] = "Aircraft feed unavailable; retrying shortly. Coverage is not guaranteed."

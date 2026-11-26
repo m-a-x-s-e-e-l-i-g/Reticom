@@ -110,6 +110,36 @@ export function installTrafficIcons(map) {
     }
   }
 }
+const TRANSIT_ICONS = {
+  bus: "M5 17V7Q5 4 8 4H16Q19 4 19 7V17Z M5 11H19 M8 15H9 M15 15H16 M7 17V20 M17 17V20",
+  train: "M6 16V8Q6 4 12 3Q18 4 18 8V16L15 18H9Z M6 10H18 M9 14H10 M14 14H15 M9 18L6 22 M15 18L18 22 M8 21H16",
+  metro: "M5 19V10A7 7 0 0 1 19 10V19 M8 16V9H16V16Z M8 12H16 M10 18H14",
+  tram: "M6 18V8H18V18Z M6 13H18 M9 16H10 M14 16H15 M12 8L15 4H9 M9 18L7 21 M15 18L17 21",
+  ferry: "M4 14L12 11 20 14 17 18H7Z M7 12V7H17V12 M11 7V4H14 M4 21Q6 18 8 21Q10 18 12 21Q14 18 16 21Q18 18 20 21",
+  vehicle: "M8 7H12V17H16 M8 7A2 2 0 1 1 4 7A2 2 0 1 1 8 7 M20 17A2 2 0 1 1 16 17A2 2 0 1 1 20 17",
+};
+
+export function installTransitIcons(map) {
+  if (!map.addImage || !globalThis.document || typeof Path2D === "undefined") return;
+  for (const [mode, path] of Object.entries(TRANSIT_ICONS)) {
+    const shape = new Path2D(path);
+    for (const estimated of [false, true]) for (const selected of [false, true]) {
+      const id = `public-transit-${mode}${estimated ? "-estimate" : ""}${selected ? "-selected" : ""}`;
+      if (map.hasImage(id)) continue;
+      const canvas = document.createElement("canvas"); canvas.width = canvas.height = 48;
+      const ctx = canvas.getContext("2d"); if (!ctx) continue;
+      ctx.scale(2, 2); ctx.lineJoin = "round"; ctx.lineCap = "round";
+      // Draw the badge and glyph together so style rendering cannot show a bare badge.
+      ctx.beginPath(); ctx.arc(12, 12, 10.75, 0, 2 * Math.PI);
+      ctx.fillStyle = estimated ? "#17383a" : "#75ddd0"; ctx.fill();
+      ctx.strokeStyle = selected ? "#e4faff" : "#75ddd0"; ctx.lineWidth = selected ? 2 : 1.3; ctx.stroke();
+      ctx.translate(2, 2); ctx.scale(5 / 6, 5 / 6);
+      ctx.strokeStyle = estimated ? "#b6fff2" : "#102a2d"; ctx.lineWidth = 1.8; ctx.stroke(shape);
+      map.addImage(id, ctx.getImageData(0, 0, 48, 48), {pixelRatio: 2});
+    }
+  }
+}
+
 export function trafficLayers(source) {
   const opacity = ["case", ["==", ["get", "stale"], true], .4, 1];
   const selected = ["==", ["get", "traffic_selected"], true];

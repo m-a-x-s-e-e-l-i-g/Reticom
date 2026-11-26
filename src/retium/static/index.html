@@ -7,7 +7,7 @@
   <title>Reticom</title>
   <link rel="icon" href="/favicon.ico?v=20260908-1" sizes="any">
   <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css?v=6.6.0">
-  <link rel="stylesheet" href="/styles.css?v=20261125-3">
+  <link rel="stylesheet" href="/styles.css?v=20261125-5">
   <link rel="stylesheet" href="/intel-packs.css?v=20261125-10">
   <link rel="stylesheet" href="/command-workspace.css?v=20261125-1">
 </head>
@@ -279,7 +279,7 @@
     </aside>
     <section class="overview-map-panel" aria-label="Combined team map">
       <div id="allTeamsMap" class="overview-map"></div>
-      <div class="overview-map-tools"><span id="allTeamsSummary">All teams</span><button id="fitAllTeams" type="button" class="secondary compact" disabled>FIT VISIBLE</button><button id="allTeamsMapStyle" type="button" class="secondary compact" aria-pressed="false">SATELLITE</button></div>
+      <div class="overview-map-tools"><span id="allTeamsSummary">All teams</span><button id="fitAllTeams" type="button" class="secondary compact" disabled>FIT VISIBLE</button><button id="allTeamsMapStyle" type="button" class="secondary compact" aria-label="Switch to satellite map">Satellite</button></div>
       <p id="allTeamsMapEmpty" class="overview-map-empty">Loading team reports…</p>
       <p id="allTeamsMapStatus" class="overview-map-status" role="status"></p>
       <div id="allTeamsMapCredit" class="overview-map-credit"><a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OSM</a></div>
@@ -337,7 +337,7 @@
       <div id="map" class="map">
         <div id="mapCanvas" class="map-canvas"></div>
         <div class="command-map-toggles">
-          <button id="commandMapStyleToggle" class="secondary compact map-style-toggle" type="button" aria-pressed="false">SATELLITE</button>
+          <button id="commandMapStyleToggle" class="secondary compact map-style-toggle" type="button" aria-label="Switch to satellite map">Satellite</button>
         </div>
         <button id="commandGridReference" class="map-grid-reference" type="button" title="Copy MGRS reference at map centre">MGRS LOADING</button>
         <div id="mapEmpty" class="map-empty"><b>NO TEAM POSITIONS</b><span>The real basemap is ready. Verified operators and markers appear after a Field node shares them.</span></div>
@@ -350,6 +350,7 @@
           <button type="button" class="radial-action radial-tactical" data-map-marker-palette role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 4 4-4 4-4-4 4-4ZM5 13l4 4-4 4-4-4 4-4Zm14 0 4 4-4 4-4-4 4-4Z"/></svg><span>REPORT</span></button>
           <button type="button" class="radial-action radial-obstacle" data-quick-marker="road-blocked" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m6.5 6.5 11 11"/></svg><span>BLOCKED</span></button>
           <button type="button" class="radial-action radial-draw" data-map-radial-page="draw" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1L19.3 8.2l-3.5-3.5L5 15.5 4 20Z"/><path d="m13.8 6.8 3.5 3.5"/></svg><span>DRAW</span></button>
+          <button type="button" class="radial-action radial-location" data-map-location-info role="menuitem" aria-label="Location info"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg><span>LOCATION</span></button>
           <button type="button" class="radial-action radial-tool radial-slot-1 hidden" data-map-text role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M12 5v14M8 19h8"/></svg><span>TEXT</span></button>
           <button type="button" class="radial-action radial-tool radial-slot-2 hidden" data-map-draw="arrow" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18 19 5M11 5h8v8"/></svg><span>ARROW</span></button>
           <button type="button" class="radial-action radial-tool radial-slot-3 hidden" data-map-draw="trace" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16-.8 4.8L8 20l10.8-10.8-4-4L4 16Z"/><path d="m12.8 7.2 4 4"/></svg><span>TRACE</span></button>
@@ -357,6 +358,7 @@
           <button type="button" class="radial-close" data-close-map-radial aria-label="Close map actions"><span aria-hidden="true">×</span><small>CLOSE</small></button>
         </div>
         <div id="commandMapContextMenu" class="map-context-menu hidden" role="menu" aria-label="Command map actions">
+          <button type="button" data-map-location-info role="menuitem"><span class="context-menu-icon" aria-hidden="true">⌖</span><span>Location info</span></button>
           <button type="button" data-command-position role="menuitem"><span class="context-menu-icon">◉</span><span>Set Command position here</span></button>
           <button type="button" data-quick-marker="casualty" role="menuitem"><span class="context-menu-icon">+</span><span>Report casualty</span></button>
           <button type="button" data-quick-marker="waypoint" role="menuitem"><span class="context-menu-icon">◇</span><span>Add waypoint</span></button>
@@ -487,6 +489,7 @@
         <button type="button" class="radial-action radial-tactical" data-map-marker-palette role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 4 4-4 4-4-4 4-4ZM5 13l4 4-4 4-4-4 4-4Zm14 0 4 4-4 4-4-4 4-4Z"/></svg><span>REPORT</span></button>
         <button type="button" class="radial-action radial-obstacle" data-quick-marker="road-blocked" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m6.5 6.5 11 11"/></svg><span>BLOCKED</span></button>
         <button type="button" class="radial-action radial-draw" data-map-radial-page="draw" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1L19.3 8.2l-3.5-3.5L5 15.5 4 20Z"/><path d="m13.8 6.8 3.5 3.5"/></svg><span>DRAW</span></button>
+        <button type="button" class="radial-action radial-location" data-map-location-info role="menuitem" aria-label="Location info"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg><span>LOCATION</span></button>
         <button type="button" class="radial-action radial-tool radial-slot-1 hidden" data-map-text role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M12 5v14M8 19h8"/></svg><span>TEXT</span></button>
         <button type="button" class="radial-action radial-tool radial-slot-2 hidden" data-map-draw="arrow" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18 19 5M11 5h8v8"/></svg><span>ARROW</span></button>
         <button type="button" class="radial-action radial-tool radial-slot-3 hidden" data-map-draw="trace" role="menuitem"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16-.8 4.8L8 20l10.8-10.8-4-4L4 16Z"/><path d="m12.8 7.2 4 4"/></svg><span>TRACE</span></button>
@@ -494,6 +497,7 @@
         <button type="button" id="closeMapRadial" class="radial-close" data-close-map-radial aria-label="Close map actions"><span aria-hidden="true">×</span><small>CLOSE</small></button>
       </div>
       <div id="mapContextMenu" class="map-context-menu hidden" role="menu" aria-label="Map actions">
+        <button type="button" data-map-location-info role="menuitem"><span class="context-menu-icon" aria-hidden="true">⌖</span><span>Location info</span></button>
         <button type="button" data-quick-marker="casualty" role="menuitem"><span class="context-menu-icon">+</span><span>Report casualty</span></button>
         <button type="button" data-quick-marker="waypoint" role="menuitem"><span class="context-menu-icon">◇</span><span>Add waypoint</span></button>
         <button type="button" data-quick-marker="note" role="menuitem"><span class="context-menu-icon">▤</span><span>Add note</span></button>
@@ -521,7 +525,7 @@
       </div>
       <div class="map-actions">
         <div class="map-tool-stack">
-          <button id="fieldMapStyleToggle" class="map-tool map-style-toggle" type="button" aria-pressed="false" aria-label="Switch to satellite map">SAT</button>
+          <button id="fieldMapStyleToggle" class="map-tool map-style-toggle" type="button" aria-label="Switch to satellite map">SAT</button>
           <button id="mapMovementToggle" class="map-tool movement-toggle" type="button" aria-pressed="false" aria-label="Resume automatic location updates"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18c3-8 6 1 9-7s5-3 7-6"/><circle cx="4" cy="18" r="1.5"/><path d="m17 5 3 0 0 3"/></svg><span>LOC</span></button>
           <button id="mapSharePosition" class="map-tool" aria-label="Share current position">⌖</button>
         </div>
@@ -592,6 +596,6 @@
   </nav>
 
   <div id="toast" class="toast" role="status"></div>
-  <script type="module" src="/app.js?v=20261125-31"></script>
+  <script type="module" src="/app.js?v=20261126-2"></script>
 </body>
 </html>

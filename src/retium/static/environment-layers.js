@@ -56,7 +56,8 @@ export function environmentSource(source, id) {
 export function environmentLayers(source, id) {
   return [{
     id: `${source}-raster`, type: "raster", source,
-    minzoom: ENVIRONMENT_MIN_ZOOM[id], maxzoom: ENVIRONMENT_MAX_ZOOM[id],
+    minzoom: ENVIRONMENT_MIN_ZOOM[id],
+    ...(id === "nightlights" ? {maxzoom: ENVIRONMENT_MAX_ZOOM[id]} : {}),
     paint: {"raster-opacity": ENVIRONMENT_RASTERS[id].opacity, "raster-fade-duration": 0},
   }];
 }

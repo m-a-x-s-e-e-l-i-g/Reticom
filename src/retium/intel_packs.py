@@ -25,9 +25,9 @@ from fastapi.responses import JSONResponse, Response
 from .intel_sources import PACKS, ProviderError, MAX_FEATURES, NOTAM_CATEGORIES, OSM_AREA_LIMIT_KM2, OSM_SPAN_LIMIT_DEGREES, GDACS_DETAIL_MAX_SPAN, load_pack
 from .notam_activity import NOTAM_LOOKAHEAD
 from .osm_cache import buffered_bounds, intersects, merge_entries
-from .lidar_tiles import malta_tile
+from .lidar_tiles import MALTA_CONTOUR_MAX_ZOOM, malta_terrain_tile, malta_tile, overzoom_terrain
 from .elevation import ElevationStore, ELEVATION_MAX_ZOOM
-from .traffic import TRAFFIC_PACKS, TRAFFIC_IDS, LiveTraffic, fetch_vessel_photo, validate_traffic_filters, vessel_photo_info
+from .traffic import PERSONAL_FLIGHT_FALLBACK, TRAFFIC_PACKS, TRAFFIC_IDS, LiveTraffic, fetch_vessel_photo, validate_traffic_filters, vessel_photo_info
 from .traffic_history import valid_identity
 from .road_disruptions import ROAD_PACK, RoadDisruptions, validate_road_filters
 from .transit import PublicTransit, TRANSIT_PACK
@@ -138,6 +138,9 @@ class IntelPackStore:
         self.shared_pending = set()
         self.shared_next_fetch = {}
         stored = self._read(self.settings_path) or {}
+        fallback = stored.get("personal_flight_fallback")
+        self._personal_fallback_saved = isinstance(fallback, bool)
+        self.personal_flight_fallback = fallback if self._personal_fallback_saved else PERSONAL_FLIGHT_FALLBACK
         enabled = stored.get("enabled", DEFAULT_ENABLED)
         credentials = stored.get("credentials", {})
         self.enabled = {key for key in enabled if isinstance(key, str) and key in CATALOGUE} if isinstance(enabled, list) else set()
@@ -189,14 +192,14 @@ class IntelPackStore:
         with self.lock:
             return {
                 "packs": [{**pack, "enabled": key in self.enabled, "configured": self._configured(pack)} for key, pack in CATALOGUE.items()],
-                "settings": {"enabled": sorted(self.enabled), "gdacs_types": list(self.gdacs_types), "notam_categories": list(self.notam_categories), "notam_view": self.notam_view, "traffic_filters": self.traffic_filters, "firms_days": self.firms_days, "road_filters": self.road_filters, "ahn_mode": self.ahn_mode},
+                "settings": {"enabled": sorted(self.enabled), "gdacs_types": list(self.gdacs_types), "notam_categories": list(self.notam_categories), "notam_view": self.notam_view, "traffic_filters": self.traffic_filters, "firms_days": self.firms_days, "road_filters": self.road_filters, "ahn_mode": self.ahn_mode, "personal_flight_fallback": self.personal_flight_fallback},
                 "credentials": {key: bool(self.credentials.get(key)) for key in sorted(SECRET_FIELDS)},
                 "credential_previews": {key: ("••••••••" + value[-4:] if len(value) > 8 else "••••••••")
                                         for key in sorted(SECRET_FIELDS) if (value := self.credentials.get(key))},
             }
 
     def update(self, body):
-        if not isinstance(body, dict) or set(body) - {"enabled", "credentials", "gdacs_types", "notam_categories", "notam_view", "traffic_filters", "firms_days", "road_filters", "ahn_mode"}:
+        if not isinstance(body, dict) or set(body) - {"enabled", "credentials", "gdacs_types", "notam_categories", "notam_view", "traffic_filters", "firms_days", "road_filters", "ahn_mode", "personal_flight_fallback"}:
             raise ValueError("Use available map layer settings and provider credentials")
         with self.lock:
             enabled = body.get("enabled", sorted(self.enabled))
@@ -221,7 +224,13 @@ class IntelPackStore:
             if ahn_mode not in AHN_MODES:
                 raise ValueError("Choose an AHN elevation mode")
             credentials = {**self.credentials, **{key: value.strip() for key, value in supplied.items()}}
-            self._write(self.settings_path, {"enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "notam_categories": notam_categories, "notam_view": notam_view, "traffic_filters": traffic_filters, "firms_days": firms_days, "road_filters": road_filters, "ahn_mode": ahn_mode})
+            fallback = body.get("personal_flight_fallback", self.personal_flight_fallback)
+            if not isinstance(fallback, bool):
+                raise ValueError("Choose whether to use the personal aircraft fallback")
+            saved_fallback = {"personal_flight_fallback": fallback} if "personal_flight_fallback" in body or self._personal_fallback_saved else {}
+            self._write(self.settings_path, {"enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "notam_categories": notam_categories, "notam_view": notam_view, "traffic_filters": traffic_filters, "firms_days": firms_days, "road_filters": road_filters, "ahn_mode": ahn_mode, **saved_fallback})
+            self._personal_fallback_saved = bool(saved_fallback)
+            self.personal_flight_fallback = fallback
             self.road_filters = road_filters
             if gdacs_types != self.gdacs_types:
                 self.next_fetch = {key: until for key, until in self.next_fetch.items()
@@ -676,7 +685,8 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, in
             body = json.loads(raw)
             credentials = body.get("credentials") if isinstance(body, dict) else None
             host_keys = HOST_CREDENTIALS.keys() & credentials.keys() if isinstance(credentials, dict) else set()
-            if host_keys or isinstance(credentials, dict) and credentials.keys() & SHARED_INTEL_KEYS.values():
+            if (host_keys or isinstance(credentials, dict) and credentials.keys() & SHARED_INTEL_KEYS.values()
+                    or isinstance(body, dict) and "personal_flight_fallback" in body):
                 if local_request and not local_request(request):
                     raise HTTPException(403, "Change provider access from this Reticom app")
             if host_keys:
@@ -734,17 +744,29 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, in
         return Response(tile, media_type="image/png", headers={"Cache-Control": "public, max-age=604800"})
 
     @router.get("/elevation/tiles/{zoom}/{x}/{y}.png")
-    async def terrain_tile(zoom: int, x: int, y: int):
-        if not store.is_enabled("elevation"):
+    async def terrain_tile(zoom: int, x: int, y: int, relief: bool = False, malta: bool = False):
+        if not relief and not store.is_enabled("elevation"):
             raise HTTPException(404, "Enable Contour lines in Map layers")
-        if not 0 <= zoom <= ELEVATION_MAX_ZOOM or not 0 <= x < (1 << zoom) or not 0 <= y < (1 << zoom):
+        max_zoom = MALTA_CONTOUR_MAX_ZOOM if malta and not relief else ELEVATION_MAX_ZOOM
+        if not 0 <= zoom <= max_zoom or not 0 <= x < (1 << zoom) or not 0 <= y < (1 << zoom):
             raise HTTPException(404, "Elevation tile outside map bounds")
         try:
-            result = await asyncio.to_thread(elevation.tile_result, zoom, x, y)
-            if not store.is_enabled("elevation"):
+            levels = max(0, zoom - ELEVATION_MAX_ZOOM)
+            if levels:
+                try:
+                    regional = await asyncio.to_thread(malta_terrain_tile, zoom, x, y)
+                except (ProviderError, OSError, SyntaxError):
+                    regional = None
+                if regional is not None:
+                    if not store.is_enabled("elevation"):
+                        raise HTTPException(404, "Elevation disabled")
+                    return Response(regional, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
+            result = await asyncio.to_thread(elevation.tile_result, zoom - levels, x >> levels, y >> levels)
+            data = await asyncio.to_thread(overzoom_terrain, result["data"], levels, x, y) if levels else result["data"]
+            if not relief and not store.is_enabled("elevation"):
                 raise HTTPException(404, "Elevation disabled")
-            return Response(result["data"], media_type=result["content_type"], headers={
-                "Cache-Control": "private, max-age=60" if result["stale"] else "private, max-age=86400",
+            return Response(data, media_type=result["content_type"], headers={
+                "Cache-Control": "private, max-age=60" if levels or result["stale"] else "private, max-age=86400",
                 "X-Reticom-Terrain-Stale": str(result["stale"]).lower(),
                 "X-Reticom-Terrain-Fetched-At": str(result["fetched_at"]),
             })
@@ -833,6 +855,15 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, in
             raise HTTPException(403, "Use this Reticom app")
         traffic.release(client)
         return {"released": True}
+
+    @router.get("/transit/route")
+    async def transit_route(trip: str):
+        if not store.is_enabled("transit"):
+            raise HTTPException(404, "Public transport is disabled")
+        try:
+            return JSONResponse(await asyncio.to_thread(transit.route, trip), headers={"Cache-Control": "no-store"})
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @router.get("/{pack_id}")
     async def features(request: Request, pack_id: str, west: float, south: float, east: float, north: float, zoom: float):

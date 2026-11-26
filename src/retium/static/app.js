@@ -5,8 +5,8 @@ import {createCommandWorkspace} from "./command-workspace.js?v=20260908-2";
 let commandCanvas = null;
 import {calculateDeviceRoute, initOfflineRoutingSettings, ROUTING_MODE_KEY} from "./offline-routing.js?v=20260909-7";
 const offlineRoutingSettings = initOfflineRoutingSettings();
-import {hikingMapStyle, recenterOnFix, roadAndPathLayers, preferredMapStyle, nextMapStyle, satelliteWithTrails} from "./outdoor-map.js?v=20260907-5";
-import {createIntelPacks} from "./intel-packs.js?v=20261125-24";
+import {hikingMapStyle, recenterOnFix, roadAndPathLayers, preferredMapStyle, nextMapStyle, satelliteWithTrails, MAP_STYLES, updateMapStyleControl, HIKING_RELIEF} from "./outdoor-map.js?v=20261125-2";
+import {createIntelPacks} from "./intel-packs.js?v=20261126-1";
 import {createSharedNavigation, navigationSharePayload} from "./shared-navigation.js?v=20260906-1";
 import {HeadingTracker, HeadingOverlay, HeadingConnection} from "./live-heading.js?v=20260905-2";
 import {reportDraft, reportComposerHtml} from "./map-reports.js?v=20260905-1";
@@ -20,6 +20,7 @@ import {nextWaypointLabel, withDisplayWaypointLabels} from "./map-labels.js?v=20
 import {formatMapBytes, packProgress, tileCountForBounds} from "./map-offline.js?v=20260903-1";
 import {mapMessageReadStorageKey, mapOverlayMessages, parseReadMessageIds, shouldDismissMapMessage} from "./map-message-read.js?v=20260903-2";
 import {captureMapCamera, hasAddedMapMarker, mapMarkerIds, restoreMapCamera, shouldInitiallyFrameMap} from "./map-view.js?v=20260903-3";
+import {mapLocationInfo} from "./map-location-info.js?v=20261125-1";
 import {latestOperatorMapTarget, mapTargetCapabilities} from "./map-target.js?v=20260903-1";
 import {compassCardinal, compassTargetIndicator, compassTicks, normalizeHeading} from "./compass-tape.js?v=20260903-2";
 import {bearingRayEndPixel, bearingRayFeature} from "./bearing-ray.js?v=20260903-1";
@@ -46,7 +47,7 @@ import {
 const $ = (id) => document.getElementById(id);
 const apiUrl = (url) => teamApiUrl(url, location.href);
 const fetch = (url, options) => globalThis.fetch(apiUrl(url), options);
-const intelPacks = createIntelPacks({button: $("intelPacksToggle"), panel: $("intelPacksPanel"), fetchImpl: fetch, getMapStyle: readMapStylePreference, setMapStyle: mode => toggleMapStyle(mode)});
+const intelPacks = createIntelPacks({button: $("intelPacksToggle"), panel: $("intelPacksPanel"), fetchImpl: fetch, getMapStyle: () => mapStyleMode, setMapStyle: mode => toggleMapStyle(mode)});
 let commandWorkspace = false;
 const commandDisplay = () => commandWorkspace || role === "gateway";
 const selectedCommandTeam = new URL(location.href).searchParams.get("team") || "default";
@@ -348,7 +349,10 @@ function saveFieldEventCache(destination, events) {
 }
 
 function mapStyleDefinition(mode = mapStyleMode) {
-  if (mode === "hiking") return hikingMapStyle(mapStyleDefinition("dark"));
+  if (mode === "hiking" || mode === "hiking-light") return hikingMapStyle(mapStyleDefinition("dark"), {
+    daylight: mode === "hiking-light",
+    terrainTiles: `${location.origin}/api/intel-packs/elevation/tiles/{z}/{x}/{y}.png?relief=true`,
+  });
   if (mode === "dark") {
     return {
       version: 8,
@@ -408,32 +412,13 @@ function mapStyleDefinition(mode = mapStyleMode) {
         "raster-fade-duration": 0,
       },
     }],
-  }, mapStyleDefinition("hiking"));
+  }, hikingMapStyle(mapStyleDefinition("dark")), {hybrid: mode === "satellite-hybrid"});
 }
 
 function updateMapStyleUi() {
-  const satellite = mapStyleMode === "satellite";
-  const commandToggle = $("commandMapStyleToggle");
-  const fieldToggle = $("fieldMapStyleToggle");
-  if (commandToggle) {
-    commandToggle.textContent = satellite ? "HIKING MAP" : "SATELLITE";
-    commandToggle.setAttribute("aria-pressed", String(satellite));
-    commandToggle.setAttribute("aria-label", satellite ? "Switch to hiking map" : "Switch to satellite map");
-  }
-  if (fieldToggle) {
-    fieldToggle.textContent = satellite ? "MAP" : "SAT";
-    fieldToggle.setAttribute("aria-pressed", String(satellite));
-    fieldToggle.setAttribute("aria-label", satellite ? "Switch to hiking map" : "Switch to satellite map");
-  }
-  const commandCredit = $("commandMapCredit");
-  const fieldCredit = $("fieldMapCredit");
-  if (satellite) {
-    if (commandCredit) commandCredit.textContent = "IMAGERY © ESRI";
-    if (fieldCredit) fieldCredit.textContent = "IMAGERY © ESRI";
-  } else {
-    if (commandCredit) commandCredit.innerHTML = '<a href="https://openfreemap.org" target="_blank" rel="noreferrer">OPENFREEMAP</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OSM</a>';
-    if (fieldCredit) fieldCredit.innerHTML = '<a href="https://openfreemap.org" target="_blank" rel="noreferrer">OFM</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OSM</a>';
-  }
+  const online = navigator.onLine;
+  updateMapStyleControl($("commandMapStyleToggle"), $("commandMapCredit"), mapStyleMode, {online});
+  updateMapStyleControl($("fieldMapStyleToggle"), $("fieldMapCredit"), mapStyleMode, {compact: true, online});
 }
 
 function updateMapGridUi() {
@@ -2262,6 +2247,7 @@ function emptyFeatureCollection() {
 function addMgrsGridLayers(map, prefix) {
   const source = `${prefix}-mgrs-grid`;
   const labels = `${prefix}-mgrs-labels`;
+  const daylight = mapStyleMode === "hiking-light";
   map.addSource(source, {type: "geojson", data: emptyFeatureCollection()});
   map.addSource(labels, {type: "geojson", data: emptyFeatureCollection()});
   map.addLayer({
@@ -2270,7 +2256,7 @@ function addMgrsGridLayers(map, prefix) {
     source,
     layout: {visibility: mapGridEnabled ? "visible" : "none"},
     paint: {
-      "line-color": "#8f8b69",
+      "line-color": daylight ? "#747365" : "#8f8b69",
       "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.55, 15, 1.15],
       "line-opacity": ["interpolate", ["linear"], ["zoom"], 2, 0.34, 15, 0.58],
       "line-dasharray": [2, 2],
@@ -2288,7 +2274,7 @@ function addMgrsGridLayers(map, prefix) {
       "text-allow-overlap": false,
       "text-ignore-placement": false,
     },
-    paint: {"text-color": "#aaa681", "text-opacity": 0.4, "text-halo-color": "#090c09", "text-halo-width": 1.4},
+    paint: {"text-color": daylight ? "#5d5a4d" : "#aaa681", "text-opacity": daylight ? .72 : .4, "text-halo-color": daylight ? "#f5f1e5" : "#090c09", "text-halo-width": 1.4},
   });
 }
 
@@ -2694,12 +2680,14 @@ function replaceMapStyle(map, addLayers) {
 
 async function toggleMapStyle(requestedMode) {
   if (mapStyleSwitching) return;
+  const next = nextMapStyle(mapStyleMode, requestedMode, navigator.onLine);
+  if (next === mapStyleMode) return;
   mapStyleSwitching = true;
   const operationalCamera = operationalMap ? captureMapCamera(operationalMap) : null;
   const fieldCamera = fieldMap ? captureMapCamera(fieldMap) : null;
   const buttons = [$("commandMapStyleToggle"), $("fieldMapStyleToggle")].filter(Boolean);
   buttons.forEach((button) => { button.disabled = true; });
-  mapStyleMode = nextMapStyle(mapStyleMode, requestedMode);
+  mapStyleMode = next;
   saveMapStylePreference(mapStyleMode);
   window.dispatchEvent(new CustomEvent("reticom-map-style", {detail: mapStyleMode}));
   updateMapStyleUi();
@@ -2717,7 +2705,7 @@ async function toggleMapStyle(requestedMode) {
     fieldMap?._reticomGridUpdate?.();
     updateDrawPreview(commandMapEditor);
     updateDrawPreview(fieldMapEditor);
-    toast(mapStyleMode === "satellite" ? "Satellite map active" : mapStyleMode === "hiking" ? "Hiking map active" : "Dark map active");
+    toast(`${MAP_STYLES.find(style => style.id === mapStyleMode).label} map active`);
   } catch {
     toast("Map style could not be loaded", true);
   } finally {
@@ -2742,11 +2730,17 @@ async function ensureMap() {
       pitchWithRotate: false,
       dragRotate: false,
       attributionControl: false,
+      locale: {"NavigationControl.ResetBearing": "North Up"},
     });
-    map.addControl(new NavigationControl({showCompass: false}), "top-right");
+    map.addControl(new NavigationControl(), "top-right");
     await new Promise((resolve, reject) => {
-      map.once("load", resolve);
-      map.once("error", (event) => reject(event.error || new Error("Basemap failed to load")));
+      const onError = event => {
+        if (event.sourceId === HIKING_RELIEF) return;
+        map.off("error", onError);
+        reject(event.error || new Error("Basemap failed to load"));
+      };
+      map.once("load", () => { map.off("error", onError); resolve(); });
+      map.on("error", onError);
     });
     addOperationalMapLayers(map);
     intelPacks.attachMap(map, {Popup});
@@ -2854,6 +2848,7 @@ async function ensureFieldMap() {
         pitchWithRotate: false,
         dragRotate: false,
         attributionControl: false,
+        locale: {"NavigationControl.ResetBearing": "North Up"},
       });
     const waitForMap = (candidate) => new Promise((resolve, reject) => {
       let settled = false;
@@ -2866,7 +2861,7 @@ async function ensureFieldMap() {
         callback(value);
       };
       const onStyleLoad = () => finish(resolve, candidate);
-      const onError = (event) => finish(reject, event.error || new Error("Basemap failed to load"));
+      const onError = (event) => { if (event.sourceId !== HIKING_RELIEF) finish(reject, event.error || new Error("Basemap failed to load")); };
       const timeout = setTimeout(
         () => finish(reject, new Error("Basemap startup timed out")),
         MAP_START_TIMEOUT_MS,
@@ -2879,14 +2874,15 @@ async function ensureFieldMap() {
       await waitForMap(map);
     } catch (error) {
       map.remove();
-      if (mapStyleMode === "satellite") throw error;
-      map = createMap(mapStyleDefinition("satellite"));
+      const fallback = navigator.onLine && !MAP_STYLES.find(style => style.id === mapStyleMode)?.imagery ? "satellite" : "hiking";
+      if (mapStyleMode === fallback) throw error;
+      map = createMap(mapStyleDefinition(fallback));
       await waitForMap(map);
-      mapStyleMode = "satellite";
+      mapStyleMode = fallback;
       saveMapStylePreference(mapStyleMode);
       updateMapStyleUi();
     }
-    map.addControl(new NavigationControl({showCompass: false}), "top-right");
+    map.addControl(new NavigationControl(), "top-right");
     addFieldMapLayers(map);
     intelPacks.attachMap(map, {Popup});
     if (commsOnly) intelPacks.setMapPaused(map, true);
@@ -3133,6 +3129,37 @@ function createMapEditor(map, {menuId, contextMenuId, paletteId, controlsId, tex
   editor.reportComposer.setAttribute("aria-label", "Report details");
   editor.reportComposer.innerHTML = reportComposerHtml();
   editor.palette.after(editor.reportComposer);
+  editor.locationInfo = document.createElement("section");
+  editor.locationInfo.className = "map-report-composer map-location-info hidden";
+  editor.locationInfo.setAttribute("role", "dialog");
+  editor.locationInfo.setAttribute("aria-label", "Location info");
+  editor.locationInfo.innerHTML = `<header><strong>Location info</strong><button type="button" data-location-close aria-label="Close location info">×</button></header>
+    <div class="map-coordinate-row"><label>GPS<input data-location-gps readonly></label><button type="button" class="secondary compact" data-location-copy="gps">Copy GPS</button></div>
+    <div class="map-coordinate-row"><label>MGRS<input data-location-mgrs readonly></label><button type="button" class="secondary compact" data-location-copy="mgrs">Copy MGRS</button></div>
+    <a data-location-maps target="${window.RetiumAndroid ? "_self" : "_blank"}" rel="noopener noreferrer">Open Google Maps ↗</a>`;
+  editor.reportComposer.after(editor.locationInfo);
+  editor.locationInfo.addEventListener("click", async event => {
+    if (event.target.closest("[data-location-close]")) return closeMapRadial(editor);
+    const kind = event.target.closest("[data-location-copy]")?.dataset.locationCopy;
+    if (!kind) return;
+    const input = editor.locationInfo.querySelector(`[data-location-${kind}]`);
+    const location = editor.location;
+    const label = kind === "gps" ? "GPS coordinates" : "MGRS reference";
+    try {
+      await navigator.clipboard.writeText(input.value);
+    } catch {
+      if (editor.location !== location) return;
+      input.focus({preventScroll: true});
+      input.select();
+      try {
+        if (!document.execCommand("copy")) throw new Error("Clipboard unavailable");
+      } catch {
+        toast(`Select Copy to copy the ${label}`, true);
+        return;
+      }
+    }
+    toast(`${label} copied`);
+  });
   editor.reportComposer.querySelector("[data-report-cancel]").addEventListener("click", () => closeMapRadial(editor));
   editor.reportComposer.querySelector("[data-report-back]").addEventListener("click", () => {
     editor.reportComposer.classList.add("hidden");
@@ -3173,7 +3200,7 @@ function createMapEditor(map, {menuId, contextMenuId, paletteId, controlsId, tex
   });
   editor.contextMenu.addEventListener("keydown", (event) => navigateMapContextMenu(editor, event));
   document.addEventListener("pointerdown", (event) => {
-    const surfaces = [editor.menu, editor.contextMenu, editor.palette, editor.textComposer, editor.reportComposer];
+    const surfaces = [editor.menu, editor.contextMenu, editor.palette, editor.textComposer, editor.reportComposer, editor.locationInfo];
     if (surfaces.every(surface => surface.classList.contains("hidden"))) return;
     if (surfaces.some(surface => surface.contains(event.target))) return;
     closeMapRadial(editor);
@@ -3181,7 +3208,7 @@ function createMapEditor(map, {menuId, contextMenuId, paletteId, controlsId, tex
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeMapRadial(editor);
   });
-  map.on("movestart", () => closeMapRadial(editor));
+  map.on("movestart", () => { if (editor.locationInfo.classList.contains("hidden")) closeMapRadial(editor); });
   editor.controls.querySelector("[data-clear-map-drawing]").addEventListener("click", () => {
     editor.reviewing = false;
     editor.review.classList.add("hidden");
@@ -3239,6 +3266,10 @@ async function handleMapMenuAction(editor, event) {
   const pageButton = event.target.closest("[data-map-radial-page]");
   if (pageButton) {
     setMapRadialPage(editor, pageButton.dataset.mapRadialPage);
+    return;
+  }
+  if (event.target.closest("[data-map-location-info]")) {
+    await openMapLocationInfo(editor);
     return;
   }
   if (event.target.closest("[data-map-marker-palette]")) {
@@ -3319,6 +3350,8 @@ function closeMapRadial(editor, preserveLocation = false) {
   editor.palette.classList.add("hidden");
   editor.textComposer.classList.add("hidden");
   editor.reportComposer?.classList.add("hidden");
+  if (editor.locationInfo?.contains(document.activeElement)) editor.map.getCanvas().focus({preventScroll: true});
+  editor.locationInfo?.classList.add("hidden");
   setMapRadialPage(editor, "primary");
   if (!preserveLocation) editor.location = null;
 }
@@ -3380,8 +3413,9 @@ function openMapContextMenu(editor, x, y) {
   if (editor.drawMode) return;
   closeMapRadial(editor);
   const canvas = editor.map.getCanvas();
+  editor.contextMenu.classList.remove("hidden");
   const menuWidth = 204;
-  const menuHeight = editor.contextMenu.scrollHeight || 410;
+  const menuHeight = editor.contextMenu.offsetHeight;
   const gutter = 8;
   const safeX = Math.max(gutter, Math.min(canvas.clientWidth - menuWidth - gutter, x));
   const safeY = Math.max(gutter, Math.min(canvas.clientHeight - menuHeight - gutter, y));
@@ -3389,8 +3423,37 @@ function openMapContextMenu(editor, x, y) {
   editor.location = {lat: coordinate.lat, lon: coordinate.lng};
   editor.contextMenu.style.left = `${safeX}px`;
   editor.contextMenu.style.top = `${safeY}px`;
-  editor.contextMenu.classList.remove("hidden");
   editor.contextMenu.querySelector('[role="menuitem"]').focus({preventScroll: true});
+}
+
+async function openMapLocationInfo(editor) {
+  const location = editor.location;
+  const info = location && mapLocationInfo(location);
+  if (!info) return;
+  closeMapRadial(editor, true);
+  const panel = editor.locationInfo;
+  const gps = panel.querySelector("[data-location-gps]");
+  const grid = panel.querySelector("[data-location-mgrs]");
+  const copyGrid = panel.querySelector('[data-location-copy="mgrs"]');
+  gps.value = info.gps;
+  grid.value = "";
+  grid.placeholder = "Loading…";
+  copyGrid.disabled = true;
+  panel.querySelector("[data-location-maps]").href = info.mapsUrl;
+  panel.classList.remove("hidden");
+  const canvas = editor.map.getCanvas();
+  const point = editor.map.project([location.lon, location.lat]);
+  panel.style.left = `${Math.max(12, Math.min(canvas.clientWidth - panel.offsetWidth - 12, point.x - panel.offsetWidth / 2))}px`;
+  panel.style.top = `${Math.max(12, Math.min(canvas.clientHeight - panel.offsetHeight - 12, point.y + 12))}px`;
+  panel.querySelector('[data-location-copy="gps"]').focus({preventScroll: true});
+  try {
+    const mgrs = await mgrsLibrary();
+    if (editor.location !== location) return;
+    grid.value = mapLocationInfo(location, mgrs).mgrs;
+    copyGrid.disabled = !grid.value;
+  } catch {
+    if (editor.location === location) grid.placeholder = "Unavailable";
+  }
 }
 
 function openMapTextComposer(editor) {
@@ -6546,8 +6609,8 @@ async function initializeWorkspace() {
     document.body.classList.add("all-teams-mode");
     $("roleLabel").textContent = "COMMAND";
     $("networkToggle").classList.add("hidden");
-    const {startAllTeamsView} = await import("./all-teams-view.js?v=20261125-1");
-    await startAllTeamsView({mapStyle: mapStyleDefinition, initialStyle: mapStyleMode, saveStyle: saveMapStylePreference, onMapReady: (map, Popup) => intelPacks.attachMap(map, {Popup})});
+    const {startAllTeamsView} = await import("./all-teams-view.js?v=20261126-1");
+    await startAllTeamsView({mapStyle: mapStyleDefinition, initialStyle: mapStyleMode, setStyle: toggleMapStyle, onMapReady: (map, Popup) => intelPacks.attachMap(map, {Popup})});
     return;
   }
   if (commandWorkspace && commandOverview) {

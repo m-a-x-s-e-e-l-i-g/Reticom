@@ -71,6 +71,57 @@ def test_malta_lidar_tiles_reproject_all_rows_and_only_fetch_inside_coverage(tmp
         assert [urlsplit(url).path for url in requests] == ["/wms/dtm_1m_2018/ows", "/wms/dsm_1m_2018/ows"]
 
 
+def test_malta_contours_use_numeric_elevation_and_fall_back_to_global_tiles(tmp_path, monkeypatch):
+    from io import BytesIO
+    from urllib.parse import parse_qs, urlsplit
+    from PIL import Image
+    from retium.lidar_tiles import malta_terrain_tile
+
+    def coverage(url, **options):
+        parts = urlsplit(url)
+        assert parts.path == "/dtm_1m_2018/ows"
+        subset = parse_qs(parts.query)["subset"]
+        (west, east), (south, north) = [map(float, axis[2:-1].split(",")) for axis in subset]
+        assert west < 454992.5 < east and south < 3972477.5 < north
+        raw = BytesIO()
+        Image.new("L", (288, 288), 37).save(raw, format="TIFF", tiffinfo={
+            33550: ((east - west) / 288, (north - south) / 288, 0.0),
+            33922: (0.0, 0.0, 0.0, west, north, 0.0),
+        })
+        return raw.getvalue()
+
+    class Terrain:
+        def tile_result(self, z, x, y):
+            assert (z, x, y) == (14, 8851, 6439)
+            image = BytesIO()
+            Image.new("RGB", (256, 256), (128, 19, 0)).save(image, format="PNG")
+            return {"data": image.getvalue(), "content_type": "image/png", "stale": False, "fetched_at": 1}
+
+    monkeypatch.setattr("retium.lidar_tiles.fetch_bytes", coverage)
+    store = IntelPackStore(tmp_path)
+    app = FastAPI()
+    app.include_router(intel_router(tmp_path, store=store, elevation=Terrain()))
+    url = "/api/intel-packs/elevation/tiles/17/70815/51517.png?malta=true"
+    with TestClient(app) as client:
+        assert client.get(url).status_code == 404
+        store.update({"enabled": ["elevation"]})
+        try:
+            regional = client.get(url)
+            assert regional.status_code == 200
+            with Image.open(BytesIO(regional.content)) as image:
+                assert image.getpixel((128, 128)) == (128, 37, 0)
+            def offline(*args):
+                raise OSError("Malta WCS unavailable")
+            monkeypatch.setattr("retium.intel_packs.malta_terrain_tile", offline)
+            fallback = client.get(url)
+            assert fallback.status_code == 200
+            assert fallback.headers["cache-control"] == "private, max-age=60"
+            with Image.open(BytesIO(fallback.content)) as image:
+                assert image.getpixel((128, 128)) == (128, 19, 0)
+        finally:
+            malta_terrain_tile.cache_clear()
+
+
 def collection(*coordinates):
     return {"type": "FeatureCollection", "features": [
         {"type": "Feature", "id": index, "geometry": {"type": "Point", "coordinates": list(point)}, "properties": {"title": "Public source fixture", "event_type": "WF"}}
@@ -552,6 +603,9 @@ def test_terrain_endpoints_recheck_disable_and_report_unavailability(setup_store
         store.update({"enabled": ["elevation"]})
         assert client.get("/api/intel-packs/elevation/tiles/99/0/0.png").status_code == 404
         assert client.get("/api/intel-packs/elevation/tiles/0/0/0.png").status_code == 404
+        relief = client.get("/api/intel-packs/elevation/tiles/7/10/10.png?relief=true")
+        assert relief.status_code == 200
+        assert relief.content == b"tile"
 
 
 def test_osm_shared_cooldown_survives_restart(setup_store, tmp_path):

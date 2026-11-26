@@ -1,10 +1,12 @@
 # Contour lines / elevation map feature
 
-Find this under **Map layers → Map & terrain → Contour lines**, alongside the base map and hiking controls. This replaces terrain shading with height lines, thicker major contours and labels such as **250 m** following the lines. The saved elevation toggle is preserved. Enabling/disabling the layer does not move, zoom or tilt the map.
+Find this under **Map layers → Map & terrain → Contour lines**, alongside the base map and hiking controls. This adds height lines, thicker major contours and labels such as **250 m** following the lines. Daylight and night hiking can show both terrain shading and contours. The saved contour setting is preserved. Enabling or disabling contours preserves the map view.
 
 Contours appear at zoom 9+. Minor/major intervals in metres are: zoom 9: 200/1000; 11: 100/500; 12: 50/250; 13: 20/100; 14: 10/50; 15+: 5/25. The panel reports the current minor interval. Major contours carry collision-aware metre labels, including negative heights below sea level; zoom 14+ also labels minor lines so flatter areas still have readable heights. Flat areas may have few or no contour crossings; that is not a download error. A 5 m interval does not imply 5 m accuracy.
 
-The DEM source is installed only after the enable setting is acknowledged by the server. This prevents optimistic toggles from sending tile requests while the endpoint still considers terrain disabled. Refresh, or reconnecting to the Internet, recreates the source so previously failed tiles can be retried; it does not move the camera.
+At zoom 16+ in Malta, Reticom uses 2 m minor and 10 m major contours from the Planning Authority’s 2018 1 m bare-earth LiDAR terrain model. Contours show ground and embankments. Built walls and roofs can be missing. Global Mapzen terrain fills in when the LiDAR service is unavailable. [Malta Planning Authority · CC BY 4.0](https://portal.data.gov.mt/dataset/digital-terrain-model-2018).
+
+The contour source is installed after the server acknowledges that contours are enabled. Hiking hillshade uses the same bounded local DEM cache independently of the contour setting. Previously fetched elevation tiles remain usable offline.
 
 The optional elevation feature adds contour lines and estimated terrain heights to the map. It uses real, public **Mapzen Terrain Tiles**, hosted through the AWS Open Data program. No account or API key is required. Tile requests reveal the area being viewed to the public tile host; they do not contain team messages or operator identities. [Dataset and access information](https://registry.opendata.aws/terrain-tiles/).
 

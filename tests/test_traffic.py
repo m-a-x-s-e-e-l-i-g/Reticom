@@ -148,11 +148,8 @@ def test_flights_use_short_cache_expire_stale_and_stop_after_disable(tmp_path):
 
 
 @pytest.mark.parametrize("failure, retry", [("quota", 300), ("timeout", 30), ("invalid", 30)])
-def test_aircraft_switches_to_opted_in_fallback_until_retry(tmp_path, monkeypatch, failure, retry):
+def test_aircraft_switches_to_opted_in_fallback_until_retry(tmp_path, failure, retry):
     from urllib.error import HTTPError
-    from retium import traffic as module
-
-    monkeypatch.setattr(module, "PERSONAL_FLIGHT_FALLBACK", True)
 
     async def scenario():
         now, calls = [NOW], []
@@ -168,9 +165,16 @@ def test_aircraft_switches_to_opted_in_fallback_until_retry(tmp_path, monkeypatc
             return {"now": now[0] * 1000, "ac": [aircraft()]}
 
         store = IntelPackStore(tmp_path)
-        store.update({"enabled": ["flights"]})
+        store.update({"enabled": ["flights"], "personal_flight_fallback": False})
         traffic = LiveTraffic(store, clock=lambda: now[0], flight_fetch=fetch)
         try:
+            if failure == "quota":
+                cooled = await traffic.load("flights", BOUNDS, 12, "map")
+                assert "enable the adsb.fi fallback" in cooled["error"]
+                assert calls == [flight_query(BOUNDS)]
+            store.update({"personal_flight_fallback": True})
+            assert IntelPackStore(tmp_path).personal_flight_fallback is True
+            await traffic.settings_changed()
             result = await traffic.load("flights", BOUNDS, 12, "map")
             assert result["features"][0]["properties"]["attribution"] == "adsb.fi"
             now[0] += 11

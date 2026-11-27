@@ -1,6 +1,7 @@
 import json
 import threading
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import RNS
@@ -60,6 +61,8 @@ def receiver(tmp_path):
     gateway.continuity = None
     gateway._live_lock = threading.RLock()
     gateway._live_links = set()
+    gateway.operator_reports = {}
+    gateway.host_operator = None
     gateway.store = SimpleNamespace(operators=lambda **kw: [{"sender_hash": "a"*32}])
     return gateway
 
@@ -118,6 +121,41 @@ def test_all_application_rpcs_fail_closed_even_for_identified_or_historical_oper
         assert response["membership_status"] == status
         assert "events" not in response and "audio" not in response and "tasks" not in response
     assert not gateway._known_private_identity("a"*32)
+
+
+def test_operator_status_is_scoped_to_authenticated_feeds_and_live_links(tmp_path, monkeypatch):
+    gateway = receiver(tmp_path)
+    member, outsider = RNS.Identity(), RNS.Identity()
+    sender = member.hash.hex()
+    gateway.membership.decide(sender, "approved", "FIELD")
+    gateway.feed_response = lambda: b'{"events":[]}'
+    gateway.private_store = None
+    link = Mock(status=RNS.Link.ACTIVE, **{"get_remote_identity.return_value": member})
+    gateway._live_links.add(link)
+
+    def feed(identity, data):
+        return json.loads(gateway._feed_request("/feed", data, b"x", b"l", identity, 0))
+
+    now = 100
+    monkeypatch.setattr("retium.transport.time.monotonic", lambda: now)
+    report = {"operator_status": {"audio": "muted", "location": "sharing", "sender_hash": outsider.hash.hex(), "linked": False}}
+    assert "operator_status" not in feed(outsider, report)
+    assert "operator_status" not in feed(member, {})
+    assert feed(member, report)["operator_status"] == {
+        sender: {"audio": "muted", "location": "sharing", "linked": True}
+    }
+    link.status = RNS.Link.CLOSED
+    assert gateway.operator_status_snapshot()[sender]["linked"] is False
+    now += 61
+    gateway._live_links.clear()
+    assert gateway.operator_status_snapshot() == {}
+
+    # A linked older client is visible, but it never claims audio or location settings.
+    link.status = RNS.Link.ACTIVE
+    gateway._live_links.add(link)
+    assert feed(member, {"operator_status": None})["operator_status"] == {sender: {"linked": True}}
+    gateway.membership.decide(sender, "revoked")
+    assert gateway.operator_status_snapshot() == {}
 
 
 def test_only_membership_request_is_available_to_unapproved_identity(tmp_path):

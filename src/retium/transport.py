@@ -29,6 +29,7 @@ ASPECTS = ("event", "ingress")
 TEAM_ANNOUNCE_KIND = "team"
 TEAM_ANNOUNCE_VERSION = 1
 TEAM_ANNOUNCE_MAX_AGE = 180
+OPERATOR_STATUS_TTL = 60
 LINK_EVENT_TYPES = {
     "team.joined",
     "profile.updated",
@@ -45,6 +46,15 @@ LINK_EVENT_TYPES = {
     "position.updated",
     "task.completed",
 }
+
+
+def parse_operator_status(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    audio, location = value.get("audio"), value.get("location")
+    if audio not in ("on", "muted", "blocked") or location not in ("sharing", "transmit", "off"):
+        return None
+    return {"audio": audio, "location": location}
 
 
 def _send_channel_message(
@@ -193,6 +203,8 @@ class GatewayReceiver:
         self.last_packet_at: int | None = None
         self._live_lock = threading.RLock()
         self._live_links: set[Any] = set()
+        self.operator_reports: dict[str, tuple[Any, float, dict[str, str]]] = {}
+        self.host_operator: tuple[str, dict[str, str]] | None = None
         self._live_streams: dict[str, dict[str, Any]] = {}
         self._live_assembler = LiveVoiceAssembler()
         self.headings = HeadingHub(self._emit_live, lambda: getattr(self, "continuity", None) is None or self.continuity.ready(), self.member_allowed)
@@ -218,10 +230,26 @@ class GatewayReceiver:
         if self.live_callback is not None:
             self.live_callback(frame)
 
+    def operator_status_snapshot(self) -> dict[str, dict[str, Any]]:
+        now = time.monotonic()
+        with self._live_lock:
+            linked = {link.get_remote_identity().hash.hex() for link in self._live_links_except()}
+            statuses: dict[str, dict[str, Any]] = {sender: {"linked": True} for sender in linked}
+            for sender, (identity, reported_at, status) in tuple(self.operator_reports.items()):
+                if now - reported_at >= OPERATOR_STATUS_TTL or not self.member_allowed(identity):
+                    self.operator_reports.pop(sender, None)
+                    continue
+                statuses[sender] = {**status, "linked": sender in linked}
+            if (host := self.host_operator) is not None:
+                sender, status = host
+                statuses[sender] = {**status, "linked": bool(linked)}
+            return statuses
+
     def _live_transport_state(self) -> None:
         with self._live_lock:
             peers = len(self._live_links)
-        self._emit_live({"type": "live.transport", "ready": peers > 0, "peers": peers})
+        self._emit_live({"type": "live.transport", "ready": peers > 0, "peers": peers,
+                         "operator_status": self.operator_status_snapshot()})
 
     def _link_established(self, link: Any) -> None:
         self.headings.attach(link)
@@ -234,6 +262,7 @@ class GatewayReceiver:
         self.headings.disconnected(link)
         ended: list[dict[str, Any]] = []
         with self._live_lock:
+            was_live = link in self._live_links
             self._live_links.discard(link)
             for stream_id, state in tuple(self._live_streams.items()):
                 if state.get("link") is link:
@@ -241,7 +270,8 @@ class GatewayReceiver:
                     ended.append({"type": "live.cancel", "stream_id": stream_id})
         for frame in ended:
             self._emit_live(frame)
-        self._live_transport_state()
+        if was_live:
+            self._live_transport_state()
 
     def _live_links_except(self, excluded: Any | None = None) -> list[Any]:
         with self._live_lock:
@@ -254,7 +284,10 @@ class GatewayReceiver:
 
     def _drop_live_link(self, link: Any) -> None:
         with self._live_lock:
-            self._live_links.discard(link)
+            if link not in self._live_links:
+                return
+            self._live_links.remove(link)
+        self._live_transport_state()
 
     def _broadcast_live_control(
         self,
@@ -605,6 +638,11 @@ class GatewayReceiver:
             return error
         if self.feed_response is None:
             return b'{"events":[]}'
+        wants_status = isinstance(data, dict) and "operator_status" in data
+        if wants_status and (status := parse_operator_status(data["operator_status"])) is not None:
+            assert remote_identity is not None
+            with self._live_lock:
+                self.operator_reports[remote_identity.hash.hex()] = (remote_identity, time.monotonic(), status)
         try:
             if isinstance(data, dict) and "mission" in data and getattr(self, "mission_response", None):
                 def build_mission():
@@ -612,6 +650,8 @@ class GatewayReceiver:
                     payload["private_events"] = self.private_store.recent(remote_identity.hash.hex(), since=self.team_created_at) if self.private_store is not None else []
                     return payload
                 payload = self.missions.page(remote_identity.hash.hex(), data["mission"], build_mission)
+                if wants_status:
+                    payload["operator_status"] = self.operator_status_snapshot()
                 return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             payload = json.loads(self.feed_response().decode("utf-8"))
             if not isinstance(payload, dict):
@@ -624,6 +664,8 @@ class GatewayReceiver:
                 if self.private_store is not None
                 else []
             )
+            if wants_status:
+                payload["operator_status"] = self.operator_status_snapshot()
             return json.dumps(
                 payload, ensure_ascii=False, separators=(",", ":")
             ).encode("utf-8")
@@ -1719,10 +1761,13 @@ class FieldSender:
             raise PermissionError(str(payload["error"]))
         return payload
 
-    def request_feed(self, timeout: float = 15.0, mission: dict | None = None) -> dict[str, Any]:
+    def request_feed(self, timeout: float = 15.0, mission: dict | None = None, *, operator_status: dict[str, str] | None = None) -> dict[str, Any]:
+        request = {"operator_status": operator_status}
+        if mission is not None:
+            request["mission"] = mission
         with self._send_lock:
             response, response_time = self._identified_request(
-                "/feed", {"mission": mission} if mission is not None else b"", timeout=timeout, max_response_size=256_000
+                "/feed", request, timeout=timeout, max_response_size=256_000
             )
             payload = self._json_response(response, "feed")
             payload["network"] = {

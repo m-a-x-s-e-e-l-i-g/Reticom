@@ -7,8 +7,8 @@
   <title>Reticom</title>
   <link rel="icon" href="/favicon.ico?v=20260908-1" sizes="any">
   <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css?v=6.6.0">
-  <link rel="stylesheet" href="/styles.css?v=20261126-4">
-  <link rel="stylesheet" href="/intel-packs.css?v=20261125-10">
+  <link rel="stylesheet" href="/styles.css?v=20261127-2">
+  <link rel="stylesheet" href="/intel-packs.css?v=20261126-1">
   <link rel="stylesheet" href="/command-workspace.css?v=20261125-1">
 </head>
 <body>
@@ -122,7 +122,7 @@
   <aside id="userSettingsPanel" class="settings-panel hidden" aria-label="User settings">
     <div class="settings-head"><div><span class="eyebrow">USER SETTINGS</span><h2>Field identity</h2></div><button id="closeUserSettings" class="text-button">CLOSE</button></div>
     <button type="button" class="secondary compact" data-open-continuity>TEAM CONTINUITY</button>
-    <label>CALLSIGN<input id="settingsCallsign" maxlength="24" autocomplete="nickname"></label>
+    <label>CALLSIGN<input id="settingsCallsign" maxlength="24" autocomplete="nickname" autocapitalize="characters"></label>
     <fieldset class="icon-picker">
       <legend>CALLSIGN ICON</legend>
       <button type="button" data-icon="dot" aria-label="Dot icon"><span>●</span><small>DOT</small></button>
@@ -426,7 +426,7 @@
       <span class="eyebrow">FIELD</span>
       <h1>Join or create a team</h1>
       <p>Join an existing Reticulum team, or host a new one directly on this device.</p>
-      <label>Callsign<input id="joinCallsign" maxlength="24" value="FIELD-1"></label>
+      <label>Callsign<input id="joinCallsign" maxlength="24" autocapitalize="characters" value="FIELD-1"></label>
       <label>Join code<input id="joinCodeInput" maxlength="48" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="RTM1-…"></label>
       <div class="join-actions">
         <button id="joinTeam">Join team <span aria-hidden="true">→</span></button>
@@ -596,6 +596,6 @@
   </nav>
 
   <div id="toast" class="toast" role="status"></div>
-  <script type="module" src="/app.js?v=20261126-10"></script>
+  <script type="module" src="/app.js?v=20261127-4"></script>
 </body>
 </html>

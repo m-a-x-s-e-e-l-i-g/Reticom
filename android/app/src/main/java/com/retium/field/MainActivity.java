@@ -375,16 +375,18 @@ public final class MainActivity extends Activity {
         container.setBackgroundColor(Color.rgb(9, 13, 10));
         container.setOnApplyWindowInsetsListener((view, windowInsets) -> {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                Insets bars = windowInsets.getInsets(WindowInsets.Type.systemBars());
-                view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-            } else {
-                view.setPadding(
-                        windowInsets.getSystemWindowInsetLeft(),
-                        windowInsets.getSystemWindowInsetTop(),
-                        windowInsets.getSystemWindowInsetRight(),
-                        windowInsets.getSystemWindowInsetBottom()
-                );
+                int handled = WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout();
+                Insets padding = windowInsets.getInsets(handled);
+                view.setPadding(padding.left, padding.top, padding.right, padding.bottom);
+                // The container already applied these insets. Keep IME updates flowing to WebView.
+                return new WindowInsets.Builder(windowInsets).setInsets(handled, Insets.NONE).build();
             }
+            view.setPadding(
+                    windowInsets.getSystemWindowInsetLeft(),
+                    windowInsets.getSystemWindowInsetTop(),
+                    windowInsets.getSystemWindowInsetRight(),
+                    windowInsets.getSystemWindowInsetBottom()
+            );
             return windowInsets;
         });
         container.addView(

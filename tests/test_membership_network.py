@@ -12,6 +12,10 @@ from test_continuity_network import port, eventually
 
 @pytest.mark.skipif(os.environ.get("RETICOM_NETWORK_TESTS") != "1", reason="explicit real-network integration test")
 def test_real_membership_queue_admission_and_revocation(tmp_path):
+    import json
+
+    from websockets.sync.client import connect
+
     script = str(Path(__file__).with_name("test_continuity_network.py"))
     processes, logs = [], []
     tcp, host_port, phone_port = port(), port(), port()
@@ -50,10 +54,19 @@ def test_real_membership_queue_admission_and_revocation(tmp_path):
         eventually(lambda:api(phone_port,"/api/state")["team"]["membership_status"]=="approved")
         eventually(lambda:any(e["id"]==queued["id"] for e in api(host_port,"/api/state")["events"]))
         eventually(lambda:any(e["id"]==secret["id"] for e in api(phone_port,"/api/feed")["events"]))
+        with connect(f"ws://127.0.0.1:{phone_port}/api/voice/live", close_timeout=3) as voice:
+            ready = json.loads(voice.recv(timeout=20))
+            assert ready["type"] == "live.transport" and ready["ready"]
+            voice.send(json.dumps({"action": "operator.status", "audio": "muted", "location": "sharing"}))
+            expected = {"linked": True, "audio": "muted", "location": "sharing"}
+            eventually(lambda: api(phone_port, "/api/feed")["operator_status"].get(key) == expected)
+            assert api(host_port, "/api/state")["operator_status"][key] == expected
+        eventually(lambda: api(host_port, "/api/state")["operator_status"].get(key, {}).get("linked") is False)
         api(host_port,"/api/team/members",{"identity":key,"status":"revoked"})
         later=api(host_port,"/api/send",{"type":"chat.message","message":"After revocation"})["event"]
         assert not any(e["id"]==later["id"] for e in api(phone_port,"/api/feed")["events"])
         eventually(lambda:api(phone_port,"/api/state")["team"]["membership_status"]=="revoked")
+        assert key not in api(host_port, "/api/state")["operator_status"]
         api(host_port,"/api/team/members",{"identity":key,"status":"removed"})
         assert not any(m["identity"] == key for m in api(host_port,"/api/team/members")["members"])
         state = api(host_port,"/api/state")

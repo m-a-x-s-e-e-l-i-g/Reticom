@@ -108,7 +108,7 @@ def test_shared_route_survives_late_join_and_offline_stop(tmp_path):
             "callsign": "Reporter", "network": {"sender_hash": sender}}, "PUT")
         assert other["plan"]["sender_hash"] == late_sender
         assert other["event"]["revision"] < 999_999_999
-        assert other["event"]["callsign"] == "Late joiner"
+        assert other["event"]["callsign"] == "LATE JOINER"
         assert other["event"]["route_id"] != sent["event"]["route_id"]
         api(late, "/api/navigation", method="DELETE")
         eventually(lambda: (value := plan(host, late_sender)) and not value["active"])

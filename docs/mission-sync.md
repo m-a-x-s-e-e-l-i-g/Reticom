@@ -7,7 +7,7 @@ catch-up without leaving the team or clearing local work.
 ## Contents and limits
 
 - All visible markers and drawings, after resolving authorized deletion and
-  report-status events. Map objects are not subject to the recent-intel limit.
+  legacy report-status events. Map objects are not subject to the recent-intel limit.
 - Latest profile per operator, up to 20 position events per operator, and the
   latest 100 other intel events. This is current mission state, not a full archive.
 - Current tasks when enabled, team name/modules/admin mode, and only the requesting

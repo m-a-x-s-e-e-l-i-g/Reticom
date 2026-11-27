@@ -314,7 +314,7 @@ class SpeechMarkerProcessor:
                 event = new_event("marker.created", callsign, lat=lat, lon=lon,
                     marker_type=marker["marker_type"], label=marker["label"],
                     description=("AI from " + source.get("callsign", "operator") + ": " + text)[:160],
-                    source_report_id=source["id"], report_status="reported", expires_at=expires_at)
+                    source_report_id=source["id"], expires_at=expires_at)
                 event["id"] = event_id
                 if not any(e["id"] == event_id for e in events):
                     publish(event)

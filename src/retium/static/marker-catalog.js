@@ -61,15 +61,10 @@ export function tacticalMarkerGroups() {
   return order.map(label => ({label, markers: groups.get(label) || []}));
 }
 
-export const REPORT_STATUS_LABELS = {reported: "Unconfirmed", confirmed: "Confirmed", cleared: "Cleared"};
-
 export function reportProperties(event) {
   if (event.type !== "marker.created" || ["waypoint", "text"].includes(event.marker_type)) return {};
-  const status = event.report_view?.status || event.report_status || "reported";
-  return {reportStatus: status, reportDescription: event.description || "",
-    reportUrgent: event.urgent === true && status !== "cleared", reportedAt: event.created_at,
-    reportUpdatedBy: event.report_view?.updated_by || "", reportUpdatedAt: event.report_view?.updated_at || 0,
-    reportUpdateQueued: event.report_view?.queued === true,
-    reportRevision: event.report_view?.revision || 0,
-    ...(status === "cleared" ? {markerColor: "#59615c", symbol: "✓", label: `${event.label} · cleared`} : {})};
+  const legacyCleared = (event.report_view?.status || event.report_status) === "cleared";
+  return {isMapReport: true, reportDescription: event.description || "", reportUrgent: event.urgent === true && !legacyCleared,
+    reportedAt: event.created_at,
+    ...(legacyCleared ? {markerColor: "#59615c", symbol: "✓", label: `${event.label} · cleared`} : {})};
 }

@@ -6,7 +6,7 @@ import {lidarLayers, lidarModeLabel, lidarModeForProvider, lidarProviderForBound
 import {environmentLayers, environmentSource, environmentTileUrl, ENVIRONMENT_RASTER_IDS, ENVIRONMENT_RASTERS, ENVIRONMENT_MIN_ZOOM} from "./environment-layers.js?v=20261126-1";
 import {TRAFFIC_IDS, TRAFFIC_TYPES, normalizeTrafficFilters, trafficDisplayData, installTrafficIcons, installTransitIcons, trafficLayers} from "./traffic-map.js?v=20261125-3";
 import {TrafficMotion, createTrafficAnimator} from "./traffic-motion.js?v=20260909-3";
-import {TrafficTracks, trafficKey, showTrafficTrack, showTrafficEstimate, clearTrafficTrack, transitRouteFeature} from "./traffic-tracks.js?v=20261125-3";
+import {TrafficTracks, trafficKey, showTrafficTrack, showTrafficEstimate, clearTrafficTrack, trafficRouteBounds, transitRouteFeature} from "./traffic-tracks.js?v=20261125-3";
 import {retainTraffic} from "./traffic-cache.js?v=20260909-3";
 import {retainIntel} from "./intel-cache.js?v=20260909-4";
 import {DRIVING_ROAD_TYPES, roadDisplayData, retainRoads, roadLayers, ROAD_IMPACTS, ROAD_TYPES, normalizeRoadFilters, filterRoadReports} from "./road-disruptions.js?v=20261126-1";
@@ -22,8 +22,6 @@ const ACCESS = {
   aisstream_key: {pack: "vessels", title: "AISStream API key", url: "https://aisstream.io/", link: "Create an AISStream key / check access terms"},
   aishub_key: {pack: "vessels", title: "AISHub contributor key", url: "https://www.aishub.net/join-us", link: "AISHub contributor access"},
   bravoecho_key: {pack: "notams", title: "BravoEcho API key", url: "https://bravoecho.ai/docs/getting-a-key", link: "Get a BravoEcho API key"},
-  host_bravoecho_key: {pack: "notams", title: "Set up BravoEcho on the team host", url: "https://bravoecho.ai/docs/getting-a-key", link: "Get a BravoEcho API key"},
-  host_firms_key: {pack: "firms", title: "Set up NASA FIRMS on the team host", url: "https://firms.modaps.eosdis.nasa.gov/api/map_key/", link: "Get a NASA FIRMS map key"},
 };
 const SHARED_LAYERS = ["notams", "firms"];
 const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[char]);
@@ -181,7 +179,8 @@ export function intelStatusText(pack, result) {
 export function intelLayerWarning(pack, result) {
   if (!pack.enabled) return "";
   const hostAccess = pack.host_access || pack.host_notams;
-  if (hostAccess && result?.status === "needs_key") return `The team host needs a ${pack.source} key`;
+  if (hostAccess && result?.status === "disabled") return result.error || "The team host has turned off provider sharing.";
+  if (hostAccess && result?.status === "needs_key") return "This layer is unavailable from the team host.";
   if (hostAccess && result?.status === "waiting") return "Waiting for data from the team host";
   if (hostAccess && result?.truncated) return "Team host result limit reached. Zoom in for more data.";
   if (pack.configured === false || result?.status === "needs_key") return "Source access needed below";
@@ -572,6 +571,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       </section>
       <h3 class="intel-section-title">Public layers</h3>
       <p class="intel-packs-privacy">Public layers share the viewed area with their providers. Your settings and access keys stay on this device.</p>
+      <section class="intel-pack-row hidden" data-provider-sharing>
+        <label class="intel-pack-switch"><span><strong>Share provider access</strong><small>Approved members of teams hosted here can use your NOTAM and NASA FIRMS access.</small></span><input type="checkbox" role="switch" data-share-provider-access/><i aria-hidden="true"></i></label>
+      </section>
       <div class="intel-pack-list"></div>
       <p class="intel-packs-notice" role="status"></p>
       <div class="intel-packs-actions"><button type="button" data-intel-refresh>Refresh this view</button></div>
@@ -586,6 +588,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     listen(panel, "change", event => {
       const id = event.target?.dataset?.intelPack;
       if (id) void setEnabled(id, event.target.checked);
+      if (event.target?.matches?.("[data-share-provider-access]")) void save({share_provider_access: event.target.checked});
       if (event.target?.matches?.("[data-flights-fallback]")) void save({personal_flight_fallback: event.target.checked});
       if (event.target?.matches?.("[data-ahn-mode]")) void setAhnMode(event.target.value);
       if (event.target?.matches?.("[data-firms-days]")) void setFirmsDays(Number(event.target.value));
@@ -604,7 +607,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       if (ACCESS[key]) {
         const value = target.value;
         credentialDrafts.set(key, value);
-        if (!key.startsWith("host_")) scheduleAutosave(`credential:${key}`, () => updateCredentials({[key]: value.trim()}), delay);
+        scheduleAutosave(`credential:${key}`, () => updateCredentials({[key]: value.trim()}), delay);
       }
       const form = target?.closest?.("[data-traffic-form]");
       const id = form?.dataset?.trafficForm;
@@ -622,9 +625,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     listen(panel, "submit", event => {
       if (!event.target?.matches?.("[data-traffic-form], [data-intel-access-form]")) return;
       event.preventDefault();
-      const input = event.target.querySelector("input");
-      if (input.name.startsWith("host_")) void updateCredentials({[input.name]: input.value.trim()});
-      else saveField(input, 0);
+      saveField(event.target.querySelector("input"), 0);
     });
     listen(panel, "click", event => {
       const key = event.target?.closest?.("[data-intel-clear]")?.dataset?.intelClear;
@@ -673,11 +674,9 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     panel?.querySelector('[data-pack-row="notams"]')?.insertAdjacentHTML("beforeend", `<label class="intel-firms-window">NOTAM view<select name="notam-view" data-notam-view><option value="local">Local activity</option><option value="all">All notices</option></select></label><small class="intel-pack-download-note">Active now or starting within one hour</small><details class="intel-disaster-filter" data-notam-filter ${notamOpen ? "open" : ""}><summary>NOTAM categories <span data-notam-summary></span></summary><div class="intel-disaster-grid">${notamOptions().map(([id, label]) => `<label><input type="checkbox" data-notam-category="${escape(id)}"/><span>${escape(label)}</span></label>`).join("")}</div></details>`);
     panel?.querySelector('[data-pack-row="roads"]')?.insertAdjacentHTML("beforeend", `<details class="intel-disaster-filter" data-road-filter ${roadOpen ? "open" : ""}><summary>Filters · report type & impact</summary>${[["types", "Report types", ROAD_TYPES], ["impacts", "Impact", ROAD_IMPACTS]].map(([group, title, choices]) => `<fieldset><legend>${title}</legend><div class="intel-disaster-grid">${Object.entries(choices).map(([value, label]) => `<label><input type="checkbox" data-road-group="${group}" data-road-value="${value}"/><span>${escape(label)}</span></label>`).join("")}</div></fieldset>`).join("")}<p>Vehicle obstructions are off initially. Filters change the map; navigation still checks full closures while this layer is enabled.</p></details>`);
     for (const [key, field] of Object.entries(ACCESS)) {
-      const hostKey = key.startsWith("host_");
       const pack = packById(field.pack);
-      if (hostKey && !pack?.can_provide_host_key) continue;
-      const title = !hostKey && (pack?.host_access || pack?.host_notams) ? `${field.title} on this device` : field.title;
-      panel?.querySelector(`[data-pack-row="${field.pack}"]`)?.insertAdjacentHTML("beforeend", `<details class="intel-access-section" data-intel-access="${key}" ${accessOpen.includes(key) ? "open" : ""}><summary>${title}</summary><form class="intel-access-field" data-intel-access-form="${key}"><label for="intel-${key}">${title}</label><div class="intel-access-input"><input id="intel-${key}" name="${key}" type="password" autocomplete="off" spellcheck="false" maxlength="8192" value="${escape(credentialDrafts.get(key) || "")}" placeholder="Paste ${escape(field.title)}"/></div><div class="intel-access-links"><a href="${field.url}" target="_blank" rel="noopener noreferrer">${field.link} ↗</a>${hostKey ? '<button type="submit">Save on host</button>' : `<button type="button" data-intel-clear="${key}">Remove saved key</button>`}</div></form></details>`);
+      const title = (pack?.host_access || pack?.host_notams) ? `${field.title} on this device` : field.title;
+      panel?.querySelector(`[data-pack-row="${field.pack}"]`)?.insertAdjacentHTML("beforeend", `<details class="intel-access-section" data-intel-access="${key}" ${accessOpen.includes(key) ? "open" : ""}><summary>${title}</summary><form class="intel-access-field" data-intel-access-form="${key}"><label for="intel-${key}">${title}</label><div class="intel-access-input"><input id="intel-${key}" name="${key}" type="password" autocomplete="off" spellcheck="false" maxlength="8192" value="${escape(credentialDrafts.get(key) || "")}" placeholder="Paste ${escape(field.title)}"/></div><div class="intel-access-links"><a href="${field.url}" target="_blank" rel="noopener noreferrer">${field.link} ↗</a><button type="button" data-intel-clear="${key}">Remove saved key</button></div></form></details>`);
     }
     const mapFeatures = panel?.querySelector("[data-map-features]");
     if (mapFeatures) {
@@ -770,6 +769,12 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       const note = panel.querySelector(`[data-intel-note="${pack.id}"]`);
       if (note) note.textContent = pack.id === "roads" && drivingRoads ? "Closures and obstructions are enabled during driving navigation." : "";
     }
+    const sharing = panel.querySelector("[data-share-provider-access]");
+    if (sharing) {
+      panel.querySelector("[data-provider-sharing]").classList.toggle("hidden", !catalogue.can_manage_provider_sharing);
+      if (!saving) sharing.checked = catalogue.settings?.share_provider_access === true;
+      sharing.disabled = saving;
+    }
     panel.querySelector(".intel-packs-notice").textContent = notice;
     for (const [key, field] of Object.entries(ACCESS)) {
       const configured = Boolean(catalogue.credentials?.[key]);
@@ -849,11 +854,11 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     try {
       const value = await request("/api/intel-packs/settings", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
       if (destroyed) return false;
-      notice = body.credentials ? Object.keys(body.credentials).some(key => key.startsWith("host_")) ? "Source access saved on the team host." : "Source access saved on this device." : "";
+      notice = body.credentials ? "Source access saved on this device." : "";
       if (body.credentials) for (const key of Object.keys(body.credentials)) {
-        if (key.startsWith("host_") || credentialDrafts.get(key)?.trim() === body.credentials[key]) credentialDrafts.delete(key);
+        if (credentialDrafts.get(key)?.trim() === body.credentials[key]) credentialDrafts.delete(key);
       }
-      const displayOnly = Boolean(body.notam_categories || body.notam_view);
+      const displayOnly = Boolean(body.notam_categories || body.notam_view || Object.hasOwn(body, "share_provider_access"));
       if (!displayOnly) results.clear();
       applyCatalogue(value, !displayOnly);
       return true;
@@ -1126,13 +1131,15 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
 
   function mapRequestBounds(context, id) {
     const bounds = context.map.getBounds();
-    if (id !== "transit" || context.selectedTraffic?.pack !== "transit" || !context.selectedTraffic.following) return bounds;
+    if (context.selectedTraffic?.pack !== id || !context.selectedTraffic.following) return bounds;
     const boxes = intelViewportBoxes(bounds);
-    if (boxes.length !== 1) return bounds;
-    const {west, south, east, north} = boxes[0];
-    // Keep fast vehicles in the query when the camera is zoomed to street level.
-    const x = Math.max(0, (.08 - (east - west)) / 2);
-    const y = Math.max(0, (.08 - (north - south)) / 2);
+    if (!boxes.length) return bounds;
+    const {west, south, north} = boxes[0];
+    const east = boxes.length === 2 ? boxes[1].east + 360 : boxes[0].east;
+    // Allow a followed target to travel between polls at street-level zoom.
+    const span = id === "flights" ? .2 : .08;
+    const x = Math.max(0, (span - (east - west)) / 2);
+    const y = Math.max(0, (span - (north - south)) / 2);
     return {west: west - x, east: east + x, south: south - y, north: north + y};
   }
 
@@ -1203,7 +1210,8 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
           context.trafficRegions.set(pack.id, requestedUrls);
           context.rejectedTrafficViews.delete(pack.id);
         }
-        let data = mergeIntelResults(parts);
+        const hostAccessLost = (pack.host_access || pack.host_notams) && parts.find(part => ["disabled", "needs_key"].includes(part.status));
+        let data = mergeIntelResults(hostAccessLost ? [hostAccessLost] : parts);
         if (pack.id === "military") {
           data.basemap_fallback = !data.worldwide_snapshot && (!data.features.length || data.coverage_complete === false || data.status === "stale");
           if (data.basemap_fallback && map.getSource("offline")) {
@@ -1213,7 +1221,8 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
         const previous = context.data.get(pack.id);
         if (traffic) data = retainTraffic(previous, data);
         else if (pack.id === "roads") data = retainRoads(previous, data);
-        else if (!["notams", "transit"].includes(pack.id)) data = retainIntel(previous, data, requestedBoxes);
+        else if (!hostAccessLost && !["notams", "transit"].includes(pack.id)) data = retainIntel(previous, data, requestedBoxes);
+        if (hostAccessLost && context.popupPack === pack.id) context.popup?.remove();
         results.set(pack.id, visibleData(pack.id, data));
         context.data.set(pack.id, data);
         if (pack.id === "transit") updateCredit(context);
@@ -1303,15 +1312,46 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     if (context.selectedTraffic?.pack === pack && context.selectedTraffic.key === identity) updateTrafficTrack(context);
   }
 
-  function followTraffic(context, feature) {
-    const {map, selectedTraffic: selected} = context;
-    if (!selected?.following || !feature || map.isMoving?.() || !isVisible(context)) return;
+  function centerTraffic(map, feature, recenter = false) {
     const [lng, lat] = feature.geometry.coordinates;
     const current = map.getCenter();
     const center = [lng + 360 * Math.round((current.lng - lng) / 360), lat];
     const offset = map.project(center).dist(map.project(current));
-    if (offset >= 6 || (selected.recenter && offset > 0)) map.jumpTo({center}, {trafficFollow: true});
+    if (offset >= 6 || (recenter && offset > 0)) map.jumpTo({center}, {trafficFollow: true});
+  }
+
+  function followTraffic(context, feature) {
+    const {map, selectedTraffic: selected} = context;
+    if (!selected?.following || !feature || map.isMoving?.() || !isVisible(context)) return;
+    centerTraffic(map, feature, selected.recenter);
     selected.recenter = false;
+  }
+
+  function setTrafficFollow(context, following) {
+    const selected = context.selectedTraffic;
+    if (!selected) return;
+    selected.following = following;
+    selected.recenter = following;
+    if (context.followButton) {
+      context.followButton.textContent = following ? "Pause follow" : "Resume follow";
+      context.followButton.dataset.following = String(following);
+    }
+  }
+
+  function showTrafficPath(context) {
+    const selected = context.selectedTraffic;
+    if (!selected?.routeData) return;
+    const bounds = trafficRouteBounds(selected.routeData, selected.feature.geometry.coordinates);
+    if (!bounds) return;
+    const map = context.map;
+    const middle = (bounds[0][0] + bounds[1][0]) / 2;
+    const shift = 360 * Math.round((map.getCenter().lng - middle) / 360);
+    const bottom = Math.min(context.drawer.offsetHeight + 40, map.getContainer().clientHeight / 2);
+    setTrafficFollow(context, false);
+    map.fitBounds(bounds.map(([lng, lat]) => [lng + shift, lat]), {
+      padding: {top: 32, right: 32, bottom, left: 32},
+      maxZoom: 16, duration: motionPreference?.matches ? 0 : 350,
+    });
   }
 
   function closeTrafficDrawer(context) {
@@ -1359,11 +1399,16 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       route.label = selected.tripRoute ? `${selected.routeLabel} · Transitous` : route.count > 1 ? "Recent reported path" : "Waiting for route or position reports";
       selected.vehicleTrip = selected.feature.properties.vehicle_trip;
     }
+    selected.routeData = route.data;
     showTrafficTrack(context.map, route.data);
     showTrafficEstimate(context.map, feature);
     if (context.drawer) {
       context.drawer.hidden = false;
       context.followButton.textContent = selected.following ? "Pause follow" : "Resume follow";
+      context.followButton.dataset.following = String(selected.following);
+      context.trackButton.disabled = !route.data.features.length;
+      context.trackButton.textContent = selected.tripRoute ? "Show route" : "Show track";
+      context.centerButton.title = feature ? "Center on the selected target" : "Center on the last position";
       replaceTrafficDetails(context.drawerBody, intelFeatureHtml(trafficDetailFeature(context, feature || selected.feature, selected.pack,
         {track_label: route.label, position_pending: !feature}), pack, results.get(selected.pack)));
     }
@@ -1421,14 +1466,30 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
       context.drawer.className = "intel-traffic-drawer";
       context.drawer.setAttribute("aria-label", "Traffic details");
       context.drawer.hidden = true;
-      context.drawer.innerHTML = `<div class="intel-traffic-drawer-body"></div><div class="intel-traffic-drawer-actions"><button type="button" data-traffic-follow>Pause follow</button><button type="button" data-traffic-close aria-label="Close traffic details">×</button></div>`;
+      context.drawer.innerHTML = `<div class="intel-traffic-drawer-body"></div>
+        <div class="intel-traffic-drawer-actions" role="group" aria-label="Traffic navigation">
+          <button type="button" data-traffic-follow>Pause follow</button>
+          <button type="button" data-traffic-center>Center</button>
+          <button type="button" data-traffic-track disabled>Show track</button>
+          <button type="button" data-traffic-close aria-label="Close traffic details">×</button>
+        </div>`;
       context.drawerBody = context.drawer.querySelector(".intel-traffic-drawer-body");
       context.followButton = context.drawer.querySelector("[data-traffic-follow]");
+      context.centerButton = context.drawer.querySelector("[data-traffic-center]");
+      context.trackButton = context.drawer.querySelector("[data-traffic-track]");
+      context.centerButton.addEventListener("click", () => {
+        const selected = context.selectedTraffic;
+        if (!selected) return;
+        const data = context.data.get(selected.pack) || EMPTY();
+        const displayed = animatedData(context, selected.pack, data).data.features.find(item => trafficKey(item) === selected.key);
+        centerTraffic(map, displayed || selected.feature, true);
+        schedule(context, 0);
+      });
+      context.trackButton.addEventListener("click", () => showTrafficPath(context));
       context.followButton.addEventListener("click", () => {
         const selected = context.selectedTraffic;
         if (!selected) return;
-        selected.following = !selected.following;
-        selected.recenter = selected.following;
+        setTrafficFollow(context, !selected.following);
         updateTrafficTrack(context);
       });
       context.drawer.querySelector("[data-traffic-close]").addEventListener("click", () => closeTrafficDrawer(context));
@@ -1441,11 +1502,7 @@ export function createIntelPacks({button = null, panel = null, fetchImpl = globa
     }
     context.onStyle = () => { invalidate(context); syncLayers(context); schedule(context, 0); };
     context.onMove = event => { if (!event?.trafficFollow) schedule(context); };
-    context.onDrag = () => {
-      if (!context.selectedTraffic?.following) return;
-      context.selectedTraffic.following = false;
-      if (context.followButton) context.followButton.textContent = "Resume follow";
-    };
+    context.onDrag = () => setTrafficFollow(context, false);
     // A map may attach before its style is parsed. Idle is only a fallback for that
     // initial case; continuously streaming team data must not block public requests.
     context.onIdle = () => {

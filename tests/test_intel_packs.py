@@ -207,9 +207,8 @@ def test_shared_layers_use_host_cache_even_when_host_map_layer_is_off(tmp_path, 
 
     store = IntelPackStore(tmp_path, loader=loader)
     assert store.shared_view(pack, BBOX, 10, days)["status"] == "needs_key"
-    store.provide_shared_key(pack, key)
-    with pytest.raises(ValueError, match="already configured"):
-        store.provide_shared_key(pack, "replacement")
+    field = "bravoecho_key" if pack == "notams" else "firms_key"
+    store.update({"credentials": {field: key}})
     assert store.load(pack, BBOX, 10)["status"] == "disabled"
     assert store.shared_view(pack, BBOX, 10, days)["status"] == "waiting"
     try:
@@ -223,6 +222,14 @@ def test_shared_layers_use_host_cache_even_when_host_map_layer_is_off(tmp_path, 
     assert result["status"] == "cached"
     assert store.shared_view(pack, BBOX, 10, days)["features"] == result["features"]
     assert key not in json.dumps(result)
+    store.update({"share_provider_access": False, "enabled": [pack], "firms_days": days or 3})
+    blocked = store.shared_view(pack, BBOX, 10, days)
+    assert blocked["status"] == "disabled" and blocked["features"] == []
+    assert "turned off" in blocked["error"]
+    assert store.load(pack, BBOX, 10)["status"] == "cached"
+    assert IntelPackStore(tmp_path).share_provider_access is False
+    store.update({"share_provider_access": True})
+    assert store.shared_view(pack, BBOX, 10, days)["status"] == "cached"
     assert calls == [(pack, {"firms_days": days} if days else {})]
 
 
@@ -232,12 +239,12 @@ def test_field_layers_use_team_host_without_saving_a_local_key(tmp_path, monkeyp
     from fastapi.testclient import TestClient
     from retium import intel_packs
 
-    host = (object(), "team-destination", False)
+    host = (object(), "team-destination")
     calls = []
 
     def request(remote, pack_id, data):
         calls.append((remote, pack_id, data))
-        return {"configured": True} if "key" in data else {pack_id: {**collection(), "status": "cached"}}
+        return {pack_id: {**collection(), "status": "cached"}}
 
     monkeypatch.setattr(intel_packs, "request_host_intel", request)
     app = FastAPI()
@@ -249,17 +256,32 @@ def test_field_layers_use_team_host_without_saving_a_local_key(tmp_path, monkeyp
         assert next(item for item in saved["packs"] if item["id"] == pack)["host_access"] is True
         assert saved["credentials"][field] is False
         payload = {"credentials": {f"host_{field}": "fixture-host-token"}}
-        assert client.patch(root + "/settings", json=payload).status_code == 403
+        assert client.patch(root + "/settings", json=payload).status_code == 422
+        assert client.patch(root + "/settings", json={"share_provider_access": False}).status_code == 403
+        assert saved["can_manage_provider_sharing"] is False
         assert not calls
         view = client.get(root + "/" + pack, params=dict(zip(("west", "south", "east", "north", "zoom"), [*BBOX, 10])))
         assert view.json()["status"] == "cached"
         assert calls[0] == (host, pack, {"bounds": list(BBOX), "zoom": 10, **({"firms_days": 7} if pack == "firms" else {})})
-        host = (*host[:2], True)
-        response = client.patch(root + "/settings", json=payload)
-        assert response.status_code == 200
-        assert calls[-1] == (host, pack, {"key": "fixture-host-token"})
-        assert "fixture-host-token" not in response.text
         assert router.store.catalogue()["credentials"][field] is False
+
+
+def test_only_the_local_host_can_change_provider_sharing(tmp_path):
+    app = FastAPI()
+    app.include_router(intel_router(tmp_path, local_request=lambda request: request.client.host == "127.0.0.1",
+                                    can_manage_sharing=lambda request: True))
+    url = "/api/intel-packs"
+    update = {"share_provider_access": False}
+    with TestClient(app) as remote:
+        assert remote.get(url).json()["can_manage_provider_sharing"] is False
+        assert remote.patch(url + "/settings", json=update).status_code == 403
+    with TestClient(app, client=("127.0.0.1", 54321)) as host:
+        catalogue = host.get(url).json()
+        assert catalogue["can_manage_provider_sharing"] is True
+        assert catalogue["settings"]["share_provider_access"] is True
+        assert host.patch(url + "/settings", json=update, headers={"Origin": "https://example.com"}).status_code == 403
+        assert host.patch(url + "/settings", json={"share_provider_access": "false"}).status_code == 422
+        assert host.patch(url + "/settings", json=update).json()["settings"]["share_provider_access"] is False
 
 
 def test_gdacs_filter_defaults_are_backward_compatible_and_persist(tmp_path):

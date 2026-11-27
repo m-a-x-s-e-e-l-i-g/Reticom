@@ -239,7 +239,13 @@ def create_command_app(config_dir: Path, data_dir: Path, factory: Callable, loca
             return team.state.intel_host()
         return None
 
-    public_intel = intel_router(data_dir, intel_host=intel_host, local_request=local_membership_request)
+    def can_manage_sharing(request):
+        team_id = request.query_params.get("team", "default")
+        entry = teams.entries.get(team_id)
+        return team_id in {"none", "all"} or (entry is not None and entry.get("mode", "host") == "host")
+
+    public_intel = intel_router(data_dir, intel_host=intel_host, local_request=local_membership_request,
+                                can_manage_sharing=can_manage_sharing)
     teams.host_intel = public_intel.store
     app.include_router(public_intel)
     from .landmarks import landmark_router

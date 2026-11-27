@@ -9,7 +9,6 @@ import asyncio
 import hashlib
 import json
 import math
-import re
 import sqlite3
 import threading
 import time
@@ -71,7 +70,7 @@ MAX_CACHE_BYTES = 64 * 1024 * 1024
 MAX_CACHE_FILES = 128
 STALE_LIMIT = {"trails": 30 * 86400, "military": 30 * 86400, "gdacs": 86400, "firms": 21600, "notams": 1800}
 SHARED_INTEL_KEYS = {"notams": "bravoecho_key", "firms": "firms_key"}
-HOST_CREDENTIALS = {f"host_{field}": pack_id for pack_id, field in SHARED_INTEL_KEYS.items()}
+PROVIDER_SHARING_OFF = "The team host has turned off provider sharing."
 SHARED_INTEL_BYTES = 64_000
 
 
@@ -138,6 +137,7 @@ class IntelPackStore:
         self.shared_pending = set()
         self.shared_next_fetch = {}
         stored = self._read(self.settings_path) or {}
+        self.share_provider_access = stored.get("share_provider_access", True) is True
         fallback = stored.get("personal_flight_fallback")
         self._personal_fallback_saved = isinstance(fallback, bool)
         self.personal_flight_fallback = fallback if self._personal_fallback_saved else PERSONAL_FLIGHT_FALLBACK
@@ -192,14 +192,14 @@ class IntelPackStore:
         with self.lock:
             return {
                 "packs": [{**pack, "enabled": key in self.enabled, "configured": self._configured(pack)} for key, pack in CATALOGUE.items()],
-                "settings": {"enabled": sorted(self.enabled), "gdacs_types": list(self.gdacs_types), "notam_categories": list(self.notam_categories), "notam_view": self.notam_view, "traffic_filters": self.traffic_filters, "firms_days": self.firms_days, "road_filters": self.road_filters, "ahn_mode": self.ahn_mode, "personal_flight_fallback": self.personal_flight_fallback},
+                "settings": {"enabled": sorted(self.enabled), "gdacs_types": list(self.gdacs_types), "notam_categories": list(self.notam_categories), "notam_view": self.notam_view, "traffic_filters": self.traffic_filters, "firms_days": self.firms_days, "road_filters": self.road_filters, "ahn_mode": self.ahn_mode, "personal_flight_fallback": self.personal_flight_fallback, "share_provider_access": self.share_provider_access},
                 "credentials": {key: bool(self.credentials.get(key)) for key in sorted(SECRET_FIELDS)},
                 "credential_previews": {key: ("••••••••" + value[-4:] if len(value) > 8 else "••••••••")
                                         for key in sorted(SECRET_FIELDS) if (value := self.credentials.get(key))},
             }
 
     def update(self, body):
-        if not isinstance(body, dict) or set(body) - {"enabled", "credentials", "gdacs_types", "notam_categories", "notam_view", "traffic_filters", "firms_days", "road_filters", "ahn_mode", "personal_flight_fallback"}:
+        if not isinstance(body, dict) or set(body) - {"enabled", "credentials", "gdacs_types", "notam_categories", "notam_view", "traffic_filters", "firms_days", "road_filters", "ahn_mode", "personal_flight_fallback", "share_provider_access"}:
             raise ValueError("Use available map layer settings and provider credentials")
         with self.lock:
             enabled = body.get("enabled", sorted(self.enabled))
@@ -228,9 +228,13 @@ class IntelPackStore:
             if not isinstance(fallback, bool):
                 raise ValueError("Choose whether to use the personal aircraft fallback")
             saved_fallback = {"personal_flight_fallback": fallback} if "personal_flight_fallback" in body or self._personal_fallback_saved else {}
-            self._write(self.settings_path, {"enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "notam_categories": notam_categories, "notam_view": notam_view, "traffic_filters": traffic_filters, "firms_days": firms_days, "road_filters": road_filters, "ahn_mode": ahn_mode, **saved_fallback})
+            sharing = body.get("share_provider_access", self.share_provider_access)
+            if not isinstance(sharing, bool):
+                raise ValueError("Choose whether to share provider access")
+            self._write(self.settings_path, {"share_provider_access": sharing, "enabled": sorted(set(enabled)), "credentials": credentials, "gdacs_types": list(gdacs_types), "notam_categories": notam_categories, "notam_view": notam_view, "traffic_filters": traffic_filters, "firms_days": firms_days, "road_filters": road_filters, "ahn_mode": ahn_mode, **saved_fallback})
             self._personal_fallback_saved = bool(saved_fallback)
             self.personal_flight_fallback = fallback
+            self.share_provider_access = sharing
             self.road_filters = road_filters
             if gdacs_types != self.gdacs_types:
                 self.next_fetch = {key: until for key, until in self.next_fetch.items()
@@ -358,6 +362,8 @@ class IntelPackStore:
 
     def _response(self, pack_id, entry, bbox, status, error=None, *, shared=False, firms_days=None):
         with self.lock:
+            if shared and not self.share_provider_access:
+                return self._empty(pack_id, "disabled", PROVIDER_SHARING_OFF)
             if (pack_id not in self.enabled and not shared) or entry.get("credential_hash") != self._cache_hash(pack_id, bbox, firms_days):
                 return self._empty(pack_id, "disabled")
             features = [feature for feature in entry["data"].get("features", []) if feature_intersects(feature, bbox)]
@@ -491,18 +497,6 @@ class IntelPackStore:
                         "note": snapshot["note"] + " · Police locations use regional OpenStreetMap data on this snapshot."}
         return self._load_regional(pack_id, bbox, zoom)
 
-    def provide_shared_key(self, pack_id, key):
-        """An admin can initialize the host key without overwriting another team's access."""
-        if not isinstance(key, str) or not key.strip():
-            raise ValueError("Enter a valid provider key")
-        field = SHARED_INTEL_KEYS[pack_id]
-        if pack_id == "firms" and not re.fullmatch(r"[A-Za-z0-9_-]{10,128}", key.strip()):
-            raise ValueError("Enter a valid NASA FIRMS MAP_KEY")
-        with self.lock:
-            if self.credentials.get(field):
-                raise ValueError("This provider is already configured. Change the key on the host.")
-            self.update({"credentials": {field: key}})
-
     def shared_view(self, pack_id, bbox, zoom, firms_days=None):
         pack = CATALOGUE[pack_id]
         bbox = validate_bounds(bbox)
@@ -511,8 +505,10 @@ class IntelPackStore:
         if pack_id == "firms" and (type(firms_days) is not int or firms_days not in (1, 3, 7)):
             raise ValueError("Choose 24 hours, 3 days or 7 days")
         with self.lock:
+            if not self.share_provider_access:
+                return self._empty(pack_id, "disabled", PROVIDER_SHARING_OFF)
             if not self._configured(pack):
-                return self._empty(pack_id, "needs_key", f"Ask a team admin to configure {pack['source']} on the host.")
+                return self._empty(pack_id, "needs_key", f"{pack['source']} is unavailable from the team host.")
             if zoom < pack["min_zoom"] or max(bbox[2] - bbox[0], bbox[3] - bbox[1]) > 60:
                 return self._empty(pack_id, "zoom_in")
             now = self.clock()
@@ -549,6 +545,8 @@ class IntelPackStore:
 
         with self.fetch_locks[pack_id]:
             with self.lock:
+                if shared and not self.share_provider_access:
+                    return self._empty(pack_id, "disabled", PROVIDER_SHARING_OFF)
                 if pack_id not in self.enabled and not shared:
                     return self._empty(pack_id, "disabled")
                 if pack_id == "gdacs" and not self.gdacs_types:
@@ -632,7 +630,7 @@ class IntelPackStore:
                     return response(cached, "stale", error) if cached else self._empty(pack_id, "error", error)
 
 
-def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, intel_host=None, local_request=None):
+def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, intel_host=None, local_request=None, can_manage_sharing=None):
     store = store or IntelPackStore(data_dir)
     elevation = elevation or ElevationStore(data_dir)
     router = APIRouter(prefix="/api/intel-packs")
@@ -642,15 +640,18 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, in
     router.traffic = traffic
     router.store = store
 
+    def manages_sharing(request):
+        return bool(can_manage_sharing and can_manage_sharing(request) and local_request and local_request(request))
+
     def catalogue_for(request):
         result = store.catalogue()
+        result["can_manage_provider_sharing"] = manages_sharing(request)
         host = intel_host(request) if intel_host else None
         if host:
             for pack in result["packs"]:
                 if pack["id"] in SHARED_INTEL_KEYS:
                     pack["configured"] = True
                     pack["host_access"] = True
-                    pack["can_provide_host_key"] = host[2]
         return result
 
     @router.post("/roads/check-route")
@@ -684,28 +685,14 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, in
                     raise ValueError("Provider settings are too large")
             body = json.loads(raw)
             credentials = body.get("credentials") if isinstance(body, dict) else None
-            host_keys = HOST_CREDENTIALS.keys() & credentials.keys() if isinstance(credentials, dict) else set()
-            if (host_keys or isinstance(credentials, dict) and credentials.keys() & SHARED_INTEL_KEYS.values()
+            if isinstance(body, dict) and "share_provider_access" in body and not manages_sharing(request):
+                raise HTTPException(403, "Change provider sharing on the host device")
+            if (isinstance(credentials, dict) and credentials.keys() & SHARED_INTEL_KEYS.values()
                     or isinstance(body, dict) and "personal_flight_fallback" in body):
                 if local_request and not local_request(request):
                     raise HTTPException(403, "Change provider access from this Reticom app")
-            if host_keys:
-                field = next(iter(host_keys))
-                key = credentials[field]
-                if body != {"credentials": {field: key}} or not isinstance(key, str) or not key.strip() or len(key) > 8192 or any(ord(char) < 32 for char in key):
-                    raise ValueError("Enter a valid provider key")
-                host = intel_host(request) if intel_host else None
-                if not host or not host[2]:
-                    raise HTTPException(403, "Team admin rights are required")
-                try:
-                    await asyncio.to_thread(request_host_intel, host, HOST_CREDENTIALS[field], {"key": key.strip()})
-                except PermissionError as exc:
-                    raise HTTPException(403, str(exc)) from None
-                except (TimeoutError, OSError, ValueError):
-                    raise HTTPException(503, "The team host could not save the key. Try again when connected.") from None
-            else:
-                await asyncio.to_thread(store.update, body)
-                await traffic.settings_changed()
+            await asyncio.to_thread(store.update, body)
+            await traffic.settings_changed()
             return JSONResponse(catalogue_for(request), headers={"Cache-Control": "no-store"})
         except (ValueError, UnicodeDecodeError) as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -912,5 +899,5 @@ def intel_router(data_dir: Path, *, store=None, elevation=None, traffic=None, in
 def request_host_intel(host, pack_id, data):
     from .continuity import json_rpc
 
-    identity, destination, _ = host
+    identity, destination = host
     return json_rpc(identity, destination, f"/intel/{pack_id}", data, timeout=8, max_response_size=SHARED_INTEL_BYTES)

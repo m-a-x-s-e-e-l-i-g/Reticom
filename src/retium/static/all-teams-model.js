@@ -1,7 +1,7 @@
 import {displayPositionSeries, locationTime} from "./location-filter.js";
 import {drawingFeatures} from "./map-drawings.js?v=20260905-2";
 import {withDisplayWaypointLabels} from "./map-labels.js";
-import {tacticalMarker, reportProperties, REPORT_STATUS_LABELS} from "./marker-catalog.js?v=20260905-2";
+import {tacticalMarker, reportProperties} from "./marker-catalog.js?v=20261127-1";
 import {activeAutomaticReports, buildAutomaticReportFeatures, automaticReportOrigin} from "./automatic-reports.js?v=20260908-3";
 import {resolveReportLandmark} from "./report-landmarks.js?v=20260908-2";
 import {latestNavigationPlans, sharedNavigationFeatures} from "./shared-navigation-model.js";
@@ -111,8 +111,8 @@ export function allTeamsModel(teams, hidden = new Set(), now = Date.now() / 1000
         const report = reportProperties(event);
         add({type: "Point", coordinates: [event.lon, event.lat]}, event, {color: marker?.color || color,
           symbol: marker?.symbol || ({waypoint: "WP", warning: "!", obstacle: "×", observation: "OBS", text: "T"})[event.marker_type] || "", kind: "marker", ...report,
-          ...(report.reportStatus ? {description: `${REPORT_STATUS_LABELS[report.reportStatus]}${report.reportUrgent ? " · URGENT" : ""} · ${event.callsign}${event.description ? ` · ${event.description}` : ""}`} : {}),
-          ...(report.reportStatus === "cleared" ? {color: "#59615c"} : {})});
+          ...(report.isMapReport ? {description: `${event.callsign}${report.reportUrgent ? " · URGENT" : ""}${event.description ? ` · ${event.description}` : ""}`} : {}),
+          ...(report.markerColor ? {color: report.markerColor} : {})});
       } else if (event.type === "drawing.created") {
         const geometry = drawingGeometry(event);
         if (geometry) for (const feature of drawingFeatures(event, {kind: "drawing", color}, geometry)) {

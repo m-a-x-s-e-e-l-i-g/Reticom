@@ -32,7 +32,7 @@ from .qr import decode_join_code_image, join_code_svg
 from .store import EventStore, PrivateMessageStore
 from .team import TeamCodeError, TeamMembership, TeamProfile, decode_join_code
 from .tasks import TaskError, TaskStore
-from .transport import FieldSender, GatewayReceiver, _load_or_create_identity
+from .transport import FieldSender, GatewayReceiver, _load_or_create_identity, parse_operator_status
 from .transcription import LocalTranscriber, TranscriptionError
 from .user import UserProfile
 from .waypoints import WaypointArrivalDetector
@@ -109,6 +109,7 @@ def create_node_app(
     continuity_stopping = False
     subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
     voice_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+    local_operator_status: dict[str, str] | None = None
     heading_subscribers: dict[asyncio.Event, dict[str, Any]] = {}
     event_loop: asyncio.AbstractEventLoop | None = None
     waypoint_arrivals = WaypointArrivalDetector()
@@ -139,7 +140,7 @@ def create_node_app(
 
     def intel_host():
         if isinstance(service, FieldSender) and team_membership and team_membership.joined and not field_hosts_team():
-            return service.identity, team_membership.destination, field_has_admin()
+            return service.identity, team_membership.destination
         return None
 
     def field_team_state(
@@ -443,11 +444,6 @@ def create_node_app(
             try:
                 if not isinstance(data, dict):
                     raise ValueError("Invalid shared map request")
-                if set(data) == {"key"}:
-                    if not gateway.member_is_admin(remote_identity.hash.hex()):
-                        return b'{"error":"Team admin rights are required"}'
-                    intel.provide_shared_key(pack_id, data["key"])
-                    return b'{"configured":true}'
                 fields = {"bounds", "zoom", "firms_days"} if pack_id == "firms" else {"bounds", "zoom"}
                 if set(data) != fields:
                     raise ValueError("Invalid shared map request")
@@ -457,7 +453,7 @@ def create_node_app(
             except (ValueError, TypeError) as exc:
                 return json.dumps({"error": str(exc)}).encode()
             except OSError:
-                return b'{"error":"The team host could not save provider settings"}'
+                return b'{"error":"The team host could not load provider data"}'
             if not gateway.member_allowed(remote_identity):
                 return b'{"error":"Team membership approval required"}'
             features = result.pop("features")
@@ -531,12 +527,6 @@ def create_node_app(
             map_admin = target["sender_hash"] != service.identity.hash.hex()
             if map_admin and not field_has_admin():
                 raise PermissionError("Only the author or a team admin can remove this map item")
-        if event["type"] == "marker.status":
-            target = cache.map_event(event["marker_id"], "marker.created")
-            if target is None:
-                raise ProtocolError("marker not found in the local team feed")
-            if target["sender_hash"] != service.identity.hash.hex() and not field_has_admin():
-                raise ProtocolError("only the reporter or a team admin can change this marker")
         cache.insert(
             event,
             service.identity.hash.hex(),
@@ -872,7 +862,10 @@ def create_node_app(
             field_outbox.close()
 
     app = FastAPI(title="Reticom", version="0.1.0", lifespan=lifespan)
-    public_intel = intel_router(data_dir, intel_host=lambda request: intel_host(), local_request=local_membership_request)
+    public_intel = intel_router(
+        data_dir, intel_host=lambda request: intel_host(), local_request=local_membership_request,
+        can_manage_sharing=lambda request: isinstance(service, GatewayReceiver) or field_hosts_team(),
+    )
     app.include_router(public_intel)
     app.state.intel_host = intel_host
     app.include_router(landmark_router())
@@ -1074,6 +1067,7 @@ def create_node_app(
                     else []
                 ),
                 "team": team_profile.state(service.destination.hash),
+                "operator_status": service.operator_status_snapshot() if team_created else None,
                 "user": user_profile.state() if user_profile is not None else None,
             }
         assert isinstance(service, FieldSender) and team_membership is not None
@@ -1196,6 +1190,7 @@ def create_node_app(
                 assert private_store is not None
                 payload = {
                     "events": store.mission_events(since=team_profile.created_at),
+                    "operator_status": hosted_service.operator_status_snapshot() if hosted_service else None,
                     "private_events": private_store.recent(
                         service.identity.hash.hex(), since=team_profile.created_at
                     ),
@@ -1233,7 +1228,9 @@ def create_node_app(
                     )
                 async with field_mission_lock:
                     inbox = mission_inbox(destination)
-                    payload = await asyncio.to_thread(service.request_feed, 20.0 if path_known else 4.0, inbox.request())
+                    payload = await asyncio.to_thread(
+                        service.request_feed, 20.0 if path_known else 4.0, inbox.request(), operator_status=local_operator_status
+                    )
                     if team_membership.destination != destination:
                         raise ValueError("Team changed during mission sync")
                     if "mission" in payload or payload.get("mission_restart"):
@@ -1595,7 +1592,7 @@ def create_node_app(
             delivery = await asyncio.to_thread(publish_field_event_sync, event)
             state = field_team_state()
             return JSONResponse({**state, "event": event, "delivery": delivery})
-        except (TeamCodeError, TypeError, json.JSONDecodeError) as exc:
+        except (TeamCodeError, ProtocolError, TypeError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except TimeoutError as exc:
             if hosted_service is not None and not field_hosts_team():
@@ -2063,6 +2060,10 @@ def create_node_app(
             event_type = str(body.pop("type", ""))
             if event_type in {"navigation.updated", "navigation.stopped"}:
                 raise ProtocolError("Use the navigation endpoint to share a route")
+            if event_type == "marker.status" or (event_type == "marker.created" and body.get("report_status") == "cleared"):
+                raise ProtocolError("Report status changes are no longer supported")
+            if event_type == "marker.created":
+                body.pop("report_status", None)
             body.pop("callsign", None)
             body.pop("icon", None)
             body.pop("color", None)
@@ -2070,7 +2071,6 @@ def create_node_app(
                 "chat.message",
                 "drawing.created",
                 "marker.created",
-                "marker.status",
             }:
                 raise ProtocolError("Command can send messages and map updates")
             event = new_event(
@@ -2081,8 +2081,6 @@ def create_node_app(
                 **body,
             )
             if isinstance(service, GatewayReceiver):
-                if event_type == "marker.status" and store.map_event(event["marker_id"], "marker.created") is None:
-                    raise ProtocolError("marker not found")
                 delivery = await asyncio.to_thread(service.publish_event, event)
             else:
                 delivery = await asyncio.to_thread(
@@ -2328,6 +2326,7 @@ def create_node_app(
 
     @app.websocket("/api/voice/live")
     async def live_voice(websocket: WebSocket) -> None:
+        nonlocal local_operator_status
         if service is None or user_profile is None:
             await websocket.close(code=1013, reason="Reticulum is starting")
             return
@@ -2388,6 +2387,7 @@ def create_node_app(
                         "type": "live.transport",
                         "ready": voice_transport.live_ready(),
                         "peers": 1 if voice_transport.live_ready() else 0,
+                        "operator_status": voice_transport.operator_status_snapshot(),
                     }
                 )
 
@@ -2401,7 +2401,13 @@ def create_node_app(
                         if not isinstance(body, dict):
                             raise LiveVoiceError("invalid live voice command")
                         action = str(body.get("action", ""))
-                        if action == "start":
+                        if action == "operator.status":
+                            status = parse_operator_status(body)
+                            if status is not None:
+                                local_operator_status = status
+                                if isinstance(voice_transport, GatewayReceiver):
+                                    voice_transport.host_operator = (service.identity.hash.hex(), status)
+                        elif action == "start":
                             if active_stream is not None:
                                 raise LiveVoiceError("a live transmission is already active")
                             stream_id = str(uuid.UUID(str(body.get("stream_id", ""))))
@@ -2483,8 +2489,12 @@ def create_node_app(
                     pass
             sender.cancel()
             voice_subscribers.discard(queue)
-            if isinstance(voice_transport, FieldSender) and not voice_subscribers:
-                await asyncio.to_thread(voice_transport.close_live_link)
+            if not voice_subscribers:
+                local_operator_status = None
+                if isinstance(voice_transport, FieldSender):
+                    await asyncio.to_thread(voice_transport.close_live_link)
+                else:
+                    voice_transport.host_operator = None
 
     @app.websocket("/api/heading/live")
     async def live_heading(websocket: WebSocket) -> None:

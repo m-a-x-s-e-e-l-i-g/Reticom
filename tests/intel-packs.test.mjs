@@ -174,6 +174,89 @@ test("clicking a bus draws its trip and follows new reported fixes until the map
   } finally { controller.destroy(); }
 });
 
+test("traffic navigation centers, frames the path and resumes follow for every traffic layer", async () => {
+  for (const [id, identity] of [["flights", "abc123"], ["vessels", "123456789"], ["transit", "bus"]]) {
+    const map = new FakeMap(), controls = new Map(), moves = [], fits = [], requests = [];
+    const element = () => ({dataset: {}, setAttribute() {}, remove() {}, contains() { return false; },
+      addEventListener(event, fn) { this[event] = fn; },
+      querySelector(selector) {
+        if (!controls.has(selector)) controls.set(selector, element());
+        return controls.get(selector);
+      }});
+    const container = {ownerDocument: {createElement: element}, append(child) { child.offsetHeight = 100; }, clientHeight: 500};
+    map.getContainer = () => container;
+    map.bounds = {west: 3.999, south: 50.999, east: 4.001, north: 51.001};
+    map.getCenter = () => ({lng: 4, lat: 51});
+    map.project = () => ({dist: () => 10});
+    map.jumpTo = ({center}) => moves.push(center);
+    map.fitBounds = (bounds, options) => fits.push({bounds, options});
+    const now = Math.floor(Date.now() / 1000) - 5;
+    const trip = id === "transit" ? "20261125_12:00_us-ma-mbta_trip_1" : undefined;
+    const vehicle = {...feature(identity), properties: {identity, traffic_pack: id, position_time: now, observed_at: now,
+      kind: "bus", trip_ref: trip}};
+    const points = [[3.997, 51], [3.998, 51], [4, 51]];
+    const controller = createIntelPacks({fetchImpl: async url => {
+      if (url === "/api/intel-packs") return response(catalogue([pack(id)]));
+      if (url.includes("/transit/route?")) return response({points});
+      if (url.endsWith("/route")) return response({points: points.map((point, i) => ({point, time: now - 20 + i * 5}))});
+      if (url.endsWith("/photo") || url.endsWith("/profile")) return {ok: false, status: 404, json: async () => ({})};
+      requests.push(new URL(url, "http://localhost").searchParams);
+      return response({...empty, status: "fresh", features: [vehicle]});
+    }});
+    try {
+      await controller.ready;
+      controller.attachMap(map);
+      await tick();
+      map.rendered = [{...vehicle, layer: map.getLayer(`public-intel-${id}-icons`)}];
+      map.emit("click", {point: {}});
+      await tick();
+      assert.equal(moves.length > 0, true, id);
+      const follow = controls.get("[data-traffic-follow]");
+      const path = controls.get("[data-traffic-track]");
+      assert.equal(follow.textContent, "Pause follow", id);
+      assert.equal(path.disabled, false, id);
+      assert.equal(path.textContent, id === "transit" ? "Show route" : "Show track");
+      await controller.refresh();
+      await tick();
+      const bounds = requests.at(-1);
+      assert.ok(Number(bounds.get("east")) - Number(bounds.get("west")) >= (id === "flights" ? .19 : .079), id);
+      path.click();
+      assert.equal(fits.length, 1, id);
+      assert.ok(Math.abs(fits[0].bounds[0][0] - points[0][0]) < 1e-6);
+      assert.equal(fits[0].options.padding.bottom, 140);
+      assert.equal(follow.textContent, "Resume follow", id);
+      const beforeCenter = moves.length;
+      controls.get("[data-traffic-center]").click();
+      assert.equal(moves.length, beforeCenter + 1, id);
+      assert.equal(follow.textContent, "Resume follow", id);
+      follow.click();
+      assert.equal(follow.textContent, "Pause follow", id);
+      map.emit("dragstart");
+      assert.equal(follow.textContent, "Resume follow", id);
+    } finally { controller.destroy(); }
+  }
+});
+
+test("a host disabling provider sharing clears previously loaded FIRMS detections", async () => {
+  const map = new FakeMap();
+  const detection = feature("firms:shared");
+  let shared = true;
+  const source = {...pack("firms"), host_access: true};
+  const controller = createIntelPacks({fetchImpl: async url => response(url === "/api/intel-packs" ? catalogue([source]) : shared
+    ? {...empty, status: "cached", features: [detection]} : {...empty, status: "disabled", error: "The team host has turned off provider sharing."})});
+  try {
+    await controller.ready;
+    controller.attachMap(map);
+    await tick();
+    assert.deepEqual(map.getSource("public-intel-firms").data.features, [detection]);
+    shared = false;
+    await controller.refresh();
+    await tick();
+    assert.deepEqual(map.getSource("public-intel-firms").data.features, []);
+    assert.match(intelLayerWarning(source, controller.getState().results.firms), /turned off provider sharing/);
+  } finally { controller.destroy(); }
+});
+
 test("viewport queries wrap the world and split the antimeridian without oversized boxes", () => {
   assert.deepEqual(intelViewportBoxes({west: 179, south: 10, east: 181, north: 11}), [{west: 179, south: 10, east: 180, north: 11}, {west: -180, south: 10, east: -179, north: 11}]);
   assert.deepEqual(intelViewportBoxes({west: 539, south: 10, east: 541, north: 11}), intelViewportBoxes({west: 179, south: 10, east: 181, north: 11}));

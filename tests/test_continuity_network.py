@@ -92,20 +92,25 @@ def test_real_reticulum_backup_handover_crash_and_rejoin(tmp_path):
         assert api(backup_port, '/api/feed')['team']['join_code'] == root_code
         assert any(e['id'] == message['id'] for e in api(backup_port, '/api/feed')['events'])
         assert any(t['id'] == task['id'] for t in api(backup_port, '/api/tasks')['tasks'])
-        # Field-authored report and lifecycle update travel over real RNS links,
-        # through the offline queue, feed cache and the replica journal.
-        report = api(client_port, '/api/send', {'type': 'marker.created', 'lat': 52, 'lon': 5,
-            'marker_type': 'electrical-hazard', 'label': 'Power line', 'description': 'Fallen wire',
-            'urgent': True, 'report_status': 'reported'})['event']
-        eventually(lambda: any(e['id'] == report['id'] for e in api(command_port, '/api/state')['events']))
-        api(client_port, '/api/feed')
-        api(client_port, '/api/send', {'type': 'marker.status', 'marker_id': report['id'], 'report_status': 'cleared'})
-        def report_cleared(web_port, endpoint):
+        # Field reports still sync to Command and the replica. Older composers can
+        # submit a report, but cannot assign or change its confidence status.
+        draft = {'type': 'marker.created', 'lat': 52, 'lon': 5,
+                 'marker_type': 'electrical-hazard', 'label': 'Power line', 'description': 'Fallen wire', 'urgent': True}
+        report = api(client_port, '/api/send', {**draft, 'report_status': 'confirmed'})['event']
+        assert report['urgent'] and 'report_status' not in report
+        for web_port in (command_port, client_port):
+            with httpx.Client(timeout=25) as client:
+                for body in ({'type': 'marker.status', 'marker_id': report['id'], 'report_status': 'confirmed'},
+                             {**draft, 'report_status': 'cleared'}):
+                    rejected = client.post(f'http://127.0.0.1:{web_port}/api/send', json=body)
+                    assert rejected.status_code == 422, rejected.text
+
+        def report_synced(web_port, endpoint):
             found = [e for e in api(web_port, endpoint)['events'] if e['id'] == report['id']]
-            return len(found) == 1 and found[0].get('report_view', {}).get('status') == 'cleared'
-        eventually(lambda: report_cleared(command_port, '/api/state'))
-        eventually(lambda: report_cleared(client_port, '/api/feed'))
-        eventually(lambda: report_cleared(backup_port, '/api/feed'))
+            return len(found) == 1 and found[0]['urgent'] and 'report_status' not in found[0]
+        eventually(lambda: report_synced(command_port, '/api/state'))
+        eventually(lambda: report_synced(client_port, '/api/feed'))
+        eventually(lambda: report_synced(backup_port, '/api/feed'))
         # Owner handover requires a current acknowledgment, then clients learn
         # the new signed preference. It does not copy the owner's private key.
         eventually(lambda: api(command_port, '/api/team/continuity/handover', {'destination': offer['destination']}), timeout=45)

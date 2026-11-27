@@ -1,6 +1,6 @@
 # Aircraft and ship tracks
 
-Click an aircraft or vessel to center its marker at the current zoom and load its available travelled track. Loading history and further position updates preserve the camera; the map never automatically fits the whole route. Closing the popup or selecting another target clears the previous line.
+Select an aircraft, vessel, or public transport vehicle to center it and follow its position at the current zoom. Use **Center** to reposition once, **Pause follow** / **Resume follow** to control tracking, or **Show track** to frame the available path. For public transport, **Show route** frames the trip when the source supplies its shape. Framing the path or dragging the map pauses following. Closing the card or selecting another target clears the previous line.
 
 Manually zooming below the live feed's regional limits keeps the last accepted regional subscription active. It does not request worldwide traffic. The selection survives viewport changes, empty responses and normal cache expiry; old reports fade and show their last-seen age.
 

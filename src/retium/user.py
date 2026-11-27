@@ -29,14 +29,14 @@ class UserProfile:
             icon = data.get("icon")
             color = data.get("color")
             if isinstance(callsign, str) and 1 <= len(callsign.strip()) <= MAX_CALLSIGN_LENGTH:
-                self.callsign = callsign.strip()
+                self.callsign = callsign.strip().upper()[:MAX_CALLSIGN_LENGTH]
             if icon in OPERATOR_ICONS:
                 self.icon = str(icon)
             if color in OPERATOR_COLORS:
                 self.color = str(color)
 
     def update(self, callsign: Any, icon: Any, color: Any = None) -> dict[str, str]:
-        clean_callsign = callsign.strip() if isinstance(callsign, str) else ""
+        clean_callsign = callsign.strip().upper() if isinstance(callsign, str) else ""
         if not clean_callsign or len(clean_callsign) > MAX_CALLSIGN_LENGTH:
             raise ProtocolError(f"callsign must be 1-{MAX_CALLSIGN_LENGTH} characters")
         if icon not in OPERATOR_ICONS:

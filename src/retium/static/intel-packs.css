@@ -98,7 +98,9 @@
 .command-canvas .intel-traffic-drawer { bottom: max(72px, calc(56px + env(safe-area-inset-bottom))); }
 .field-map-page .intel-traffic-drawer { bottom: var(--field-map-drawer-offset, 138px); }
 .intel-traffic-drawer-actions { display: flex; align-items: center; gap: 2px; }
-.intel-traffic-drawer-actions button { width: auto; min-height: 44px; margin: 0; padding: 0 6px; border: 0; background: transparent; color: var(--signal-strong); font: .75rem var(--font-body); letter-spacing: normal; white-space: nowrap; }
+.intel-traffic-drawer-actions button { width: auto; min-width: 44px; min-height: 44px; margin: 0; padding: 0 6px; border: 0; background: transparent; color: var(--signal-strong); font: .75rem var(--font-body); letter-spacing: normal; white-space: nowrap; }
+.intel-traffic-drawer-actions [data-following="true"] { background: var(--surface-input); }
+.intel-traffic-drawer-actions button:disabled { color: var(--text-muted); }
 .intel-traffic-drawer-actions [data-traffic-close] { min-width: 44px; color: var(--text); font-size: 1.25rem; }
 .intel-traffic-drawer :is(button, summary, a):focus-visible { outline: 2px solid var(--signal-strong); outline-offset: -2px; }
 .intel-traffic-drawer-body { max-block-size: min(36dvh, 260px); overflow-y: auto; overscroll-behavior: contain; }
@@ -122,7 +124,7 @@
 }
 @media (max-width: 460px) {
   .intel-traffic-drawer { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .intel-traffic-drawer-actions { grid-row: 1; justify-content: flex-end; margin-block: calc(-1 * var(--space-2xs)); }
+  .intel-traffic-drawer-actions { grid-row: 1; flex-wrap: wrap; justify-content: flex-end; margin-block: calc(-1 * var(--space-2xs)); }
   .intel-traffic-drawer:not(:has(details[open])):has(summary) .intel-traffic-drawer-actions { grid-row: 2; margin-block: 0; }
   .intel-traffic-drawer:not(:has(details[open])) summary { min-height: 44px; }
 }

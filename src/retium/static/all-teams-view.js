@@ -1,5 +1,5 @@
 import {onLandmarkResolved} from "./report-landmarks.js?v=20260908-2";
-import {allTeamsModel, overviewBounds} from "./all-teams-model.js?v=20260908-3";
+import {allTeamsModel, overviewBounds} from "./all-teams-model.js?v=20261127-1";
 import {addDrawingDecorationLayers} from "./map-drawings.js?v=20260905-2";
 import {teamPageUrl} from "./command-teams.js";
 import {HeadingTracker, HeadingOverlay, HeadingConnection} from "./live-heading.js?v=20260905-2";

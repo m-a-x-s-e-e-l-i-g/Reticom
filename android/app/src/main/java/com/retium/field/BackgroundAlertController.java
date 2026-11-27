@@ -180,6 +180,8 @@ final class BackgroundAlertController {
                 }
             }
         }
+        long joinedAt = team.optLong("joined_at", 0);
+        alertable.removeIf(event -> event.optLong("created_at", 0) <= joinedAt);
         alertable.sort(Comparator.comparingLong(event -> event.optLong("created_at", 0)));
 
         SharedPreferences preferences = context.getSharedPreferences(

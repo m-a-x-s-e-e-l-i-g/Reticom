@@ -126,6 +126,20 @@ function playbackHarness(playLive, nativeHistory = [], playCue = async () => {},
   return {context, played, persisted, archive, finishStream};
 }
 
+test("history delivered after the first team sync stays silent", async () => {
+  const {context} = playbackHarness(async () => {});
+  const spoken = [];
+  context.playIncomingTextAlert = event => spoken.push(event.id);
+  const message = (id, created_at) => ({id, created_at, type: "chat.message", network: {sender_hash: "other"}});
+  context.incomingFeedInitialized = false;
+  context.queueIncomingAlerts([], 100);
+  context.queueIncomingAlerts([message("older batch", 50), message("join second", 100)], 100);
+  context.queueIncomingAlerts([message("another batch", 80), message("new message", 101)], 100);
+  context.queueIncomingAlerts([message("new message", 101)], 100);
+  await context.incomingAlertQueue;
+  assert.deepEqual(spoken, ["new message"]);
+});
+
 test("the archive waits for live playback and skips an already heard clip", async () => {
   let startPlayback;
   const {context, played, persisted, archive, finishStream} = playbackHarness(() => new Promise(resolve => { startPlayback = resolve; }));

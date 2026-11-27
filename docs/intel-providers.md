@@ -37,7 +37,7 @@ Tap a vehicle to follow it and display the trip route when available. Drag the m
 
 ### International NOTAMs
 
-Open **Map layers → Intel packs → International NOTAMs**. Save a [BravoEcho API key](https://bravoecho.ai/docs/getting-a-key) on Command or the team host. One Command key serves all teams it hosts. Approved members can enable the layer and choose categories without entering a key. An approved admin can set up the first key remotely under **Set up BravoEcho on the team host**. Replace or remove it from the host. The host contacts BravoEcho and sends bounded map results over an authenticated Reticulum link. Shared access needs a connection to the original host, which needs internet access. A key saved on a member's own device takes priority there.
+Save a [BravoEcho API key](https://bravoecho.ai/docs/getting-a-key) on the host under **Map layers → International NOTAMs**. The host’s **Share provider access** switch applies to NOTAMs and NASA FIRMS for all teams hosted on that installation. Sharing defaults to on. With it on, approved members can enable the layers without entering keys. The host contacts the providers and returns bounded map results over authenticated Reticulum links. A member’s own saved key takes priority.
 
 **Local activity** shows small-area parachuting, drone, fireworks, model-aircraft and air-display notices. Pins show the activity at a glance, and boundaries appear as thin outlines at closer zoom. **All notices** adds the other categories and draws regional areas without fill. Category choices and the view are saved locally.
 
@@ -45,7 +45,7 @@ Both views show notices active now or starting within one hour. Upcoming pins ap
 
 ### Shared NASA FIRMS access
 
-Save the [NASA FIRMS MAP_KEY](https://firms.modaps.eosdis.nasa.gov/api/map_key/) on Command or the team host under **Map layers → Intel packs → Satellite heat detections**. An approved admin can enter the first key remotely under **Set up NASA FIRMS on the team host**. Approved members across all teams hosted by that Command installation can enable the layer and choose their own detection window. The host caches downloads by viewport and window. Team devices receive map features over Reticulum, and the key stays on the host.
+Save the [NASA FIRMS MAP_KEY](https://firms.modaps.eosdis.nasa.gov/api/map_key/) on the host under **Map layers → Satellite heat detections**. Approved members choose their own detection window. The host caches results by viewport and window. The key stays on the host when sharing is turned on or off.
 
 ### TomoSAR
 

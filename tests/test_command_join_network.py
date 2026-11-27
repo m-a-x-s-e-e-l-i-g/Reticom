@@ -47,7 +47,7 @@ def test_command_joins_remote_team_and_syncs_in_background(tmp_path):
         prefix = "/api/intel-packs"
         settings_url = f"http://127.0.0.1:{command}{prefix}/settings{query}"
         key_payload = {"credentials": {"host_bravoecho_key": "isolated-notam-fixture-key"}}
-        assert httpx.patch(settings_url, json=key_payload).status_code == 403
+        assert httpx.patch(settings_url, json=key_payload).status_code == 422
         assert httpx.patch(settings_url, json={"enabled": ["notams"]}).is_success
         notam_view = prefix + "/notams" + query + "&west=4&south=51&east=5&north=52&zoom=10"
         assert api(command, notam_view)["status"] == "error"
@@ -60,17 +60,18 @@ def test_command_joins_remote_team_and_syncs_in_background(tmp_path):
         assert state["role"] == "field" and not state["team"]["everyone_admin"]
         assert state["team"]["name"] == "Remote team"
         assert api(command, notam_view)["status"] == "needs_key"
-        remote_setup = httpx.patch(settings_url, json=key_payload, timeout=12)
-        assert remote_setup.is_success, remote_setup.text
-        assert "isolated-notam-fixture-key" not in remote_setup.text
-        assert remote_setup.json()["credentials"]["bravoecho_key"] is False
-        firms_key = "isolated_nasa_firms_fixture"
-        assert httpx.patch(settings_url, json={"credentials": {"host_firms_key": firms_key}}, timeout=12).is_success
+        assert httpx.patch(settings_url, json=key_payload, timeout=12).status_code == 422
+        assert httpx.patch(settings_url, json={"share_provider_access": False}, timeout=12).status_code == 403
+        host_settings_url = f"http://127.0.0.1:{host}{prefix}/settings"
+        notam_key, firms_key = "isolated-notam-fixture-key", "isolated_nasa_firms_fixture"
+        configured = httpx.patch(host_settings_url, json={"credentials": {"bravoecho_key": notam_key, "firms_key": firms_key}})
+        assert configured.is_success and notam_key not in configured.text and firms_key not in configured.text
+        assert configured.json()["can_manage_provider_sharing"] is True
+        assert api(command, prefix + query)["can_manage_provider_sharing"] is False
         preferences = {"enabled": ["notams", "firms"], "firms_days": 7}
         assert httpx.patch(settings_url, json=preferences).json()["credentials"]["firms_key"] is False
         second_team = api(host, "/api/command/teams", {"name": "Second hosted team", "modules": []})
         assert api(host, prefix + f'?team={second_team["id"]}')["credentials"]["bravoecho_key"] is True
-        assert httpx.patch(settings_url, json=key_payload, timeout=12).status_code == 403
         fixture = {"type": "Feature", "id": "notams:fixture", "geometry": {"type": "Point", "coordinates": [4.5, 51.5]},
                    "properties": {"id": "notams:fixture", "title": "Shared runway notice", "kind": "runway"}}
         detection = {**fixture, "id": "firms:fixture", "properties": {"title": "Shared heat detection"}}
@@ -86,6 +87,13 @@ def test_command_joins_remote_team_and_syncs_in_background(tmp_path):
         assert api(command, notam_view)["features"] == [fixture]
         firms_view = notam_view.replace("/notams?", "/firms?")
         assert api(command, firms_view)["features"] == [detection]
+        assert httpx.patch(host_settings_url, json={"share_provider_access": False}).is_success
+        for view in (notam_view, firms_view):
+            result = api(command, view)
+            assert result["status"] == "disabled" and not result["features"]
+        assert api(host, prefix + f'?team={second_team["id"]}')["settings"]["share_provider_access"] is False
+        assert httpx.patch(host_settings_url, json={"share_provider_access": True}).is_success
+        assert api(command, notam_view)["features"] == [fixture]
         assert next(event for event in state["events"] if event["id"] == marker["id"])["network"]["verified"]
         overview = api(command, "/api/command/overview")["teams"]
         assert any(event["id"] == marker["id"] for event in overview[0]["events"])

@@ -123,10 +123,10 @@ test("traffic drawer follows the animated marker without reframing for route his
   Date.now=()=>now*1000;
   let frame;
   globalThis.requestAnimationFrame = fn => { frame = fn; return 1; };
-  const element = () => ({handlers: {}, addEventListener(name, fn) { this.handlers[name] = fn; }});
+  const element = () => ({dataset: {}, handlers: {}, addEventListener(name, fn) { this.handlers[name] = fn; }});
   const body = {...element(), querySelector: () => null};
-  const follow = element(), close = element();
-  const drawer = {...element(), querySelector: selector => ({".intel-traffic-drawer-body":body,"[data-traffic-follow]":follow,"[data-traffic-close]":close})[selector],
+  const follow = element(), centerButton = element(), trackButton = element(), close = element();
+  const drawer = {...element(), querySelector: selector => ({".intel-traffic-drawer-body":body,"[data-traffic-follow]":follow,"[data-traffic-center]":centerButton,"[data-traffic-track]":trackButton,"[data-traffic-close]":close})[selector],
     setAttribute() {}, contains: () => false, remove() { this.removed = true; }};
   const container = {append() {}, ownerDocument: {createElement: tag => tag === "aside" ? drawer : {...element(), remove() {}}}};
   drawer.ownerDocument = container.ownerDocument;

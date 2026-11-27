@@ -6,11 +6,11 @@ let commandCanvas = null;
 import {calculateDeviceRoute, initOfflineRoutingSettings, ROUTING_MODE_KEY} from "./offline-routing.js?v=20261126-1";
 const offlineRoutingSettings = initOfflineRoutingSettings();
 import {hikingMapStyle, recenterOnFix, roadAndPathLayers, preferredMapStyle, nextMapStyle, satelliteWithTrails, MAP_STYLES, updateMapStyleControl, HIKING_RELIEF} from "./outdoor-map.js?v=20261125-2";
-import {createIntelPacks} from "./intel-packs.js?v=20261126-2";
+import {createIntelPacks} from "./intel-packs.js?v=20261127-1";
 import {createSharedNavigation, navigationSharePayload} from "./shared-navigation.js?v=20261126-1";
 import {HeadingTracker, HeadingOverlay, HeadingConnection} from "./live-heading.js?v=20260905-2";
-import {reportDraft, reportComposerHtml} from "./map-reports.js?v=20260905-1";
-import {reportProperties, REPORT_STATUS_LABELS} from "./marker-catalog.js?v=20260905-2";
+import {reportDraft, reportComposerHtml} from "./map-reports.js?v=20261127-1";
+import {reportProperties} from "./marker-catalog.js?v=20261127-1";
 import {drawingFeatures, validDrawingArea, addDrawingDecorationLayers, drawingReviewHtml} from "./map-drawings.js?v=20260905-2";
 import {teamApiUrl, teamPageUrl} from "./command-teams.js?v=20260908-2";
 import {initContinuitySettings} from "./continuity-settings.js?v=20260905-1";
@@ -42,7 +42,7 @@ import {
   TACTICAL_MARKER_TYPES,
   tacticalMarker,
   tacticalMarkerGroups,
-} from "./marker-catalog.js?v=20260905-2";
+} from "./marker-catalog.js?v=20261127-1";
 
 const $ = (id) => document.getElementById(id);
 const apiUrl = (url) => teamApiUrl(url, location.href);
@@ -92,6 +92,10 @@ const pointingTracker = new HeadingTracker();
 let commandPointing = null, fieldPointing = null, pointingSample = null;
 const headingPreference = "reticom-share-facing-direction";
 let fieldOperators = new Map();
+let operatorStatusSnapshot = null;
+let operatorStatusDestination = null;
+let sentOperatorStatus = "";
+let displayedLocalOperatorStatus = "";
 let privateMessages = [];
 let activePrivatePeer = null;
 let privateChatLoading = false;
@@ -459,6 +463,7 @@ function updateIncomingAlertsUi() {
       : "Arm incoming text to speech and voice autoplay";
   button.setAttribute("aria-label", description);
   button.title = description;
+  publishOperatorStatus();
 }
 
 async function armIncomingAlerts({automatic = false} = {}) {
@@ -1019,6 +1024,7 @@ function finishIncomingLiveVoice(streamId, canceled = false) {
 
 function setLiveVoiceAvailability(ready, peers = 0) {
   liveVoiceReady = Boolean(ready);
+  updateLocalOperatorIcons();
   document.querySelectorAll(".ptt-button").forEach((button) => {
     if (button.dataset.privateRecipient) {
       button.classList.remove("live-ready");
@@ -1047,6 +1053,7 @@ function handleLiveVoiceMessage(message) {
   try { frame = JSON.parse(message.data); } catch { return; }
   if (frame.type === "live.transport") {
     setLiveVoiceAvailability(frame.ready, frame.peers || 0);
+    if (frame.operator_status) setOperatorStatusSnapshot(frame.operator_status);
   } else if (frame.type === "live.start") {
     startIncomingLiveVoice(frame);
   } else if (frame.type === "live.end" || frame.type === "live.cancel") {
@@ -1071,14 +1078,21 @@ function connectLiveVoice() {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(apiUrl(`${protocol}://${location.host}/api/voice/live`));
   liveVoiceSocket = socket;
+  sentOperatorStatus = "";
   socket.binaryType = "arraybuffer";
-  socket.addEventListener("message", handleLiveVoiceMessage);
+  socket.addEventListener("open", publishOperatorStatus);
+  socket.addEventListener("message", message => {
+    if (liveVoiceSocket === socket) handleLiveVoiceMessage(message);
+  });
   socket.addEventListener("close", () => {
-    if (liveVoiceSocket === socket) liveVoiceSocket = null;
+    if (liveVoiceSocket !== socket) return;
+    liveVoiceSocket = null;
     setLiveVoiceAvailability(false, 0);
     if (teamOperational) liveVoiceReconnectTimer = setTimeout(connectLiveVoice, 2000);
   });
-  socket.addEventListener("error", () => setLiveVoiceAvailability(false, 0));
+  socket.addEventListener("error", () => {
+    if (liveVoiceSocket === socket) setLiveVoiceAvailability(false, 0);
+  });
 }
 
 function readNativeIncomingHistory() {
@@ -1105,9 +1119,9 @@ function rememberIncomingVoice(clipId) {
   syncIncomingHistory();
 }
 
-function queueIncomingAlerts(events) {
+function queueIncomingAlerts(events, joinedAt = null) {
   readNativeIncomingHistory();
-  const alertable = events.filter((event) => event?.id && ["chat.message", "private.message", "private.ptt", "ptt.broadcast", "task.created", "waypoint.arrived"].includes(event.type));
+  const alertable = events.filter((event) => event?.id && (joinedAt === null || event.created_at > joinedAt) && ["chat.message", "private.message", "private.ptt", "ptt.broadcast", "task.created", "waypoint.arrived"].includes(event.type));
   if (!incomingFeedInitialized) {
     alertable.forEach((event) => seenIncomingEventIds.add(event.id));
     syncIncomingHistory();
@@ -1648,9 +1662,11 @@ function eventDescription(event) {
   if (event.type === "task.completed") return `Completed task · ${shortHash(event.task_id, 8)}`;
   if (event.type === "waypoint.arrived") return `${escapeHtml(event.operator_callsign)} reached ${escapeHtml(event.waypoint_label)} · ${Math.round(event.distance_m)} m from marker`;
   if (event.type === "ptt.broadcast") return voicePlayerMarkup(event);
-  if (event.type === "marker.created" && reportProperties(event).reportStatus) {
-    const report = reportProperties(event);
-    return `${escapeHtml(event.display_label || event.label)} · ${report.reportUrgent ? "URGENT · " : ""}${REPORT_STATUS_LABELS[report.reportStatus]}${event.description && event.description !== event.label ? `<br>${escapeHtml(event.description)}` : ""}`;
+  const report = reportProperties(event);
+  if (report.isMapReport) {
+    const title = escapeHtml(report.label || event.display_label || event.label);
+    const description = event.description && event.description !== event.label ? `<br>${escapeHtml(event.description)}` : "";
+    return `${title}${report.reportUrgent ? " · URGENT" : ""}${description}`;
   }
   return `${escapeHtml(event.marker_type.toUpperCase())} · ${escapeHtml(event.display_label || event.label)}<br>${event.lat.toFixed(5)}, ${event.lon.toFixed(5)}`;
 }
@@ -3187,7 +3203,7 @@ function createMapEditor(map, {menuId, contextMenuId, paletteId, controlsId, tex
     let draft;
     try {
       draft = reportDraft(editor.reportType, editor.location, form.querySelector("textarea").value,
-        form.querySelector("select").value, form.querySelector("input").checked);
+        form.querySelector("[data-report-urgent]").checked);
     } catch (error) { return toast(error.message, true); }
     const camera = captureMapCamera(editor.map);
     const result = await send(draft, form.querySelector('[type="submit"]'));
@@ -3504,7 +3520,7 @@ function openMapReportComposer(editor, type) {
   form.style.top = `${Math.max(12, Math.min(canvas.clientHeight - 310, point.y))}px`;
   form.classList.remove("hidden");
   // Don't summon the phone keyboard for reports that need no description.
-  form.querySelector(required ? "textarea" : "select").focus({preventScroll: true});
+  form.querySelector(required ? "textarea" : "[data-report-urgent]").focus({preventScroll: true});
 }
 
 function clearMapLongPress(editor) {
@@ -4138,16 +4154,22 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
       ? `${String(properties.markerType || kind).toUpperCase()} · LOCAL · QUEUED`
     : `${String(properties.markerType || kind).toUpperCase()} · SIGNED SOURCE`;
   content.append(title, meta);
-  if (properties.reportStatus) {
-    const detail = document.createElement("p");
-    detail.textContent = properties.reportDescription || "";
+  const isMapReport = propertyFlag(properties.isMapReport);
+  if (isMapReport) {
+    if (propertyFlag(properties.reportUrgent)) {
+      const urgency = document.createElement("small");
+      urgency.className = "map-report-urgency";
+      urgency.textContent = "URGENT";
+      content.append(urgency);
+    }
+    if (properties.reportDescription) {
+      const detail = document.createElement("p");
+      detail.textContent = properties.reportDescription;
+      content.append(detail);
+    }
     const attribution = document.createElement("small");
     attribution.textContent = `${properties.callsign || "Reporter"} · ${new Date(Number(properties.reportedAt) * 1000).toLocaleString()}`;
-    const status = document.createElement("small");
-    status.className = "map-report-state";
-    status.textContent = `${propertyFlag(properties.reportUrgent) ? "URGENT · " : ""}${REPORT_STATUS_LABELS[properties.reportStatus] || "Unconfirmed"}${propertyFlag(properties.reportUpdateQueued) ? " · update queued" : ""}`;
-    if (properties.reportUpdatedBy) status.title = `Updated by ${properties.reportUpdatedBy} · ${new Date(Number(properties.reportUpdatedAt) * 1000).toLocaleString()}`;
-    content.append(status, detail, attribution);
+    content.append(attribution);
   }
   if (properties.reportMessage) {
     const report = document.createElement("p");
@@ -4157,7 +4179,7 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
     report.textContent = `Reported by ${properties.callsign}: “${properties.reportMessage}” · ${projection}`;
     content.append(report);
   }
-  if (!properties.reportStatus && (properties.state || properties.landmark || properties.reportedAt)) {
+  if (!isMapReport && (properties.state || properties.landmark || properties.reportedAt)) {
     const detail = document.createElement("small");
     const parts = [];
     if (properties.state) parts.push(properties.state);
@@ -4171,7 +4193,7 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
   }
   const pixel = map.project(lngLat);
   const below = pixel.y < map.getCanvas().clientHeight / 2;
-  const scrollable = properties.reportStatus || properties.markerType === "waypoint";
+  const scrollable = isMapReport || properties.markerType === "waypoint";
   if (scrollable) {
     content.style.maxHeight = `${Math.max(120, (below ? map.getCanvas().clientHeight - pixel.y : pixel.y) - 48)}px`;
     content.style.overflowY = "auto";
@@ -4189,27 +4211,6 @@ function showMapFeaturePopup(map, Popup, feature, lngLat) {
     viewRoute.textContent = `ROUTE → ${sharedPlan.label}`;
     viewRoute.addEventListener("click", () => { popup.remove(); sharedNavigation.focus(sharedPlan); });
     content.append(viewRoute);
-  }
-  if (properties.reportStatus && propertyFlag(properties.removable)) {
-    const label = document.createElement("label");
-    label.className = "map-report-status-edit";
-    label.textContent = "REPORT STATUS";
-    const select = document.createElement("select");
-    select.setAttribute("aria-label", "Report status");
-    for (const [value, text] of Object.entries(REPORT_STATUS_LABELS)) select.add(new Option(text, value));
-    select.value = properties.reportStatus;
-    select.addEventListener("change", async () => {
-      select.disabled = true;
-      const result = await send({type: "marker.status", marker_id: properties.id, report_status: select.value,
-        report_revision: Number(properties.reportRevision || 0) + 1}, select);
-      if (result) {
-        popup.remove();
-        if (role === "gateway") await refresh(); else await refreshFeed();
-      } else select.value = properties.reportStatus;
-      select.disabled = false;
-    });
-    label.append(select);
-    content.append(label);
   }
   const capabilities = mapTargetCapabilities({
     role,
@@ -4294,6 +4295,66 @@ function installMapFeatureInteractions(map, Popup, pointLayers, drawingLayer) {
   }
 }
 
+function localOperatorStatus() {
+  return {
+    linked: liveVoiceReady,
+    audio: !incomingAlertsEnabled ? "muted" : incomingAudioReady ? "on" : "blocked",
+    location: commsOnly ? "transmit" : (movementWatchId !== null || nativeMovementTracking) ? "sharing" : "off",
+  };
+}
+
+function operatorStatusIcons(sender) {
+  const status = sender === localIdentityHash ? localOperatorStatus() : operatorStatusSnapshot?.[sender];
+  const linked = status?.linked ?? (operatorStatusSnapshot ? false : null);
+  const icon = (label, path, active = false) => `<svg class="operator-status-icon${active ? " active" : ""}" viewBox="0 0 24 24" role="img" aria-label="${label}"><title>${label}</title><path d="${path}"/></svg>`;
+  const link = "m10 13 4-4m-5 7-2 2a3 3 0 0 1-4-4l4-4a3 3 0 0 1 4 0m2-3 2-2a3 3 0 0 1 4 4l-4 4a3 3 0 0 1-4 0";
+  const speaker = "M4 10v4h4l4 3V7l-4 3H4";
+  const pin = "M12 21s6-6 6-11a6 6 0 0 0-12 0c0 5 6 11 6 11Zm0-9a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z";
+  return [
+    linked === true ? icon("Live link connected", link, true)
+      : linked === false ? icon("No live link", `${link} M4 4l16 16`) : icon("Live link status unknown", link),
+    status?.audio === "on" ? icon("Incoming audio active", `${speaker} M15 9a4 4 0 0 1 0 6m2-8a7 7 0 0 1 0 10`, true)
+      : status?.audio === "muted" ? icon("Incoming audio muted", `${speaker} M16 9l4 4m0-4-4 4`)
+      : status?.audio === "blocked" ? icon("Incoming audio needs to be armed", `${speaker} M17 8v5m0 3h.01`)
+      : icon("Incoming audio status unknown", `${speaker} M19 9a2 2 0 0 1-1 2c-.7.5-1 1-1 2m0 3h.01`),
+    status?.location === "sharing" ? icon("Automatic location sharing active", pin, true)
+      : status?.location === "off" ? icon("Automatic location sharing off", `${pin} M4 4l16 16`)
+      : status?.location === "transmit" ? icon("Location sharing on voice broadcasts when a fix is available", "M11 21s5-6 5-11a5 5 0 0 0-10 0c0 5 5 11 5 11Zm0-9a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm7-4a4 4 0 0 1 0 4m2-6a7 7 0 0 1 0 8", true)
+      : icon("Location sharing status unknown", pin),
+  ].join("");
+}
+
+function operatorHeading(operator, sender) {
+  return `<div class="operator-heading"><strong><b class="operator-glyph" style="color:${operatorColor(operator.color)}">${operatorGlyph(operator.icon)}</b> ${escapeHtml(operator.callsign)}</strong><div class="operator-status" data-operator-status="${escapeHtml(sender)}">${operatorStatusIcons(sender)}</div></div>`;
+}
+
+function setOperatorStatusSnapshot(snapshot) {
+  operatorStatusSnapshot = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot) ? snapshot : null;
+  document.querySelectorAll("[data-operator-status]").forEach(row => {
+    row.innerHTML = operatorStatusIcons(row.dataset.operatorStatus);
+  });
+}
+
+function updateLocalOperatorIcons() {
+  const status = localOperatorStatus();
+  const key = JSON.stringify(status);
+  if (displayedLocalOperatorStatus !== key) {
+    displayedLocalOperatorStatus = key;
+    document.querySelectorAll(`[data-operator-status="${CSS.escape(localIdentityHash)}"]`).forEach(row => {
+      row.innerHTML = operatorStatusIcons(localIdentityHash);
+    });
+  }
+  return status;
+}
+
+function publishOperatorStatus() {
+  const {audio, location} = updateLocalOperatorIcons();
+  const message = JSON.stringify({action: "operator.status", audio, location});
+  if (!teamOperational || liveVoiceSocket?.readyState !== WebSocket.OPEN || sentOperatorStatus === message) return;
+  liveVoiceSocket.send(message);
+  sentOperatorStatus = message;
+}
+
 function renderOperators(operators, events) {
   if (!operators.length) { $("operatorList").className = "operator-list empty-copy"; $("operatorList").textContent = "Waiting for the first verified operator event."; return; }
   const displayedPositions = new Map(
@@ -4304,19 +4365,24 @@ function renderOperators(operators, events) {
   $("operatorList").className = "operator-list";
   $("operatorList").innerHTML = operators.map((operator) => {
     const position = displayedPositions.get(operator.sender_hash);
-    return `<div class="operator"><strong><b class="operator-glyph" style="color:${operatorColor(operator.color)}">${operatorGlyph(operator.icon)}</b> ${escapeHtml(operator.callsign)}</strong><span>${position ? `${position.lat.toFixed(5)}, ${position.lon.toFixed(5)}` : "No reliable position"}</span><span>${timeLabel(operator.last_seen)} · ${operator.event_count} verified event${operator.event_count === 1 ? "" : "s"}</span><span>${shortHash(operator.sender_hash)}</span></div>`;
+    return `<div class="operator">${operatorHeading(operator, operator.sender_hash)}<span>${position ? `${position.lat.toFixed(5)}, ${position.lon.toFixed(5)}` : "No reliable position"}</span><span>${timeLabel(operator.last_seen)} · ${operator.event_count} verified event${operator.event_count === 1 ? "" : "s"}</span><span>${shortHash(operator.sender_hash)}</span></div>`;
   }).join("");
 }
 
 function renderUser(user) {
   if (!user) return;
+  const joinCallsign = $("joinCallsign");
+  if (joinCallsign.value === currentUser.callsign && joinCallsign.value !== user.callsign) joinCallsign.value = user.callsign;
   currentUser = user;
-  selectedUserIcon = user.icon;
-  selectedUserColor = user.color || "moss";
   $("topbarCallsign").textContent = user.callsign;
   $("userSettingsToggle").setAttribute("aria-label", `Open user settings for ${user.callsign}`);
+}
+
+function renderUserOptions() {
+  const user = currentUser;
   $("settingsCallsign").value = user.callsign;
-  $("joinCallsign").value = user.callsign;
+  selectedUserIcon = user.icon;
+  selectedUserColor = user.color || "moss";
   document.querySelectorAll(".icon-picker button").forEach((button) => {
     const selected = button.dataset.icon === user.icon;
     button.classList.toggle("selected", selected);
@@ -4342,7 +4408,6 @@ function renderJoinedCommand(events) {
   renderTimeline(combinedCommsEvents(events, privateMessages));
   renderOperators([...operators.values()], events);
   renderMapMessages(events, "commandLatestMessages");
-  queueIncomingAlerts(events);
   if (teamOperational) void renderMap(events);
 }
 
@@ -4383,6 +4448,16 @@ function renderTeam(team) {
   if (previousEveryoneAdmin !== currentEveryoneAdmin) lastFieldMapSignature = "";
   const tasksEnabled = currentTeamModules.includes("tasks");
   teamOperational = role === "gateway" ? Boolean(team.created) : Boolean(team.joined);
+  const statusDestination = teamOperational ? team.destination : null;
+  if (statusDestination !== operatorStatusDestination) {
+    operatorStatusDestination = statusDestination;
+    setOperatorStatusSnapshot(null);
+    if (liveVoiceSocket) {
+      liveVoiceSocket.close(1000, "Team changed");
+      liveVoiceSocket = null;
+      setLiveVoiceAvailability(false, 0);
+    }
+  }
   const access = JSON.stringify([team.join_code, team.joined, team.hosted, team.membership_status, currentTeamAdmin]);
   if (intelTeamAccess !== access) {
     intelTeamAccess = access;
@@ -4663,7 +4738,7 @@ function renderFieldOperators(events) {
   $("opsOperatorList").innerHTML = values.map(([sender, operator]) => `
     <article class="operator ops-operator">
       <div class="ops-operator-copy">
-        <strong><b class="operator-glyph" style="color:${operatorColor(operator.color)}">${operatorGlyph(operator.icon)}</b> ${escapeHtml(operator.callsign)}</strong>
+        ${operatorHeading(operator, sender)}
         <span>${timeLabel(operator.last_seen)} · ${operator.count} events</span>
         <span>${shortHash(sender)}</span>
       </div>
@@ -4755,9 +4830,11 @@ async function refreshFeed() {
   if (role !== "field" || feedLoading) return;
   if (!commsOnly && !commandDisplay() && !fieldMap && !fieldMapReady) void renderFieldMap(fieldEvents);
   feedLoading = true;
+  const statusDestination = operatorStatusDestination;
   try {
     const response = await fetch("/api/feed", {cache: "no-store"});
     const data = await response.json();
+    if (statusDestination !== operatorStatusDestination) return;
     if (commsOnly && (response.status === 409 || data.team?.joined === false)) {
       teamOperational = false;
       void refresh();
@@ -4768,10 +4845,11 @@ async function refreshFeed() {
       connectivityProbe = {at: Date.now(), online: data.network?.online !== false, ms: data.network?.response_ms};
       fieldQueuedEvents = Number(data.network?.queued || 0);
       renderConnectivity();
-      queueIncomingAlerts([...(data.events || []), ...(data.private_events || [])]);
+      queueIncomingAlerts([...(data.events || []), ...(data.private_events || [])], data.team?.joined_at);
       return;
     }
     if (data.team) renderTeam(data.team);
+    setOperatorStatusSnapshot(data.operator_status);
     renderMissionSync(data.mission_sync);
     fieldFeedOnline = data.network?.online !== false;
     fieldQueuedEvents = Number(data.network?.queued || 0);
@@ -4782,7 +4860,7 @@ async function refreshFeed() {
     saveFieldEventCache(fieldTeamDestination, fieldEvents);
     const incomingEvents = combinedFieldFeedEvents();
     primeRecentVoiceTranscripts(incomingEvents);
-    queueIncomingAlerts(incomingEvents);
+    queueIncomingAlerts(incomingEvents, data.team?.joined_at);
     renderLatestMessages(fieldEvents);
     renderFieldOperators(fieldEvents);
     renderFieldFeed(incomingEvents);
@@ -4797,6 +4875,7 @@ async function refreshFeed() {
     $("fieldFeedSync").classList.toggle("synced", fieldFeedOnline);
   } catch (error) {
     fieldFeedOnline = false;
+    setOperatorStatusSnapshot(null);
     connectivityProbe = {at: Date.now(), online: false};
     renderConnectivity();
     $("fieldFeedSync").textContent = fieldMapOnline ? "MAP ONLINE · RNS OFFLINE" : "RNS OFFLINE";
@@ -4876,6 +4955,7 @@ async function refresh({pullFeed = true} = {}) {
       syncAutomaticLocationSharing(Boolean(state.team.joined));
     }
     if (role === "gateway") {
+      setOperatorStatusSnapshot(state.operator_status);
       commandEvents = withDisplayWaypointLabels(state.events || []);
       const mailbox = state.team.created ? await fetch("/api/private/messages", {cache: "no-store"})
         .then(response => response.ok ? response.json() : null)
@@ -4893,6 +4973,7 @@ async function refresh({pullFeed = true} = {}) {
       fieldQueuedEvents = Number(state.network.queued_events || 0);
       fieldEvents = withDisplayWaypointLabels(state.events || []);
       $("destinationHash").textContent = state.team.destination || "";
+      if (state.team.joined) queueIncomingAlerts(fieldEvents, state.team.joined_at);
       renderJoinedCommand(fieldEvents);
     } else {
       $("fieldIdentity").textContent = state.network.identity;
@@ -5052,6 +5133,8 @@ async function joinWithCode(joinCode, button) {
   try {
     const data = await postJson("/api/team/join", {join_code: joinCode, callsign: $("joinCallsign").value});
     $("joinCodeInput").value = data.team.join_code;
+    $("joinCallsign").value = data.event.callsign;
+    renderUser({...currentUser, callsign: data.event.callsign});
     renderTeam(data.team);
     showDelivery(data.delivery);
     toast(data.delivery?.status === "queued"
@@ -5191,8 +5274,6 @@ function applyQueuedFieldEvent(data) {
   };
   fieldQueuedEvents = Number(data.delivery.queued || fieldQueuedEvents || 1);
   if (commsOnly) return;
-  // The local API projects status updates onto their original pin on refresh.
-  if (event.type === "marker.status") return;
   fieldEvents = withDisplayWaypointLabels([
     event,
     ...fieldEvents.filter((existing) => existing.id !== event.id),
@@ -5335,6 +5416,7 @@ function updateMovementSharingUi() {
   button.setAttribute("aria-label", active ? "Stop sharing movement trail" : "Start sharing movement trail");
   button.title = active ? "Automatic location updates are active" : "Resume automatic location updates";
   button.querySelector("span").textContent = active ? "AUTO" : "LOC";
+  publishOperatorStatus();
 }
 
 function stopMovementSharing({announce = true, persist = true} = {}) {
@@ -5471,6 +5553,7 @@ function updateCommsMode(teamName) {
   document.body.classList.toggle("field-comms-only", active);
   $("fieldRadioPage").classList.toggle("hidden", !active);
   if (teamName !== undefined) $("fieldRadioTeam").textContent = teamName || "Joined team";
+  publishOperatorStatus();
 }
 
 $("commsOnlyToggle").addEventListener("click", () => {
@@ -5993,7 +6076,8 @@ $("fieldCreateTeam").addEventListener("click", async (event) => {
       modules,
       callsign: $("joinCallsign").value,
     });
-    renderUser({...currentUser, callsign: $("joinCallsign").value.trim() || currentUser.callsign});
+    $("joinCallsign").value = team.event.callsign;
+    renderUser({...currentUser, callsign: team.event.callsign});
     renderTeam(team);
     if (team.delivery) showDelivery(team.delivery);
     toast("Team created · this device is now the Reticulum host");
@@ -6209,6 +6293,23 @@ $("fieldTaskList").addEventListener("click", async (event) => {
   }
 });
 
+function uppercaseCallsignInput(event) {
+  if (event.isComposing) return;
+  const input = event.currentTarget;
+  const value = input.value;
+  const uppercase = value.toUpperCase();
+  if (value === uppercase) return;
+  const {selectionStart, selectionEnd, selectionDirection} = input;
+  input.value = uppercase;
+  input.setSelectionRange(value.slice(0, selectionStart).toUpperCase().length,
+    value.slice(0, selectionEnd).toUpperCase().length, selectionDirection);
+}
+
+for (const id of ["settingsCallsign", "joinCallsign"]) {
+  $(id).addEventListener("input", uppercaseCallsignInput);
+  $(id).addEventListener("compositionend", uppercaseCallsignInput);
+}
+
 $("userSettingsToggle").addEventListener("click", () => {
   const panel = $("userSettingsPanel");
   const willOpen = panel.classList.contains("hidden");
@@ -6217,7 +6318,7 @@ $("userSettingsToggle").addEventListener("click", () => {
   panel.classList.toggle("hidden", !willOpen);
   $("userSettingsToggle").setAttribute("aria-expanded", String(willOpen));
   if (willOpen) {
-    renderUser(currentUser);
+    renderUserOptions();
     loadTtsVoiceSettings();
     refreshOfflineMaps();
     loadNetworkSettings();
@@ -6290,7 +6391,6 @@ $("offlineMapList").addEventListener("click", async (event) => {
 });
 
 $("closeUserSettings").addEventListener("click", () => {
-  renderUser(currentUser);
   $("userSettingsPanel").classList.add("hidden");
   $("userSettingsToggle").setAttribute("aria-expanded", "false");
 });
@@ -6667,7 +6767,7 @@ async function initializeWorkspace() {
     document.body.classList.add("all-teams-mode");
     $("roleLabel").textContent = "COMMAND";
     $("networkToggle").classList.add("hidden");
-    const {startAllTeamsView} = await import("./all-teams-view.js?v=20261126-1");
+    const {startAllTeamsView} = await import("./all-teams-view.js?v=20261127-1");
     await startAllTeamsView({mapStyle: mapStyleDefinition, initialStyle: mapStyleMode, setStyle: toggleMapStyle, onMapReady: (map, Popup) => intelPacks.attachMap(map, {Popup})});
     return;
   }

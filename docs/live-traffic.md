@@ -31,11 +31,12 @@ AIS vessel types are self-reported. **Commercial** is inferred from cargo, tanke
 
 ### Click to show a recent track
 
-Selecting an aircraft or vessel shows its available observed positions as a dashed
-line, without moving the map camera. Only the selected target's track is shown;
-close its popup or click elsewhere to clear it. It updates with new reports and
-survives base-map changes. Filtering out, disabling or expiring the target clears
-the selection.
+Selecting an aircraft or vessel follows its position and shows its available
+observed track as a dashed line. Use **Center** to reposition once, **Pause follow**
+to pan freely, or **Show track** to frame the path. Framing the track pauses follow
+until you choose **Resume follow**. Only the selected target's track is shown.
+It updates with new reports and survives base-map changes. Filtering out or
+disabling the target clears the selection.
 
 For a selected aircraft, Reticom requests its full trace from the [ADSB.lol API](https://api.adsb.lol/docs) and merges available fixes from the last 24 hours with locally recorded reports. The request sends the aircraft's public ICAO address. If the API is unavailable, the map uses local fixes. Expand **Flight details** to open the aircraft's daily history on ADSB.lol.
 
@@ -58,7 +59,8 @@ invalid speed/course does not invent motion. No acceleration, turn prediction,
 collision avoidance or route-following is implied.
 
 One animation loop updates traffic only, capped at 30 frames/sec, with no extra
-network polling or map-camera movement. Hidden maps and idle predictions stop
+network polling. The camera tracks the selected target while follow is active.
+Hidden maps and idle predictions stop
 animating. Reduced-motion mode shows reported positions without prediction or
 interpolation. Disabling/removing a layer clears its interpolation state.
 
